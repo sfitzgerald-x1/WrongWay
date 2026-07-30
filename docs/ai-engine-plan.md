@@ -10,7 +10,8 @@
 - **Recommended deployment path:** JavaScript reference engine → native/WASM
   alpha-beta engine → optional Gumbel AlphaZero training → measured hybrid.
 - **Primary strength bar:** At least a 66% win rate against the pinned current
-  Hard AI under the paired, seeded evaluation protocol defined below.
+  Hard product behavior under the paired evaluation protocol defined below,
+  with a paired 95% confidence interval excluding 50%.
 - **Non-goal:** Claiming that full 9×9, ten-barricade WrongWay is solved.
 
 ## Executive decision
@@ -59,12 +60,14 @@ only when it is blocked. The 1v1 engine must preserve the former behavior; 2v2
 should remain outside the first extraction unless its rule is deliberately
 changed.
 
-Core 1v1 wall legality is already shared through `tryWall`, but it is coupled
-to mutable browser globals such as `ROWS`, `COLS`, `CUR_MAP`, and `_hamCtx` in
-[`js/game-logic.js`](../js/game-logic.js#L159). AI candidate generation and
-special-mode policy remain spread through [`js/ai.js`](../js/ai.js) and inline
-client code. A port made before these boundaries are explicit could be fast,
-deterministic, and wrong.
+Core 1v1 wall legality is already shared through `tryWall`, but its base path
+functions depend on mutable `ROWS` and `COLS` globals. Hammer placement adds the
+mutable `_hamCtx` channel in
+[`js/game-logic.js`](../js/game-logic.js#L159), while wall destruction reads
+`CUR_MAP` through `isSteelWall`. AI candidate generation and special-mode
+policy remain spread through [`js/ai.js`](../js/ai.js) and inline client code.
+A port made before these boundaries are explicit could be fast, deterministic,
+and wrong.
 
 ### The current Hard bot omits strategic wall classes
 
@@ -121,9 +124,9 @@ ruleset version
 
 The first ruleset is `normal-duel-v1` with special modes and external clocks
 disabled. It supports 9×9 Duel and 7×7 Blitz. Classic is not just another Duel
-size: it is 9×13, starts both pawns on the bottom row, and gives both players
-goal row 0. Chaos, Hammer, random drops, Classic, and 2v2 require separately
-versioned contracts or adapters rather than implicit reuse.
+size: it has 9 columns × 13 rows, starts both pawns on the bottom row, and gives
+both players goal row 0. Chaos, Hammer, random drops, Classic, and 2v2 require
+separately versioned contracts or adapters rather than implicit reuse.
 
 ### Position and game state
 
@@ -176,8 +179,9 @@ A wall is legal in `normal-duel-v1` only when:
 2. it does not overlap or cross an existing wall under current geometry rules;
 3. both players retain a wall-only path to their goal rows.
 
-Pawn locations do not participate in the normal-duel connectivity check. This
-matches the base path check in
+Each pawn square is the source of its own normal-duel connectivity search, but
+neither pawn is treated as an obstacle to path traversal. This matches the base
+path check in
 [`js/game-logic.js`](../js/game-logic.js#L167).
 
 Hammer is explicitly different: `_hamCtx` can reject a placement based on pawn
@@ -298,9 +302,9 @@ The Rust crate should compile to:
 - Canonicalize the left/right mirror symmetry for Duel; separately evaluate
   row-flip plus player-swap normalization only for configurations where starts,
   goals, and rules prove it valid. Do not apply it to Classic.
-- Evaluate a wall-cut fast path against the existing disjoint-path references
-  in `disjointPaths2`, `aiDisjoint`, and `worstWallDelay`; retain full BFS as the
-  correctness reference.
+- Evaluate a wall-cut fast path against the existing `disjointPaths2` and
+  `aiDisjoint` implementations and compare its ordering value with
+  `worstWallDelay`; retain full BFS as the correctness reference.
 - Replay every JavaScript golden trajectory and compare every legal action and
   transition.
 
@@ -351,10 +355,17 @@ replays before making product-performance claims about the oracle's hit rate.
 
 **Exit gate**
 
-- At least a 66% win rate against a pinned current-Hard baseline under paired
-  openings, injected random seeds, and the same move-time budget on recorded
-  hardware. Win rate is `wins / all completed games`; draws are not counted as
-  wins, and the reported confidence interval must exclude 50%.
+- At least a 66% win rate against the pinned current-Hard product baseline under
+  paired openings and the same move-time budget on recorded hardware. The
+  baseline is `aiDuelHard` plus the client anti-stall replacement and
+  `recentAi` history behavior from commit `46a871c7`.
+- Win rate is `wins / all scheduled valid games`; draws are not wins. Report a
+  paired-cluster 95% confidence interval over opening pairs, whose lower bound
+  must exceed 50%, plus the companion score rate
+  `(wins + 0.5 × draws) / games` and raw draw rate.
+- A candidate crash, illegal action, or engine deadline failure counts as a
+  loss. Only predeclared external harness/hardware failures may void a game,
+  in which case the entire opening pair is rerun and the void is reported.
 - 100% agreement with exact reduced-position suites.
 - No deadline overrun beyond a defined small tolerance in native or WASM builds.
 - Full-width verification of all headline match results.
@@ -462,10 +473,19 @@ opening, play a pair with the agents on opposite sides. Report:
 - average and percentile move time;
 - nodes, completed depth, and wall/pawn action mix.
 
-Run the legacy bots with injected deterministic random seeds. Use fixed
-node/depth budgets for reproducible regression tests and pinned-hardware
-wall-clock budgets for product-strength claims. Use SPRT or an equivalent
-sequential gate for engine promotions. Keep two non-binding diagnostic suites:
+Pin the baseline to `aiDuelHard` as invoked through `aiMove` for Duel, including
+the client anti-stall replacement and `recentAi` window, at commit `46a871c7`.
+Refactor its `Date.now()` dependency behind an injectable monotonic
+clock/deadline without changing search decisions. Use the real 700 ms deadline
+on pinned hardware for the primary product-strength claim and a deterministic
+logical clock or fixed node/depth budget for reproducible regression tests.
+Inject random seeds for any ladder agent that uses randomness.
+
+Use opening pairs as the statistical cluster when computing the 95% confidence
+interval so the two side-swapped games are not treated as independent.
+Predeclare game count, opening book, invalid-run policy, and stopping rule; use
+SPRT or an equivalent sequential gate for subsequent engine promotions. Keep
+two non-binding diagnostic suites:
 
 - exact solved positions, which require 100% value/action agreement;
 - adversarial probes targeting wall defense, wall chains, corridor traps,
