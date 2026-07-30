@@ -9,9 +9,9 @@
   the foundation and benchmark for learned search.
 - **Recommended deployment path:** JavaScript reference engine → native/WASM
   alpha-beta engine → optional Gumbel AlphaZero training → measured hybrid.
-- **Primary strength bar:** At least a 66% win rate against the pinned current
-  Hard product behavior under the paired evaluation protocol defined below,
-  with a paired 95% confidence interval excluding 50%.
+- **Primary strength bar:** An observed win rate of at least 66% against the
+  pinned current Hard product behavior over at least 200 opening pairs, plus a
+  separate paired 95% confidence interval demonstrating superiority over 50%.
 - **Non-goal:** Claiming that full 9×9, ten-barricade WrongWay is solved.
 
 ## Executive decision
@@ -355,17 +355,21 @@ replays before making product-performance claims about the oracle's hit rate.
 
 **Exit gate**
 
-- At least a 66% win rate against the pinned current-Hard product baseline under
-  paired openings and the same move-time budget on recorded hardware. The
-  baseline is `aiDuelHard` plus the client anti-stall replacement and
-  `recentAi` history behavior from commit `46a871c7`.
-- Win rate is `wins / all scheduled valid games`; draws are not wins. Report a
-  paired-cluster 95% confidence interval over opening pairs, whose lower bound
-  must exceed 50%, plus the companion score rate
+- An observed win rate of at least 66% against the pinned current-Hard product
+  baseline over at least 200 opening pairs (400 side-swapped games), with the
+  same move-time budget on recorded hardware. This point-estimate target is not
+  presented as proof that the population win probability is at least 66%.
+- The baseline is the client's direct `aiDuelHard` call for Duel, plus the
+  anti-stall move replacement, per-game `aiProgRef` reset, and `recentAi`
+  history behavior from commit `46a871c7`.
+- Win rate is `wins / completed games after permitted pair reruns`; draws are
+  not wins. Report a paired-cluster 95% confidence interval over opening pairs,
+  whose lower bound must exceed 50%, plus the companion score rate
   `(wins + 0.5 × draws) / games` and raw draw rate.
-- A candidate crash, illegal action, or engine deadline failure counts as a
-  loss. Only predeclared external harness/hardware failures may void a game,
-  in which case the entire opening pair is rerun and the void is reported.
+- A crash, illegal action, null/no-move result, or engine deadline failure by
+  either agent counts as that agent's loss. Only predeclared external
+  harness/hardware failures may void a game, in which case the entire opening
+  pair is rerun and the void is reported.
 - 100% agreement with exact reduced-position suites.
 - No deadline overrun beyond a defined small tolerance in native or WASM builds.
 - Full-width verification of all headline match results.
@@ -473,8 +477,9 @@ opening, play a pair with the agents on opposite sides. Report:
 - average and percentile move time;
 - nodes, completed depth, and wall/pawn action mix.
 
-Pin the baseline to `aiDuelHard` as invoked through `aiMove` for Duel, including
-the client anti-stall replacement and `recentAi` window, at commit `46a871c7`.
+Pin the baseline to the client's direct `aiDuelHard` call for
+`map === 'duel' && difficulty === 'hard'`, including the anti-stall replacement,
+its per-game counter reset, and the `recentAi` window, at commit `46a871c7`.
 Refactor its `Date.now()` dependency behind an injectable monotonic
 clock/deadline without changing search decisions. Use the real 700 ms deadline
 on pinned hardware for the primary product-strength claim and a deterministic
@@ -483,9 +488,18 @@ Inject random seeds for any ladder agent that uses randomness.
 
 Use opening pairs as the statistical cluster when computing the 95% confidence
 interval so the two side-swapped games are not treated as independent.
-Predeclare game count, opening book, invalid-run policy, and stopping rule; use
-SPRT or an equivalent sequential gate for subsequent engine promotions. Keep
-two non-binding diagnostic suites:
+Draw at least 200 openings from a documented, versioned, seeded distribution of
+legal balanced 4–6-ply positions; the interval's population claim is limited to
+that distribution. Predeclare game count, opening generator/book,
+invalid-run policy, and stopping rule; use SPRT or an equivalent sequential
+gate for subsequent engine promotions.
+
+Both agents are adjudicated by the same goal, repetition, and ply-cap rules.
+The baseline anti-stall replacement may reduce its repetition-draw frequency;
+that behavior is intentionally part of the pinned product baseline and the raw
+draw-rate split must be reported.
+
+Keep two non-binding diagnostic suites:
 
 - exact solved positions, which require 100% value/action agreement;
 - adversarial probes targeting wall defense, wall chains, corridor traps,
