@@ -174,10 +174,10 @@ function wallCandidates(targetPos,walls,depth,goalRow=0){
   return[...result];
 }
 
-function shouldPickupItem(aiPos,humanPos,walls,aiPath,chaosItem,aiBarr,aiGoal=0){
+function shouldPickupItem(aiPos,humanPos,walls,aiPath,chaosItem,aiBarr,aiGoal=0,duelRules=null){
   if(!chaosItem||!aiPath)return null;
   // Item direkt erreichbar?
-  const moves=getMovesFrom(aiPos,humanPos,walls);
+  const moves=duelRules?duelRules.moves(aiPos,humanPos,walls,true):getMovesFrom(aiPos,humanPos,walls);
   const direct=moves.find(m=>m.r===chaosItem.r&&m.c===chaosItem.c);
   if(direct)return direct; // sofort einsacken
   // Detour-Berechnung: AI → Item → Ziel vs AI → Ziel
@@ -218,18 +218,49 @@ function moveTowardGoal(aiPos,humanPos,walls,aiPath){
   return null;
 }
 
-function aiEasy(aiPos,humanPos,walls,barrLeft,chaosItem,aiGoal=0,humGoal=0){
+// Expliziter Rules-Kontext fuer normale lokale Duelle. Spezialmodi und alle
+// server-autoritativen Spiele behalten die bisherigen globalen Implementierungen.
+function createDuelAiRules(scope,aiGoal,humGoal){
+  const consumer=typeof globalThis!=='undefined'?globalThis.NormalDuelConsumer:null;
+  if(scope&&!consumer)throw new Error('normal-duel-v1 adapter is unavailable');
+  if(consumer&&consumer.classify(scope).eligible){
+    return{
+      moves:(aiPos,humanPos,walls,forAi)=>consumer.legalMoves(scope,{
+        pA:humanPos,pB:aiPos,walls,turn:forAi?'B':'A'
+      }),
+      wall:(aiPos,humanPos,walls,key,forAi)=>consumer.tryWall(scope,{
+        pA:humanPos,pB:aiPos,walls,turn:forAi?'B':'A'
+      },key),
+      toward:(aiPos,humanPos,walls,aiPath)=>consumer.moveTowardGoal(scope,{
+        pA:humanPos,pB:aiPos,walls,turn:'B'
+      },aiPath),
+      source:'normal-duel-v1'
+    };
+  }
+  return{
+    moves:(aiPos,humanPos,walls,forAi)=>getMovesFrom(forAi?aiPos:humanPos,forAi?humanPos:aiPos,walls),
+    wall:(aiPos,humanPos,walls,key)=>tryWall(key,walls,aiPos,humanPos,aiGoal,humGoal),
+    toward:(aiPos,humanPos,walls,aiPath)=>moveTowardGoal(aiPos,humanPos,walls,aiPath),
+    source:'legacy'
+  };
+}
+
+function aiEasy(aiPos,humanPos,walls,barrLeft,chaosItem,aiGoal=0,humGoal=0,duelRules=null){
   // Schrittrichtung Richtung eigenes Ziel (oben=-1, unten=+1)
   const fwd=aiGoal>aiPos.r?1:-1;
   const aiPath=bfsPath(aiPos,walls,aiGoal);
   const humPath=bfsPath(humanPos,walls,humGoal);
   if(!aiPath)return null;
   const aiD=aiPath.length-1,humD=humPath?humPath.length-1:999;
-  if(aiD===1)return{type:'move',pos:aiPath[1]};
+  const legal=duelRules?duelRules.moves(aiPos,humanPos,walls,true):null;
+  if(duelRules){
+    const win=legal.find(m=>m.r===aiGoal);
+    if(win)return{type:'move',pos:win};
+  }else if(aiD===1)return{type:'move',pos:aiPath[1]};
 
   // Easy: nimmt das Item nur wenn quasi gratis (Detour-Toleranz in shouldPickupItem niedrig)
   if(chaosItem){
-    const pick=shouldPickupItem(aiPos,humanPos,walls,aiPath,chaosItem,barrLeft,aiGoal);
+    const pick=shouldPickupItem(aiPos,humanPos,walls,aiPath,chaosItem,barrLeft,aiGoal,duelRules);
     if(pick)return{type:'move',pos:pick};
   }
 
@@ -246,7 +277,9 @@ function aiEasy(aiPos,humanPos,walls,barrLeft,chaosItem,aiGoal=0,humGoal=0){
       [cands[i],cands[j]]=[cands[j],cands[i]];
     }
     for(const k of cands){
-      const next=tryWall(k,walls,aiPos,humanPos,aiGoal,humGoal);
+      const next=duelRules
+        ?duelRules.wall(aiPos,humanPos,walls,k,true)
+        :tryWall(k,walls,aiPos,humanPos,aiGoal,humGoal);
       if(!next)continue;
       const nh=bfsPath(humanPos,next,humGoal),na=bfsPath(aiPos,next,aiGoal);
       if(!nh||!na)continue;
@@ -256,9 +289,11 @@ function aiEasy(aiPos,humanPos,walls,barrLeft,chaosItem,aiGoal=0,humGoal=0){
       }
     }
   }
-  const m=moveTowardGoal(aiPos,humanPos,walls,aiPath);
+  const m=duelRules
+    ?duelRules.toward(aiPos,humanPos,walls,aiPath)
+    :moveTowardGoal(aiPos,humanPos,walls,aiPath);
   if(m)return{type:'move',pos:m};
-  const fallback=getMovesFrom(aiPos,humanPos,walls);
+  const fallback=legal||getMovesFrom(aiPos,humanPos,walls);
   return fallback.length?{type:'move',pos:fallback[0]}:null;
 }
 
@@ -295,14 +330,16 @@ function aiNormal(aiPos,humanPos,walls,barrLeft,chaosItem,aiGoal=0,humGoal=0){
 // Distanz = kürzester Pfad (BFS = A*-Ergebnis auf ungewichtetem Grid).
 // Bewertet jede sinnvolle Mauer und wählt strategisch zwischen Blocken und Vordrang.
 function duelDist(pos,walls,goal){const p=bfsPath(pos,walls,goal);return p?p.length-1:Infinity;}
-function duelBestWall(aiPos,humPos,walls,aiGoal,humGoal){
+function duelBestWall(aiPos,humPos,walls,aiGoal,humGoal,duelRules=null){
   // Kandidaten: Mauern entlang des Gegnerpfads (verlangsamen ihn maximal)
   const cand=wallCandidates(humPos,walls,5,humGoal);
   const baseHum=duelDist(humPos,walls,humGoal);
   const baseAi=duelDist(aiPos,walls,aiGoal);
   let best=null,bestScore=-Infinity;
   for(const key of cand){
-    const nw=tryWall(key,walls,aiPos,humPos,aiGoal,humGoal); // null = ungültig / sperrt jemanden ein
+    const nw=duelRules
+      ?duelRules.wall(aiPos,humPos,walls,key,true)
+      :tryWall(key,walls,aiPos,humPos,aiGoal,humGoal); // null = ungültig / sperrt jemanden ein
     if(!nw)continue;
     const newHum=duelDist(humPos,nw,humGoal);
     const newAi=duelDist(aiPos,nw,aiGoal);
@@ -368,13 +405,13 @@ function aiDuel(aiPos,humanPos,walls,aiBarr,humBarr,recentAi,chaosItem,aiGoal,hu
 
 // ── Duell-KI v2: klare Abstufung (Normal solide, Hard nahezu unschlagbar) ──
 // Misst wie stark ein einzelner Gegnerzug den eigenen Weg verzoegern koennte (klein = robuster).
-function worstWallDelay(target,walls,goal,pA,pB,goalA,goalB){
+function worstWallDelay(target,walls,goal,pA,pB,goalA,goalB,duelRules=null){
   const base=duelDist(target,walls,goal);
   if(base===Infinity)return 99;
   const cands=wallCandidates(target,walls,4,goal);
   let worst=0;
   for(const k of cands){
-    const nw=tryWall(k,walls,pA,pB,goalA,goalB);
+    const nw=duelRules?duelRules.wall(pA,pB,walls,k,false):tryWall(k,walls,pA,pB,goalA,goalB);
     if(!nw)continue;
     const nd=duelDist(target,nw,goal);
     if(nd===Infinity)continue;
@@ -390,16 +427,17 @@ function aiDisjoint(start,goal,walls,cap){
 
 // Duell-Normal: 1-Zug-Vorausschau, blockt optimal gewaehlt & rueckt klug vor.
 // Deutlich ueber Easy (optimale Mauerwahl statt zufaellig), klar unter Hard (kein Minimax).
-function aiDuelNormal(aiPos,humanPos,walls,aiBarr,humBarr,recentAi,chaosItem,aiGoal,humGoal){
-  const initMoves=getMovesFrom(aiPos,humanPos,walls);
+function aiDuelNormal(aiPos,humanPos,walls,aiBarr,humBarr,recentAi,chaosItem,aiGoal,humGoal,duelRules=null){
+  const rules=duelRules||createDuelAiRules(null,aiGoal,humGoal);
+  const initMoves=rules.moves(aiPos,humanPos,walls,true);
   for(const m of initMoves)if(m.r===aiGoal)return{type:'move',pos:m};
   if(chaosItem){const d=initMoves.find(m=>m.r===chaosItem.r&&m.c===chaosItem.c);if(d)return{type:'move',pos:d};}
   const aiPath=bfsPath(aiPos,walls,aiGoal),humPath=bfsPath(humanPos,walls,humGoal);
   if(!aiPath)return{type:'move',pos:initMoves[0]||aiPos};
   const aiD=aiPath.length-1,humD=humPath?humPath.length-1:999;
-  const advance=()=>{const m=moveTowardGoal(aiPos,humanPos,walls,aiPath);return m?{type:'move',pos:m}:{type:'move',pos:(initMoves[0]||aiPath[1])};};
-  if(chaosItem){const pick=shouldPickupItem(aiPos,humanPos,walls,aiPath,chaosItem,aiBarr,aiGoal);if(pick)return{type:'move',pos:pick};}
-  const block=aiBarr>0?duelBestWall(aiPos,humanPos,walls,aiGoal,humGoal):null;
+  const advance=()=>{const m=rules.toward(aiPos,humanPos,walls,aiPath);return m?{type:'move',pos:m}:{type:'move',pos:(initMoves[0]||aiPath[1])};};
+  if(chaosItem){const pick=shouldPickupItem(aiPos,humanPos,walls,aiPath,chaosItem,aiBarr,aiGoal,rules);if(pick)return{type:'move',pos:pick};}
+  const block=aiBarr>0?duelBestWall(aiPos,humanPos,walls,aiGoal,humGoal,rules):null;
   // Gegner fuehrt oder gleichauf -> aggressiv blocken
   if(block&&humD<=aiD&&block.humDelay>=1&&block.aiCost<=1){
     const p=humD<aiD?0.85:0.55;
@@ -414,8 +452,9 @@ function aiDuelNormal(aiPos,humanPos,walls,aiBarr,humBarr,recentAi,chaosItem,aiG
 
 // Duell-Hard: Minimax (Alpha-Beta, Tiefe 3) + Pfad-Robustheit.
 // Sichert den eigenen Weg ab (schwer blockierbar) und blockt den Gegner vorausschauend.
-function aiDuelHard(aiPos,humanPos,walls,aiBarr,humBarr,recentAi,chaosItem,aiGoal,humGoal){
-  const initMoves=getMovesFrom(aiPos,humanPos,walls);
+function aiDuelHard(aiPos,humanPos,walls,aiBarr,humBarr,recentAi,chaosItem,aiGoal,humGoal,duelRules=null){
+  const rules=duelRules||createDuelAiRules(null,aiGoal,humGoal);
+  const initMoves=rules.moves(aiPos,humanPos,walls,true);
   for(const m of initMoves)if(m.r===aiGoal)return{type:'move',pos:m};
   if(chaosItem){const direct=initMoves.find(m=>m.r===chaosItem.r&&m.c===chaosItem.c);if(direct)return{type:'move',pos:direct};}
   const recent=recentAi||[];
@@ -428,7 +467,7 @@ function aiDuelHard(aiPos,humanPos,walls,aiBarr,humBarr,recentAi,chaosItem,aiGoa
     const aiDI=aiPathInit.length-1;
     const humDI=humPathInit?humPathInit.length-1:999;
     if((aiBarr<=0&&!chaosItem)||(aiDI<=2&&humDI>aiDI)){
-      const m=moveTowardGoal(aiPos,humanPos,walls,aiPathInit);
+      const m=rules.toward(aiPos,humanPos,walls,aiPathInit);
       if(m)return{type:'move',pos:m};
     }
   }
@@ -454,7 +493,7 @@ function aiDuelHard(aiPos,humanPos,walls,aiBarr,humBarr,recentAi,chaosItem,aiGoa
     const oppGoal=forAi?humGoal:aiGoal;
     const acts=[];
     const myPath=bfsPath(me,w,meGoal);
-    const moves=getMovesFrom(me,opp,w);
+    const moves=rules.moves(ap,hp,w,forAi);
     for(const m of moves){
       let pri=0;
       if(myPath&&myPath.length>1&&myPath[1].r===m.r&&myPath[1].c===m.c)pri=30;
@@ -468,7 +507,7 @@ function aiDuelHard(aiPos,humanPos,walls,aiBarr,humBarr,recentAi,chaosItem,aiGoa
       const myOldD=myPath?myPath.length-1:0;
       const scored=[];
       for(const k of cands){
-        const next=tryWall(k,w,ap,hp,aiGoal,humGoal);
+        const next=rules.wall(ap,hp,w,k,forAi);
         if(!next)continue;
         const np=bfsPath(opp,next,oppGoal);
         if(!np)continue;
@@ -526,7 +565,7 @@ function aiDuelHard(aiPos,humanPos,walls,aiBarr,humBarr,recentAi,chaosItem,aiGoa
     // Resultierender Zustand fuer Robustheits-Bewertung (eigenen Weg schuetzen)
     const rPos=a.type==='move'?a.pos:aiPos;
     const rW=a.type==='move'?walls:a.walls;
-    const worst=worstWallDelay(rPos,rW,aiGoal,rPos,humanPos,aiGoal,humGoal);
+    const worst=worstWallDelay(rPos,rW,aiGoal,rPos,humanPos,aiGoal,humGoal,rules);
     s-=worst*9;                                  // schwer blockierbarer Weg = besser
     s+=aiDisjoint(rPos,aiGoal,rW,3)*6;           // mehr Ausweichrouten = besser
     if(a.type==='move'){
@@ -549,7 +588,7 @@ function aiDuelHard(aiPos,humanPos,walls,aiBarr,humBarr,recentAi,chaosItem,aiGoa
   }
   if(!bestAction){
     if(aiPathInit&&aiPathInit.length>1)return{type:'move',pos:aiPathInit[1]};
-    const fm=getMovesFrom(aiPos,humanPos,walls);
+    const fm=rules.moves(aiPos,humanPos,walls,true);
     if(fm.length)return{type:'move',pos:fm[0]};
     return null;
   }
