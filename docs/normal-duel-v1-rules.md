@@ -155,6 +155,19 @@ cases pin failures for terminal actions and excluded mechanics.
 must match the current `tryWall`; `false` marks a deliberate contract addition
 that legacy `tryWall` leaves to its caller, currently stock and bounds checks.
 
+The versioned replay corpus at
+`tests/fixtures/normal-duel-v1-trajectories.jsonl` freezes complete legal
+transition samples, including seeded and explicitly selected terminal lines.
+Its adjacent manifest records the generator identity and SHA-256. The versioned
+perft corpus at `tests/fixtures/normal-duel-perft-v1.json` freezes exact-depth
+action-tree counts and root divides for selected states; its adjacent manifest
+also records the generator identity and SHA-256. Perft traverses canonical
+`legalActions` with the engine's single-candidate `applyLegalAction` transition;
+the test suite cross-checks its smaller frozen cases through fully checked
+`applyAction`. Both corpora are generated from the reference engine and MUST
+be byte-for-byte reproducible with
+`npm run check:normal-duel-corpora`.
+
 ## Invariants and examples
 
 Pawns are distinct/in-bounds; stocks and ply are non-negative integers; walls
