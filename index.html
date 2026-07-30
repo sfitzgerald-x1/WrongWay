@@ -862,6 +862,21 @@
 </script>
 
 <script src="js/i18n.js?v=103"></script>
+<script>
+window.__normalDuelConsumerReady=false;
+document.documentElement.dataset.normalDuelConsumer='loading';
+window.normalDuelConsumerReady=import('./js/normal-duel-browser-adapter.mjs')
+  .then(function(){
+    window.__normalDuelConsumerReady=!!window.NormalDuelConsumer;
+    document.documentElement.dataset.normalDuelConsumer=window.__normalDuelConsumerReady?'ready':'error';
+    return window.NormalDuelConsumer;
+  })
+  .catch(function(error){
+    document.documentElement.dataset.normalDuelConsumer='error';
+    console.error('normal-duel-v1 adapter failed to load',error);
+    throw error;
+  });
+</script>
 <script src="js/game-logic.js"></script>
 <script src="js/ai.js"></script>
 <script src="js/sound.js"></script>
@@ -4626,7 +4641,7 @@ function App(){
   const xpBeforeMatchRef=useRef(null);
   const pendingXpUpdateRef=useRef(null);
   const S=useRef({});
-  S.current={pA,pB,walls,barrLeft,turn,winner,moveHist,gameMode,lobbyId,onlineRole,rematchA,rematchB,rematchDeclined,oppLeft,gameNum,chaosItem,goldenWalls,hammers,hammerHeld,hammerUsed,hammerMode,chaosMode,dropMode,gaveUp,gameTimeMode,isRanked,rankedMode,rankedMyRating,rankedOppRating,rankedOppKey,playerNames,selectedMap,duelSize,screen,bugOpen,repOpen,repSrc};
+  S.current={pA,pB,walls,barrLeft,turn,winner,moveHist,gameMode,lobbyId,onlineRole,rematchA,rematchB,rematchDeclined,oppLeft,gameNum,chaosItem,goldenWalls,hammers,hammerHeld,hammerUsed,hammerMode,chaosMode,dropMode,gaveUp,gameTimeMode,isRanked,rankedMode,rankedMyRating,rankedOppRating,rankedOppKey,playerNames,selectedMap,duelSize,initialStock:gameBarr,screen,bugOpen,repOpen,repSrc};
   // UI-Testhaken (?uitest=ban|warn): rein lokale Dummy-Overlays fuer Design-Sichtung, keine Datenwege
   useEffect(()=>{
     try{
@@ -5579,6 +5594,11 @@ function App(){
       const mp=st.selectedMap||'classic';
       const aiGoal=goalRowOf('B',mp);   // Bot
       const humGoal=goalRowOf('A',mp);  // Mensch
+      const duelRules=createDuelAiRules({
+        gameMode:st.gameMode,map:mp,duelSize:st.duelSize,gameTimeMode:st.gameTimeMode,
+        chaosMode:!!st.chaosMode,hammerMode:!!st.hammerMode,dropMode:!!st.dropMode,
+        isRanked:!!st.isRanked,initialStock:st.initialStock,is2v2:false
+      },aiGoal,humGoal);
       // Letzte 5 AI-Positionen (inkl. aktuelle) für Anti-Cycling
       const recentAi=[{r:b.r,c:b.c}];
       for(let i=moves.length-1;i>=0&&recentAi.length<6;i--){
@@ -5624,9 +5644,11 @@ function App(){
         _hamCtx=st.hammerMode?buildHamCtx(hms,hh,a,b):null;
         // Duell-Modus: dedizierte aggressive/strategische KI (A*-Distanz, Blocken/Vordrang)
         if(mp==='duel'&&aiDifficulty==='hard'){
-          d=aiDuelHard(b,a,w,bl.B,bl.A,recentAi,chaosItem,aiGoal,humGoal);
+          d=aiDuelHard(b,a,w,bl.B,bl.A,recentAi,chaosItem,aiGoal,humGoal,duelRules);
         }else if(mp==='duel'&&aiDifficulty==='normal'){
-          d=aiDuelNormal(b,a,w,bl.B,bl.A,recentAi,chaosItem,aiGoal,humGoal);
+          d=aiDuelNormal(b,a,w,bl.B,bl.A,recentAi,chaosItem,aiGoal,humGoal,duelRules);
+        }else if(mp==='duel'&&aiDifficulty==='easy'){
+          d=aiEasy(b,a,w,bl.B,chaosItem,aiGoal,humGoal,duelRules);
         }else{
           d=aiMove(b,a,w,bl.B,bl.A,aiDifficulty,recentAi,chaosItem,aiGoal,humGoal);
         }
@@ -5645,7 +5667,7 @@ function App(){
         if(afterD<beforeD||isItem)aiProgRef.current.stall=0;
         else aiProgRef.current.stall++;
         if(aiProgRef.current.stall>=3&&afterD>=beforeD&&!isItem&&beforeP){
-          const forced=moveTowardGoal(b,a,w,beforeP);
+          const forced=duelRules.toward(b,a,w,beforeP);
           if(forced){d={type:'move',pos:forced};aiProgRef.current.stall=0;}
         }
       }
@@ -6379,7 +6401,19 @@ function App(){
   },[replayStep,screen,moveHist,replayHistEntry,winner]);
 
   // ── Valid moves ──
-  const getValidMoves=(pos,opp,w)=>{
+  const normalDuelScopeOf=state=>({
+    gameMode:state.gameMode,map:state.selectedMap,duelSize:state.duelSize,
+    gameTimeMode:state.gameTimeMode,chaosMode:!!state.chaosMode,
+    hammerMode:!!state.hammerMode,dropMode:!!state.dropMode,
+    isRanked:!!state.isRanked,initialStock:state.initialStock,is2v2:false
+  });
+  const normalDuelRoute=state=>{
+    const consumer=window.NormalDuelConsumer;
+    if(!consumer)throw new Error('normal-duel-v1 adapter is unavailable');
+    const scope=normalDuelScopeOf(state);
+    return consumer.classify(scope).eligible?{consumer,scope}:null;
+  };
+  const legacyValidMoves=(pos,opp,w)=>{
     const moves=[];
     for(const[dr,dc]of[[-1,0],[1,0],[0,-1],[0,1]]){
       const nr=pos.r+dr,nc=pos.c+dc;
@@ -6396,6 +6430,19 @@ function App(){
       }else{moves.push({r:nr,c:nc});}
     }
     return moves;
+  };
+  const getValidMoves=(pos,opp,w)=>{
+    const state=S.current;
+    const route=normalDuelRoute(state);
+    return route
+      ?route.consumer.legalMoves(route.scope,{pA:state.pA,pB:state.pB,walls:w,turn:state.turn})
+      :legacyValidMoves(pos,opp,w);
+  };
+  const tryCurrentWall=(key,state)=>{
+    const route=normalDuelRoute(state);
+    return route
+      ?route.consumer.tryWall(route.scope,{pA:state.pA,pB:state.pB,walls:state.walls,turn:state.turn},key)
+      :tryWall(key,state.walls,state.pA,state.pB,goalRowOf('A',state.selectedMap),goalRowOf('B',state.selectedMap));
   };
 
   const cur=turn==='A'?pA:pB;
@@ -6540,7 +6587,7 @@ function App(){
           const{walls:w,pA:a,pB:b,barrLeft:bl,turn:curT,moveHist:mh}=S.current;
           if(bl[curT]>0){
             _hamCtx=S.current.hammerMode?buildHamCtx(S.current.hammers,S.current.hammerHeld,a,b):null;
-            const next=tryWall(key,w,a,b,goalRowOf('A',S.current.selectedMap),goalRowOf('B',S.current.selectedMap));
+            const next=tryCurrentWall(key,S.current);
             _hamCtx=null;
             if(next){
               playSound('wall');
@@ -6633,7 +6680,7 @@ function App(){
   const previewValid=useMemo(()=>{
     if(!previewKey)return false;
     _hamCtx=S.current.hammerMode?buildHamCtx(S.current.hammers,S.current.hammerHeld,S.current.pA,S.current.pB):null;
-    const v=!!tryWall(previewKey,S.current.walls,S.current.pA,S.current.pB,goalRowOf('A',selectedMap),goalRowOf('B',selectedMap));
+    const v=!!tryCurrentWall(previewKey,S.current);
     _hamCtx=null;return v;
   },[previewKey,selectedMap]);
 
@@ -13304,8 +13351,19 @@ class ErrorBoundary extends React.Component{
     return this.props.children;
   }
 }
-root.render(React.createElement(ErrorBoundary,null,React.createElement(App,null)));
-requestAnimationFrame(()=>requestAnimationFrame(()=>{if(loader)loader.style.display='none';}));
+window.normalDuelConsumerReady.then(function(consumer){
+  if(!consumer)throw new Error('normal-duel-v1 adapter did not publish its consumer');
+  root.render(React.createElement(ErrorBoundary,null,React.createElement(App,null)));
+  requestAnimationFrame(()=>requestAnimationFrame(()=>{if(loader)loader.style.display='none';}));
+}).catch(function(error){
+  document.documentElement.dataset.normalDuelConsumer='error';
+  try{wwReportErr(wwBuildErr('normal-duel-v1',error&&error.message?error.message:String(error),'',0,error&&error.stack));}catch(_){}
+  const message=document.getElementById('loader-msg');
+  if(message){
+    message.style.color='#ef4444';
+    message.textContent='Rules engine failed to load — reload the page';
+  }
+});
 </script>
 
 </body>
