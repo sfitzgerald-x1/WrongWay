@@ -1,4 +1,4 @@
-import * as THREE from 'three';
+import * as THREE from './vendor/three.module.min.js';
 import { OrbitControls } from './vendor/OrbitControls.js';
 import {
   SIZE,
@@ -58,6 +58,7 @@ renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.2;
 viewport.appendChild(renderer.domElement);
+window.dispatchEvent(new CustomEvent('wrongway:renderer-ready'));
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;

@@ -191,13 +191,39 @@
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-  <script type="importmap">
-    {
-      "imports": {
-        "three": "./js/vendor/three.module.min.js"
+  <script>
+    (function () {
+      var viewport = document.getElementById('viewport');
+      var started = false;
+
+      window.addEventListener('wrongway:renderer-ready', function () {
+        started = true;
+      });
+
+      function showStartupError(message) {
+        if (started || viewport.querySelector('canvas')) return;
+        var error = document.createElement('div');
+        var title = document.createElement('strong');
+        var detail = document.createElement('span');
+        error.className = 'render-error';
+        title.textContent = '3D renderer unavailable';
+        detail.textContent = String(message || 'The scene could not start in this browser.');
+        error.appendChild(title);
+        error.appendChild(detail);
+        viewport.replaceChildren(error);
       }
-    }
+
+      window.addEventListener('error', function (event) {
+        showStartupError(event.message);
+      });
+      window.addEventListener('unhandledrejection', function (event) {
+        showStartupError(event.reason && event.reason.message);
+      });
+      window.setTimeout(function () {
+        showStartupError('The scene took too long to initialize. Reload the page to try again.');
+      }, 3000);
+    }());
   </script>
-  <script type="module" src="js/concept-3d.js?v=2"></script>
+  <script type="module" src="js/concept-3d.js?v=3"></script>
 </body>
 </html>
