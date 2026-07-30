@@ -10,20 +10,18 @@ import { readFile } from 'node:fs/promises';
 import initialize, * as wasm from './normal-duel-wasm.mjs';
 
 export const ENGINE_ID = 'wrongway-normal-duel-wasm-search';
-export const DEFAULT_SEARCH_OPTIONS = Object.freeze({
-  maxDepth: 64,
-  transpositionCapacity: 262_144,
-  aspirationWindow: 64
-});
 
 // The parent deadline includes cold WASM JIT, JSON conversion, IPC, and the
 // engine's last budget poll. Leave enough headroom for a first move in a fresh
 // per-game subprocess instead of claiming that time as search.
-const STRENGTH_OVERHEAD_MARGIN_MS = 50;
+const STRENGTH_OVERHEAD_MARGIN_MS = 100;
 const REGRESSION_MODE = 'fixed-node-budget-v1';
 const STRENGTH_MODE = 'monotonic-deadline-v1';
 
 let initialized = null;
+// Kept as a tiny seam so the source-template unit test can fix the same clock
+// used by production without altering the one-argument adapter contract.
+const currentNow = () => performance.now();
 
 function fail(message) {
   throw new TypeError(`normal-duel-wasm candidate: ${message}`);
@@ -37,10 +35,6 @@ function safePositiveInteger(value, name) {
 function safeNonNegativeInteger(value, name) {
   if (!Number.isSafeInteger(value) || value < 0) fail(`${name} must be a non-negative safe integer`);
   return value;
-}
-
-function searchOptions() {
-  return { ...DEFAULT_SEARCH_OPTIONS };
 }
 
 function parsedCanonicalAction(value) {
@@ -66,6 +60,8 @@ function parsedCanonicalAction(value) {
 /**
  * Build the one-argument JSON payload accepted by the WASM exports. Strength
  * searches reserve a little wall-clock budget for JSON, IPC, and process work.
+ * Canonical candidate calls intentionally omit `options`: the strict boundary
+ * then applies the single Rust `SearchOptions::default` definition.
  *
  * The subprocess runtime supplies `limits.deadlineAtMs` from its own monotonic
  * clock immediately before invoking `selectAction`. Use it when present rather
@@ -75,12 +71,11 @@ export function searchInvocationForRequest(request) {
   if (!request || typeof request !== 'object' || !request.config || !request.state) {
     fail('selectAction request must include config and state');
   }
-  const options = searchOptions();
   if (request.mode === REGRESSION_MODE) {
     const nodeBudget = safePositiveInteger(request.limits?.nodeBudget, 'request.limits.nodeBudget');
     return Object.freeze({
       exportName: 'normalDuelSearchNodes',
-      payload: JSON.stringify({ config: request.config, state: request.state, nodeBudget, options })
+      payload: JSON.stringify({ config: request.config, state: request.state, nodeBudget })
     });
   }
   if (request.mode === STRENGTH_MODE) {
@@ -93,19 +88,21 @@ export function searchInvocationForRequest(request) {
       && !Number.isFinite(suppliedDeadlineMs)) {
       fail('request.limits.deadlineAtMs must be a finite number or null');
     }
-    const remainingUntilDeadlineMs = Number.isFinite(suppliedDeadlineMs)
-      ? suppliedDeadlineMs - performance.now()
+    // Derive the canonical integer budget from the requested allotment, then
+    // clamp it to the child deadline. Rounding the remaining fractional time
+    // upward avoids losing a whole search millisecond to sub-millisecond
+    // adapter setup while preserving almost the full overhead margin.
+    const requestedSearchMs = Math.floor(requestedMs) - STRENGTH_OVERHEAD_MARGIN_MS;
+    const deadlineSearchMs = Number.isFinite(suppliedDeadlineMs)
+      ? Math.ceil(suppliedDeadlineMs - currentNow()) - STRENGTH_OVERHEAD_MARGIN_MS
       : Infinity;
-    // The passed wall-clock allotment remains an independent upper bound. This
-    // also makes direct adapter use safe when no child-runtime deadline exists.
-    const availableMs = Math.min(requestedMs, remainingUntilDeadlineMs);
     const timeBudgetMs = Math.max(
       1,
-      Math.floor(availableMs) - STRENGTH_OVERHEAD_MARGIN_MS
+      Math.min(requestedSearchMs, deadlineSearchMs)
     );
     return Object.freeze({
       exportName: 'normalDuelSearchFor',
-      payload: JSON.stringify({ config: request.config, state: request.state, timeBudgetMs, options })
+      payload: JSON.stringify({ config: request.config, state: request.state, timeBudgetMs })
     });
   }
   fail(`unsupported request mode ${String(request.mode)}`);

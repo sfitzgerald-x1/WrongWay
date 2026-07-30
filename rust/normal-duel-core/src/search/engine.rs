@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use crate::{
-    compact_legal_codes, validate_state, Config, GameState, NormalDuelError, Outcome,
-    PreparedGameState, Result,
+    compact_legal_codes, compact_pawn_codes, validate_state, CodeList, Config, GameState,
+    NormalDuelError, Outcome, PreparedGameState, Result,
 };
 
 use super::budget::{DeadlineBudget, NodeBudget, SearchBudget};
@@ -28,7 +28,7 @@ impl Default for SearchOptions {
         Self {
             max_depth: 64,
             transposition_capacity: 1 << 18,
-            aspiration_window: 64,
+            aspiration_window: 256,
         }
     }
 }
@@ -50,7 +50,21 @@ impl SearchOptions {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SearchDiagnostics {
+    /// Category counters for tuning, not a closed accounting of [`SearchReport::nodes`].
+    /// Terminal nodes, TT returns, and the oracle's internal traversal are not
+    /// fully classified here, so these values must not be summed to infer a
+    /// total node count.
     pub root_action_count: usize,
+    /// Number of horizon nodes evaluated by the static evaluator. Immediate
+    /// pawn wins are exact tactical leaves and intentionally do not count.
+    pub static_leaf_count: u64,
+    /// Number of zero-depth nodes where the side to move had a legal pawn
+    /// move directly onto its goal row.
+    pub immediate_goal_horizon_hits: u64,
+    /// Number of positive-depth zero-wall oracle calls attempted.
+    pub zero_wall_oracle_queries: u64,
+    /// Number of oracle calls that completed and supplied an exact result.
+    pub zero_wall_oracle_solutions: u64,
     pub tt_probes: u64,
     pub tt_hits: u64,
     pub tt_bound_cutoffs: u64,
@@ -70,6 +84,13 @@ pub struct SearchReport {
     pub nodes: u64,
     pub stopped: bool,
     pub principal_variation: Vec<usize>,
+    /// Cumulative node totals after each fully committed iteration. An
+    /// interrupted iteration is deliberately absent, so this can differ from
+    /// [`Self::nodes`] when the final attempt exhausts the budget.
+    pub committed_iteration_nodes: Vec<u64>,
+    /// Root-perspective scores corresponding one-for-one to
+    /// [`Self::committed_iteration_nodes`].
+    pub committed_iteration_scores: Vec<i32>,
     pub diagnostics: SearchDiagnostics,
 }
 
@@ -126,6 +147,44 @@ impl<B: SearchBudget> SearchContext<'_, B> {
         }
     }
 
+    /// Return the exact score of a winning pawn move that is just beyond the
+    /// caller's nominal horizon. This is intentionally derived from the
+    /// compact *legal* pawn generator rather than a distance heuristic: jumps
+    /// and walls can make a goal-row square reachable or blocked in ways that
+    /// a coordinate-only check would get wrong.
+    ///
+    /// The score is from the current side-to-move perspective. Applying the
+    /// move would increment `state.ply` once and flip the turn, so encode that
+    /// same root-relative distance here without mutating the state.
+    fn immediate_goal_horizon_score(&mut self, state: &PreparedGameState) -> Option<i32> {
+        let mover = state.position.turn;
+        let goal_row = *self.config.goal_rows.get(mover);
+        // A pawn can change row by at most two in one legal move (a forward
+        // jump). This is only an exact impossibility guard; within two rows we
+        // still ask the compact legal generator so walls and permissive exits
+        // decide the result.
+        if state.position.pawns.get(mover).r.abs_diff(goal_row) > 2 {
+            return None;
+        }
+        let mut pawn_actions = CodeList::new();
+        compact_pawn_codes(
+            self.config,
+            &state.position,
+            state.position.board(),
+            &mut pawn_actions,
+        );
+        let goal_row = usize::from(goal_row);
+        let columns = usize::from(self.config.columns);
+        if !pawn_actions.iter().any(|code| code / columns == goal_row) {
+            return None;
+        }
+
+        self.diagnostics.immediate_goal_horizon_hits += 1;
+        let distance = state.ply.saturating_sub(self.root_ply).saturating_add(1);
+        let distance = i32::try_from(distance).unwrap_or(i32::MAX / 2);
+        Some(MATE_SCORE.saturating_sub(distance))
+    }
+
     fn negamax(
         &mut self,
         state: &mut PreparedGameState,
@@ -173,6 +232,13 @@ impl<B: SearchBudget> SearchContext<'_, B> {
         // zero-stock leaf could consume the entire remaining budget and
         // prevent an otherwise complete shallow iteration from committing.
         if depth == 0 {
+            if let Some(score) = self.immediate_goal_horizon_score(state) {
+                return Ok(Some(NodeValue {
+                    score,
+                    best_action: None,
+                }));
+            }
+            self.diagnostics.static_leaf_count += 1;
             return Ok(Some(NodeValue {
                 score: evaluate(self.config, state),
                 best_action: None,
@@ -180,6 +246,7 @@ impl<B: SearchBudget> SearchContext<'_, B> {
         }
 
         if state.position.stock.a == 0 && state.position.stock.b == 0 {
+            self.diagnostics.zero_wall_oracle_queries += 1;
             if let Some(hit) = self.oracle.solve(
                 self.config,
                 state,
@@ -187,6 +254,7 @@ impl<B: SearchBudget> SearchContext<'_, B> {
                 &mut self.nodes,
                 self.root_ply,
             )? {
+                self.diagnostics.zero_wall_oracle_solutions += 1;
                 return Ok(Some(NodeValue {
                     score: hit.score,
                     best_action: hit.best_action,
@@ -425,6 +493,8 @@ fn run<B: SearchBudget>(
             nodes: 0,
             stopped,
             principal_variation: Vec::new(),
+            committed_iteration_nodes: Vec::new(),
+            committed_iteration_scores: Vec::new(),
             diagnostics: SearchDiagnostics::default(),
         });
     }
@@ -437,6 +507,8 @@ fn run<B: SearchBudget>(
             nodes: 0,
             stopped: true,
             principal_variation: fallback.into_iter().collect(),
+            committed_iteration_nodes: Vec::new(),
+            committed_iteration_scores: Vec::new(),
             diagnostics: SearchDiagnostics {
                 root_action_count: root_actions.len,
                 ..SearchDiagnostics::default()
@@ -453,6 +525,8 @@ fn run<B: SearchBudget>(
             nodes: 0,
             stopped: true,
             principal_variation: fallback.into_iter().collect(),
+            committed_iteration_nodes: Vec::new(),
+            committed_iteration_scores: Vec::new(),
             diagnostics: SearchDiagnostics {
                 root_action_count: root_actions.len,
                 ..SearchDiagnostics::default()
@@ -467,6 +541,8 @@ fn run<B: SearchBudget>(
             nodes: 0,
             stopped: true,
             principal_variation: fallback.into_iter().collect(),
+            committed_iteration_nodes: Vec::new(),
+            committed_iteration_scores: Vec::new(),
             diagnostics: SearchDiagnostics {
                 root_action_count: root_actions.len,
                 ..SearchDiagnostics::default()
@@ -482,6 +558,8 @@ fn run<B: SearchBudget>(
             nodes: 0,
             stopped: true,
             principal_variation: fallback.into_iter().collect(),
+            committed_iteration_nodes: Vec::new(),
+            committed_iteration_scores: Vec::new(),
             diagnostics: SearchDiagnostics {
                 root_action_count: root_actions.len,
                 ..SearchDiagnostics::default()
@@ -507,6 +585,8 @@ fn run<B: SearchBudget>(
     let mut stopped = false;
     let mut previous_score = evaluate(config, &root);
     let mut selected_variation: Vec<_> = fallback.into_iter().collect();
+    let mut committed_iteration_nodes = Vec::with_capacity(usize::from(options.max_depth));
+    let mut committed_iteration_scores = Vec::with_capacity(usize::from(options.max_depth));
 
     for depth in 1..=options.max_depth {
         if context.stopped() {
@@ -570,6 +650,8 @@ fn run<B: SearchBudget>(
         previous_score = value.score;
         completed_depth = depth;
         selected_variation = candidate_variation;
+        committed_iteration_nodes.push(context.nodes);
+        committed_iteration_scores.push(value.score);
     }
 
     Ok(SearchReport {
@@ -579,6 +661,8 @@ fn run<B: SearchBudget>(
         nodes: context.nodes,
         stopped,
         principal_variation: selected_variation,
+        committed_iteration_nodes,
+        committed_iteration_scores,
         diagnostics: context.diagnostics,
     })
 }
@@ -648,6 +732,48 @@ mod tests {
             ply_cap: 64,
             ..zero_wall_config()
         }
+    }
+
+    fn horizon_block_config() -> Config {
+        Config {
+            rows: 7,
+            columns: 7,
+            start: Players {
+                a: Coord { r: 6, c: 3 },
+                b: Coord { r: 0, c: 3 },
+            },
+            goal_rows: Players { a: 0, b: 6 },
+            // A has exactly one wall to stop B's next goal move. B has no
+            // walls, which keeps the one-extra-ply reference exhaustive and
+            // compact without weakening the tactical condition under test.
+            initial_stock: Players { a: 1, b: 0 },
+            ply_cap: 64,
+            ..zero_wall_config()
+        }
+    }
+
+    fn horizon_block_state(config: &Config) -> GameState {
+        let mut state = create_initial_state(config).unwrap();
+        // A shuffles on its home row while B advances to row five. It is now
+        // A to move; B has a direct pawn win on the following ply unless A
+        // places one of the two legal horizontal blocking walls.
+        for code in [44, 10, 45, 17, 44, 24, 45, 31, 44, 38] {
+            state =
+                apply_legal_action(config, &state, &decode_action(config, code).unwrap()).unwrap();
+        }
+        state
+    }
+
+    fn horizon_jump_state(config: &Config) -> GameState {
+        let mut state = create_initial_state(config).unwrap();
+        // On B's turn, B is two rows from its goal and A occupies the square
+        // directly ahead. The permissive jump generator therefore exposes the
+        // exact two-row pawn win onto B's goal row.
+        for code in [44, 10, 45, 17, 44, 24, 45, 31, 38] {
+            state =
+                apply_legal_action(config, &state, &decode_action(config, code).unwrap()).unwrap();
+        }
+        state
     }
 
     fn plain_minimax(
@@ -725,6 +851,11 @@ mod tests {
     }
 
     #[test]
+    fn default_search_options_use_the_profiled_aspiration_window() {
+        assert_eq!(SearchOptions::default().aspiration_window, 256);
+    }
+
+    #[test]
     fn pvs_matches_plain_minimax_on_reachable_positions() {
         let config = shallow_search_config();
         let mut state = create_initial_state(&config).unwrap();
@@ -754,6 +885,150 @@ mod tests {
             let legal = crate::legal_action_codes(&config, &state).unwrap();
             assert!(legal.contains(&report.action_code.unwrap()));
         }
+    }
+
+    #[test]
+    fn horizon_goal_detection_matches_one_extra_ply_and_blocks_forced_win() {
+        let config = horizon_block_config();
+        let state = horizon_block_state(&config);
+        assert_eq!(state.position.turn, Player::A);
+        let root = PreparedGameState::from_game_state(&config, &state).unwrap();
+        let root_actions = compact_legal_codes(&config, &root);
+
+        // Classify the moves from exact generated legal pawn destinations;
+        // this does not rely on the static evaluator or assumed wall labels.
+        let mut must_block = Vec::new();
+        let mut loses_immediately = Vec::new();
+        for code in root_actions.iter() {
+            let mut child = root.clone();
+            child
+                .apply_generated_code(&config, code)
+                .expect("root action is generated legal");
+            let opponent_goal_is_legal =
+                compact_legal_codes(&config, &child)
+                    .iter()
+                    .any(|child_code| {
+                        child_code < config.cells()
+                            && child_code / usize::from(config.columns)
+                                == usize::from(*config.goal_rows.get(child.position.turn))
+                    });
+            if opponent_goal_is_legal {
+                loses_immediately.push(code);
+            } else {
+                must_block.push(code);
+            }
+        }
+        assert!(!must_block.is_empty());
+        assert!(!loses_immediately.is_empty());
+
+        // At the tactical leaf, the new depth-zero rule must equal a plain
+        // minimax expansion by one ply, including the root-relative mate
+        // distance. This is the immediate-win half of the horizon contract.
+        let non_blocking = loses_immediately[0];
+        let mut immediate_child = root.clone();
+        immediate_child
+            .apply_generated_code(&config, non_blocking)
+            .expect("classified non-blocking action is legal");
+        let mut reference_child = immediate_child.clone();
+        let expected_leaf = plain_minimax(&config, &mut reference_child, 1, root.ply).unwrap();
+        let mut context = SearchContext {
+            config: &config,
+            budget: NodeBudget::new(10_000),
+            tt: TranspositionTable::new(64),
+            heuristics: Heuristics::new(2, config.policy_size()),
+            oracle: ExactZeroWallOracle::new(),
+            root_ply: root.ply,
+            nodes: 0,
+            diagnostics: SearchDiagnostics::default(),
+        };
+        let immediate = context
+            .negamax(
+                &mut immediate_child,
+                0,
+                1,
+                NEG_INFINITY,
+                POS_INFINITY,
+                Some(non_blocking),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(immediate.score, expected_leaf.score);
+        assert_eq!(immediate.score, MATE_SCORE - 2);
+        assert_eq!(context.diagnostics.immediate_goal_horizon_hits, 1);
+        assert_eq!(context.diagnostics.static_leaf_count, 0);
+
+        // The shallow full-width root must still choose one of the moves that
+        // exactly removes B's generated goal move. This deliberately checks a
+        // tactical contract rather than tying a shallow static evaluation to
+        // the deeper reference's incidental exact action code.
+        let report = search_nodes(
+            &config,
+            &state,
+            500_000,
+            SearchOptions {
+                max_depth: 1,
+                transposition_capacity: 256,
+                aspiration_window: 256,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.completed_depth, 1);
+        assert!(must_block.contains(&report.action_code.unwrap()));
+        assert!(report.diagnostics.immediate_goal_horizon_hits > 0);
+        assert!(report.diagnostics.static_leaf_count > 0);
+        assert_eq!(report.committed_iteration_nodes, vec![report.nodes]);
+        assert_eq!(
+            report.committed_iteration_scores,
+            vec![report.score.unwrap()]
+        );
+    }
+
+    #[test]
+    fn horizon_goal_guard_preserves_legal_two_row_jump_wins() {
+        let config = horizon_block_config();
+        let state = horizon_jump_state(&config);
+        assert_eq!(state.position.turn, Player::B);
+        let root = PreparedGameState::from_game_state(&config, &state).unwrap();
+        let mover = root.position.turn;
+        assert_eq!(
+            root.position
+                .pawns
+                .get(mover)
+                .r
+                .abs_diff(*config.goal_rows.get(mover)),
+            2,
+            "the cheap guard must leave a two-row jump eligible for exact generation"
+        );
+        let goal_code = usize::from(*config.goal_rows.get(mover)) * usize::from(config.columns)
+            + usize::from(root.position.pawns.get(mover).c);
+        assert!(
+            compact_legal_codes(&config, &root)
+                .iter()
+                .any(|code| code == goal_code),
+            "the permissive legal pawn generator exposes the forward goal jump"
+        );
+
+        let mut reference = root.clone();
+        let expected = plain_minimax(&config, &mut reference, 1, root.ply).unwrap();
+        let mut searched = root.clone();
+        let mut context = SearchContext {
+            config: &config,
+            budget: NodeBudget::new(10_000),
+            tt: TranspositionTable::new(64),
+            heuristics: Heuristics::new(2, config.policy_size()),
+            oracle: ExactZeroWallOracle::new(),
+            root_ply: root.ply,
+            nodes: 0,
+            diagnostics: SearchDiagnostics::default(),
+        };
+        let value = context
+            .negamax(&mut searched, 0, 0, NEG_INFINITY, POS_INFINITY, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(value.score, expected.score);
+        assert_eq!(value.score, MATE_SCORE - 1);
+        assert_eq!(context.diagnostics.immediate_goal_horizon_hits, 1);
+        assert_eq!(context.diagnostics.static_leaf_count, 0);
     }
 
     #[test]
@@ -820,6 +1095,8 @@ mod tests {
         assert_eq!(report.completed_depth, 1);
         assert_eq!(report.action_code, Some(4));
         assert_eq!(report.score, Some(MATE_SCORE - 1));
+        assert_eq!(report.diagnostics.zero_wall_oracle_queries, 1);
+        assert_eq!(report.diagnostics.zero_wall_oracle_solutions, 1);
     }
 
     #[test]
@@ -839,6 +1116,8 @@ mod tests {
         assert_eq!(report.completed_depth, 0);
         assert!(report.stopped);
         assert_eq!(report.score, None);
+        assert!(report.committed_iteration_nodes.is_empty());
+        assert!(report.committed_iteration_scores.is_empty());
         assert_eq!(
             report.action_code,
             crate::legal_action_codes(&config, &state)
@@ -954,6 +1233,8 @@ mod tests {
         let after_search = run(&config, &state, NodeBudget::new(exact_nodes), options).unwrap();
         assert_eq!(after_search.completed_depth, 0);
         assert_eq!(after_search.score, None);
+        assert!(after_search.committed_iteration_nodes.is_empty());
+        assert!(after_search.committed_iteration_scores.is_empty());
 
         for allowed_polls in 1..=3 {
             let cutoff = run(
@@ -965,6 +1246,8 @@ mod tests {
             .unwrap();
             assert_eq!(cutoff.completed_depth, 0, "poll {allowed_polls}");
             assert_eq!(cutoff.score, None);
+            assert!(cutoff.committed_iteration_nodes.is_empty());
+            assert!(cutoff.committed_iteration_scores.is_empty());
             assert_eq!(
                 cutoff.principal_variation,
                 cutoff.action_code.into_iter().collect::<Vec<_>>()
@@ -979,6 +1262,11 @@ mod tests {
         .unwrap();
         assert_eq!(committed.completed_depth, 1);
         assert!(committed.score.is_some());
+        assert_eq!(committed.committed_iteration_nodes, vec![exact_nodes]);
+        assert_eq!(
+            committed.committed_iteration_scores,
+            vec![committed.score.unwrap()]
+        );
     }
 
     #[test]

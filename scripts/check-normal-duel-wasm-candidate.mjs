@@ -72,12 +72,7 @@ const directStarted = performance.now();
 const directReport = JSON.parse(directWasm.normalDuelSearchFor(JSON.stringify({
   config: directConfig,
   state: directState,
-  timeBudgetMs: 1,
-  options: {
-    maxDepth: 64,
-    transpositionCapacity: 262_144,
-    aspirationWindow: 64
-  }
+  timeBudgetMs: 1
 })));
 const directElapsedMs = performance.now() - directStarted;
 assert.ok(legalActionCodes(directConfig, directState).includes(directReport.actionCode));
@@ -89,6 +84,18 @@ assert.deepEqual(
   directNodeReport,
   searchParity.report,
   'generated WASM fixed-node search must match the committed native parity fixture'
+);
+const defaultHorizonReport = JSON.parse(
+  directWasm.normalDuelSearchNodes(JSON.stringify(searchParity.defaultHorizon.request))
+);
+assert.deepEqual(
+  defaultHorizonReport,
+  searchParity.defaultHorizon.report,
+  'generated WASM omitted-options horizon search must match the committed native parity fixture'
+);
+assert.ok(
+  defaultHorizonReport.diagnostics.immediateGoalHorizonHits > 0,
+  'generated WASM horizon fixture must exercise immediate-goal diagnostics'
 );
 
 const adapter = await createWorkerEngineAdapter({
@@ -152,6 +159,7 @@ try {
     assert.ok(Number.isSafeInteger(decision.action?.to?.r) || typeof decision.action?.wall === 'string');
     assert.equal(Number.isSafeInteger(decision.stats.nodes), true);
     assert.equal(Number.isSafeInteger(decision.stats.depth), true);
+    assert.ok(decision.stats.depth >= 1, 'strength smoke must complete at least depth one');
   } finally {
     await strengthSession.close();
   }

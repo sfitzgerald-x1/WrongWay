@@ -124,6 +124,10 @@ struct SearchForRequest {
 #[serde(rename_all = "camelCase")]
 struct SearchDiagnosticsWire {
     root_action_count: u64,
+    static_leaf_count: u64,
+    immediate_goal_horizon_hits: u64,
+    zero_wall_oracle_queries: u64,
+    zero_wall_oracle_solutions: u64,
     tt_probes: u64,
     tt_hits: u64,
     tt_bound_cutoffs: u64,
@@ -145,6 +149,8 @@ struct SearchReportWire {
     nodes: u64,
     stopped: bool,
     principal_variation: Vec<u64>,
+    committed_iteration_nodes: Vec<u64>,
+    committed_iteration_scores: Vec<i32>,
     diagnostics: SearchDiagnosticsWire,
 }
 
@@ -224,6 +230,10 @@ fn js_safe_usize(value: usize) -> BoundaryResult<u64> {
 fn diagnostics_wire(diagnostics: &SearchDiagnostics) -> BoundaryResult<SearchDiagnosticsWire> {
     Ok(SearchDiagnosticsWire {
         root_action_count: js_safe_usize(diagnostics.root_action_count)?,
+        static_leaf_count: js_safe_counter(diagnostics.static_leaf_count)?,
+        immediate_goal_horizon_hits: js_safe_counter(diagnostics.immediate_goal_horizon_hits)?,
+        zero_wall_oracle_queries: js_safe_counter(diagnostics.zero_wall_oracle_queries)?,
+        zero_wall_oracle_solutions: js_safe_counter(diagnostics.zero_wall_oracle_solutions)?,
         tt_probes: js_safe_counter(diagnostics.tt_probes)?,
         tt_hits: js_safe_counter(diagnostics.tt_hits)?,
         tt_bound_cutoffs: js_safe_counter(diagnostics.tt_bound_cutoffs)?,
@@ -251,6 +261,13 @@ fn search_report_wire(config: &Config, report: &SearchReport) -> BoundaryResult<
             .copied()
             .map(js_safe_usize)
             .collect::<BoundaryResult<Vec<_>>>()?,
+        committed_iteration_nodes: report
+            .committed_iteration_nodes
+            .iter()
+            .copied()
+            .map(js_safe_counter)
+            .collect::<BoundaryResult<Vec<_>>>()?,
+        committed_iteration_scores: report.committed_iteration_scores.clone(),
         diagnostics: diagnostics_wire(&report.diagnostics)?,
     })
 }
@@ -463,6 +480,21 @@ mod tests {
         );
         assert!(report["nodes"].is_u64());
         assert!(report["diagnostics"]["ttProbes"].is_u64());
+        assert!(report["diagnostics"]["staticLeafCount"].is_u64());
+        assert!(report["diagnostics"]["immediateGoalHorizonHits"].is_u64());
+        assert!(report["diagnostics"]["zeroWallOracleQueries"].is_u64());
+        assert!(report["diagnostics"]["zeroWallOracleSolutions"].is_u64());
+        assert!(report["committedIterationNodes"].is_array());
+        assert!(report["committedIterationScores"].is_array());
+        let completed_depth = report["completedDepth"].as_u64().unwrap() as usize;
+        assert_eq!(
+            report["committedIterationNodes"].as_array().unwrap().len(),
+            completed_depth
+        );
+        assert_eq!(
+            report["committedIterationScores"].as_array().unwrap().len(),
+            completed_depth
+        );
         assert!(report.get("action").is_some());
         assert!(report.get("action_code").is_none());
         assert!(report.get("principal_variation").is_none());
@@ -489,17 +521,41 @@ mod tests {
             serde_json::from_str(&search_nodes_impl(&request.to_string()).unwrap()).unwrap();
 
         assert_eq!(actual, *expected);
+
+        let default_horizon = &fixture["defaultHorizon"];
+        let default_request = &default_horizon["request"];
+        let default_expected = &default_horizon["report"];
+        let default_actual: Value =
+            serde_json::from_str(&search_nodes_impl(&default_request.to_string()).unwrap())
+                .unwrap();
+
+        assert_eq!(default_actual, *default_expected);
+        assert!(
+            default_actual["diagnostics"]["immediateGoalHorizonHits"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
     }
 
     #[test]
     fn native_search_request_is_strict_and_uses_defaults_only_when_options_are_omitted() {
-        let mut request = initial_search_request(1);
-        request.as_object_mut().unwrap().remove("options");
-        let report: Value =
-            serde_json::from_str(&search_nodes_impl(&request.to_string()).unwrap()).unwrap();
-        assert_legal_search_report(&report, &request["config"], &request["state"]);
+        let mut omitted = initial_search_request(4096);
+        omitted.as_object_mut().unwrap().remove("options");
+        let mut explicit_defaults = omitted.clone();
+        explicit_defaults["options"] = json!({
+            "maxDepth": 64,
+            "transpositionCapacity": 262_144,
+            "aspirationWindow": 256,
+        });
+        let omitted_report = search_nodes_impl(&omitted.to_string()).unwrap();
+        let explicit_defaults_report = search_nodes_impl(&explicit_defaults.to_string()).unwrap();
+        assert_eq!(omitted_report, explicit_defaults_report);
 
-        let mut unknown_top_level = request.clone();
+        let report: Value = serde_json::from_str(&omitted_report).unwrap();
+        assert_legal_search_report(&report, &omitted["config"], &omitted["state"]);
+
+        let mut unknown_top_level = omitted.clone();
         unknown_top_level["future"] = json!(true);
         assert_eq!(
             search_nodes_impl(&unknown_top_level.to_string()),
@@ -582,6 +638,8 @@ mod tests {
         assert!(terminal_report["action"].is_null());
         assert_eq!(terminal_report["principalVariation"], json!([]));
         assert_eq!(terminal_report["completedDepth"], 0);
+        assert_eq!(terminal_report["committedIterationNodes"], json!([]));
+        assert_eq!(terminal_report["committedIterationScores"], json!([]));
 
         let request = initial_search_request(1);
         let deadline_request = json!({
