@@ -79,6 +79,12 @@ struct NodeValue {
     best_action: Option<usize>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct SearchFrame {
+    previous_action: Option<usize>,
+    use_tt_bounds: bool,
+}
+
 struct SearchContext<'a, B: SearchBudget> {
     config: &'a Config,
     budget: B,
@@ -125,10 +131,33 @@ impl<B: SearchBudget> SearchContext<'_, B> {
         state: &mut PreparedGameState,
         depth: u8,
         ply: usize,
-        mut alpha: i32,
-        mut beta: i32,
+        alpha: i32,
+        beta: i32,
         previous_action: Option<usize>,
     ) -> Result<Option<NodeValue>> {
+        self.negamax_with_tt_bounds(
+            state,
+            depth,
+            ply,
+            alpha,
+            beta,
+            SearchFrame {
+                previous_action,
+                use_tt_bounds: true,
+            },
+        )
+    }
+
+    fn negamax_with_tt_bounds(
+        &mut self,
+        state: &mut PreparedGameState,
+        depth: u8,
+        ply: usize,
+        mut alpha: i32,
+        mut beta: i32,
+        frame: SearchFrame,
+    ) -> Result<Option<NodeValue>> {
+        let previous_action = frame.previous_action;
         if !self.enter_node() {
             return Ok(None);
         }
@@ -174,7 +203,7 @@ impl<B: SearchBudget> SearchContext<'_, B> {
             self.diagnostics.tt_hits += 1;
             if !identity.bounds_reusable() {
                 self.diagnostics.repetition_hint_only_probes += 1;
-            } else if hit.depth >= depth {
+            } else if frame.use_tt_bounds && hit.depth >= depth {
                 if let Some(bound) = hit.bound {
                     match bound {
                         Bound::Exact => {
@@ -238,15 +267,27 @@ impl<B: SearchBudget> SearchContext<'_, B> {
                 match scout {
                     Ok(Some(value)) => {
                         let scout_score = -value.score;
-                        if scout_score > alpha && scout_score < beta {
+                        // A null-window result equal to alpha can still be a
+                        // fail-low bound. Re-search it too: otherwise its
+                        // deterministic smaller action code can be selected
+                        // as though it tied the current best move.
+                        if scout_score >= alpha && scout_score < beta {
                             self.diagnostics.pvs_researches += 1;
-                            self.negamax(
+                            // Tie-breaking needs an exact value: a bounded
+                            // re-search can still return alpha as a fail-bound
+                            // and make a worse smaller-code action look tied.
+                            // Search the entire value range and keep the
+                            // scout's action only as an ordering hint.
+                            self.negamax_with_tt_bounds(
                                 state,
                                 depth - 1,
                                 ply + 1,
-                                -beta,
-                                -alpha,
-                                Some(action.code),
+                                NEG_INFINITY,
+                                POS_INFINITY,
+                                SearchFrame {
+                                    previous_action: Some(action.code),
+                                    use_tt_bounds: false,
+                                },
                             )
                         } else {
                             Ok(Some(value))
@@ -315,10 +356,16 @@ impl<B: SearchBudget> SearchContext<'_, B> {
                 break;
             }
             let identity = state.search_identity(self.config);
+            // Search identities deliberately omit repetition history. Their
+            // actions are safe ordering hints, but only a reusable identity
+            // is authoritative enough to extend a reported PV.
+            if !identity.bounds_reusable() {
+                break;
+            }
             let Some(entry) = self.tt.probe(identity) else {
                 break;
             };
-            if entry.depth < remaining {
+            if entry.bound != Some(Bound::Exact) || entry.depth < remaining {
                 break;
             }
             let Some(code) = entry.best_action(self.config, identity) else {
@@ -343,40 +390,109 @@ impl<B: SearchBudget> SearchContext<'_, B> {
 fn run<B: SearchBudget>(
     config: &Config,
     state: &GameState,
-    budget: B,
+    mut budget: B,
     options: SearchOptions,
 ) -> Result<SearchReport> {
     let options = options.validate()?;
     let validated = validate_state(config, state)?;
+    // The deadline is created by search_for before entering this shared path.
+    // We cannot return before deriving a validated legal fallback, but poll
+    // each bounded setup phase and skip expensive search infrastructure once
+    // expiration is observed. Node mode sees the same polls without adding
+    // nodes, preserving its deterministic result.
+    let expired_after_validation = budget.exhausted(0);
     let root = PreparedGameState::from_game_state(config, &validated)?;
+    let expired_after_preparation = budget.exhausted(0);
     let root_actions = compact_legal_codes(config, &root);
     let fallback = root_actions.iter().next();
     if !root.outcome.is_ongoing() {
-        let context = SearchContext {
-            config,
-            budget,
-            tt: TranspositionTable::new(options.transposition_capacity),
-            heuristics: Heuristics::new(usize::from(options.max_depth), config.policy_size()),
-            oracle: ExactZeroWallOracle::new(),
-            root_ply: root.ply,
-            nodes: 0,
-            diagnostics: SearchDiagnostics::default(),
+        let stopped = expired_after_validation || expired_after_preparation || budget.exhausted(0);
+        let score = match root.outcome {
+            Outcome::Ongoing => unreachable!("terminal root already checked"),
+            Outcome::Draw { .. } => 0,
+            Outcome::Win { winner, .. } => {
+                if winner == root.position.turn {
+                    MATE_SCORE
+                } else {
+                    -MATE_SCORE
+                }
+            }
         };
         return Ok(SearchReport {
             action_code: None,
-            score: Some(context.terminal_score(&root).unwrap_or(0)),
+            score: Some(score),
             completed_depth: 0,
             nodes: 0,
-            stopped: false,
+            stopped,
             principal_variation: Vec::new(),
             diagnostics: SearchDiagnostics::default(),
+        });
+    }
+    let expired_after_actions = budget.exhausted(0);
+    if expired_after_validation || expired_after_preparation || expired_after_actions {
+        return Ok(SearchReport {
+            action_code: fallback,
+            score: None,
+            completed_depth: 0,
+            nodes: 0,
+            stopped: true,
+            principal_variation: fallback.into_iter().collect(),
+            diagnostics: SearchDiagnostics {
+                root_action_count: root_actions.len,
+                ..SearchDiagnostics::default()
+            },
+        });
+    }
+    let Some(tt) =
+        TranspositionTable::new_with_budget(options.transposition_capacity, &mut budget, 0)
+    else {
+        return Ok(SearchReport {
+            action_code: fallback,
+            score: None,
+            completed_depth: 0,
+            nodes: 0,
+            stopped: true,
+            principal_variation: fallback.into_iter().collect(),
+            diagnostics: SearchDiagnostics {
+                root_action_count: root_actions.len,
+                ..SearchDiagnostics::default()
+            },
+        });
+    };
+    if budget.exhausted(0) {
+        return Ok(SearchReport {
+            action_code: fallback,
+            score: None,
+            completed_depth: 0,
+            nodes: 0,
+            stopped: true,
+            principal_variation: fallback.into_iter().collect(),
+            diagnostics: SearchDiagnostics {
+                root_action_count: root_actions.len,
+                ..SearchDiagnostics::default()
+            },
+        });
+    }
+    let heuristics = Heuristics::new(usize::from(options.max_depth), config.policy_size());
+    if budget.exhausted(0) {
+        return Ok(SearchReport {
+            action_code: fallback,
+            score: None,
+            completed_depth: 0,
+            nodes: 0,
+            stopped: true,
+            principal_variation: fallback.into_iter().collect(),
+            diagnostics: SearchDiagnostics {
+                root_action_count: root_actions.len,
+                ..SearchDiagnostics::default()
+            },
         });
     }
     let mut context = SearchContext {
         config,
         budget,
-        tt: TranspositionTable::new(options.transposition_capacity),
-        heuristics: Heuristics::new(usize::from(options.max_depth), config.policy_size()),
+        tt,
+        heuristics,
         oracle: ExactZeroWallOracle::new(),
         root_ply: root.ply,
         nodes: 0,
@@ -634,6 +750,7 @@ mod tests {
             .unwrap();
             assert_eq!(report.completed_depth, 2);
             assert_eq!(report.score, Some(expected.score));
+            assert_eq!(report.action_code, expected.best_action);
             let legal = crate::legal_action_codes(&config, &state).unwrap();
             assert!(legal.contains(&report.action_code.unwrap()));
         }
@@ -750,6 +867,34 @@ mod tests {
     }
 
     #[test]
+    fn expired_setup_returns_the_legal_fallback_without_allocating_search_state() {
+        let config = zero_wall_config();
+        let state = create_initial_state(&config).unwrap();
+        let report = run(
+            &config,
+            &state,
+            CheckBudget::new(0),
+            SearchOptions {
+                max_depth: 8,
+                transposition_capacity: 1 << 20,
+                aspiration_window: 32,
+            },
+        )
+        .unwrap();
+        assert!(report.stopped);
+        assert_eq!(report.completed_depth, 0);
+        assert_eq!(report.score, None);
+        assert_eq!(
+            report.diagnostics.root_action_count,
+            crate::legal_action_codes(&config, &state).unwrap().len()
+        );
+        assert_eq!(
+            report.principal_variation,
+            report.action_code.into_iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn terminal_root_reports_a_real_score_without_a_move() {
         let config = zero_wall_config();
         let mut state = create_initial_state(&config).unwrap();
@@ -863,6 +1008,63 @@ mod tests {
     }
 
     #[test]
+    fn principal_variation_stops_before_history_dependent_tt_hint() {
+        let config = zero_wall_config();
+        let state = create_initial_state(&config).unwrap();
+        let root = PreparedGameState::from_game_state(&config, &state).unwrap();
+        let root_action = compact_legal_codes(&config, &root).iter().next().unwrap();
+        let mut child = root.clone();
+        child
+            .apply_generated_code(&config, root_action)
+            .expect("root action is generated legal");
+        assert!(root.search_identity(&config).bounds_reusable());
+        assert!(!child.search_identity(&config).bounds_reusable());
+        let child_action = compact_legal_codes(&config, &child).iter().next().unwrap();
+
+        let mut context = SearchContext {
+            config: &config,
+            budget: NodeBudget::new(100),
+            tt: TranspositionTable::new(64),
+            heuristics: Heuristics::new(4, config.policy_size()),
+            oracle: ExactZeroWallOracle::new(),
+            root_ply: root.ply,
+            nodes: 0,
+            diagnostics: SearchDiagnostics::default(),
+        };
+        context.tt.store(
+            &config,
+            root.search_identity(&config),
+            2,
+            0,
+            Some(Bound::Exact),
+            Some(root_action),
+        );
+        // This is legal in this concrete history, but its identity deliberately
+        // omits repetition context. It must remain an ordering hint only.
+        context.tt.store(
+            &config,
+            child.search_identity(&config),
+            1,
+            0,
+            None,
+            Some(child_action),
+        );
+        assert_eq!(
+            context.principal_variation(&root, 2).unwrap(),
+            Some(vec![root_action])
+        );
+        context.tt.store(
+            &config,
+            root.search_identity(&config),
+            2,
+            0,
+            Some(Bound::Lower),
+            Some(root_action),
+        );
+        assert_eq!(context.principal_variation(&root, 2).unwrap(), Some(vec![]));
+    }
+
+    #[test]
     fn root_diagnostics_cover_every_legal_action() {
         let config = zero_wall_config();
         let state = create_initial_state(&config).unwrap();
@@ -915,5 +1117,103 @@ mod tests {
             state = apply_legal_action(&config, &state, &decode_action(&config, code).unwrap())
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn full_research_ignores_reusable_wall_child_bound_and_keeps_minimax_action() {
+        let config = Config {
+            initial_stock: Players { a: 1, b: 2 },
+            ..shallow_search_config()
+        };
+        let state = create_initial_state(&config).unwrap();
+        let root = PreparedGameState::from_game_state(&config, &state).unwrap();
+        let wall = compact_legal_codes(&config, &root)
+            .iter()
+            .find(|code| *code >= config.cells())
+            .expect("root has a legal wall");
+        let mut child = root.clone();
+        child
+            .apply_generated_code(&config, wall)
+            .expect("generated wall is legal");
+        let identity = child.search_identity(&config);
+        assert!(
+            identity.bounds_reusable(),
+            "walls begin a fresh repetition epoch"
+        );
+
+        // Depth three keeps this above the scout's immediate horizon while the
+        // remaining stock stays small enough to keep the plain reference cheap.
+        let mut reference = child.clone();
+        let expected = plain_minimax(&config, &mut reference, 3, root.ply).unwrap();
+        let wrong_action = compact_legal_codes(&config, &child)
+            .iter()
+            .find(|&code| Some(code) != expected.best_action)
+            .expect("child has a non-best legal action");
+
+        let new_context = || SearchContext {
+            config: &config,
+            budget: NodeBudget::new(2_000_000),
+            tt: TranspositionTable::new(64),
+            heuristics: Heuristics::new(4, config.policy_size()),
+            oracle: ExactZeroWallOracle::new(),
+            root_ply: root.ply,
+            nodes: 0,
+            diagnostics: SearchDiagnostics::default(),
+        };
+        // This is the lower bound the equality scout can leave at the child
+        // root. With beta at that boundary, normal TT probing returns it
+        // immediately, including its non-exact action.
+        let mut shortcut = new_context();
+        shortcut.tt.store(
+            &config,
+            identity,
+            3,
+            expected.score,
+            Some(Bound::Lower),
+            Some(wrong_action),
+        );
+        let mut shortcut_child = child.clone();
+        let shortcut_value = shortcut
+            .negamax(
+                &mut shortcut_child,
+                3,
+                1,
+                NEG_INFINITY,
+                expected.score,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(shortcut.nodes, 1);
+        assert_eq!(shortcut_value.best_action, Some(wrong_action));
+
+        let mut full_research = new_context();
+        full_research.tt.store(
+            &config,
+            identity,
+            3,
+            expected.score,
+            Some(Bound::Lower),
+            Some(wrong_action),
+        );
+        let mut research_child = child.clone();
+        let value = full_research
+            .negamax_with_tt_bounds(
+                &mut research_child,
+                3,
+                1,
+                NEG_INFINITY,
+                POS_INFINITY,
+                SearchFrame {
+                    previous_action: None,
+                    use_tt_bounds: false,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert!(full_research.nodes > 1, "the child was traversed exactly");
+        assert_eq!(value.score, expected.score);
+        assert_eq!(value.best_action, expected.best_action);
+        assert_eq!(research_child, child, "search remains transactional");
     }
 }

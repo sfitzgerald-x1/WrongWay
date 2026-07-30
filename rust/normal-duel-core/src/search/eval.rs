@@ -77,13 +77,66 @@ pub(crate) fn evaluate(config: &Config, state: &PreparedGameState) -> i32 {
     let opponent_distance = i32::from(distance[player_index(opponent)]);
     let own_stock = *state.position.stock.get(perspective) as i128;
     let opponent_stock = *state.position.stock.get(opponent) as i128;
-    let stock_delta =
-        (own_stock - opponent_stock).clamp(i128::from(i32::MIN), i128::from(i32::MAX)) as i32;
+    let stock_delta = own_stock - opponent_stock;
     let robustness = alternate_path_robustness(config, state, board, perspective)
         - alternate_path_robustness(config, state, board, opponent);
-    ((opponent_distance - own_distance) * DISTANCE_WEIGHT
-        + stock_delta.saturating_mul(STOCK_WEIGHT)
-        + TEMPO_WEIGHT
-        + robustness * ROBUSTNESS_WEIGHT)
-        .clamp(-EVAL_LIMIT, EVAL_LIMIT)
+    (i128::from(opponent_distance - own_distance) * i128::from(DISTANCE_WEIGHT)
+        + stock_delta * i128::from(STOCK_WEIGHT)
+        + i128::from(TEMPO_WEIGHT)
+        + i128::from(robustness) * i128::from(ROBUSTNESS_WEIGHT))
+    .clamp(i128::from(-EVAL_LIMIT), i128::from(EVAL_LIMIT)) as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        create_initial_state, Coord, Players, JUMP_RULE, MAX_JS_SAFE_INTEGER, REPETITION_THRESHOLD,
+        RULESET,
+    };
+
+    fn config(initial_stock: Players<u64>) -> Config {
+        Config {
+            ruleset: RULESET.into(),
+            rows: 9,
+            columns: 9,
+            start: Players {
+                a: Coord { r: 8, c: 4 },
+                b: Coord { r: 0, c: 4 },
+            },
+            goal_rows: Players { a: 0, b: 8 },
+            initial_stock,
+            jump_rule: JUMP_RULE.into(),
+            repetition_threshold: REPETITION_THRESHOLD,
+            ply_cap: 200,
+            first_player: Player::A,
+        }
+    }
+
+    #[test]
+    fn max_safe_integer_stock_asymmetry_clamps_for_both_signs() {
+        for (initial_stock, expected) in [
+            (
+                Players {
+                    a: MAX_JS_SAFE_INTEGER,
+                    b: 0,
+                },
+                EVAL_LIMIT,
+            ),
+            (
+                Players {
+                    a: 0,
+                    b: MAX_JS_SAFE_INTEGER,
+                },
+                -EVAL_LIMIT,
+            ),
+        ] {
+            let config = config(initial_stock);
+            assert!(config.validate().is_ok());
+            let state = create_initial_state(&config).unwrap();
+            let prepared = PreparedGameState::from_game_state(&config, &state).unwrap();
+
+            assert_eq!(evaluate(&config, &prepared), expected);
+        }
+    }
 }

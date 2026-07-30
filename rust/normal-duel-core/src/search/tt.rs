@@ -1,5 +1,11 @@
 use crate::{Config, PreparedSearchIdentity};
 
+use super::budget::SearchBudget;
+
+// Keeping each allocation modest lets a deadline be observed while a large
+// table is being set up, rather than only after one monolithic allocation.
+const BUCKETS_PER_CHUNK: usize = 1 << 10;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Bound {
     Exact,
@@ -37,19 +43,48 @@ impl Entry {
 }
 
 pub(crate) struct TranspositionTable {
-    buckets: Vec<[Option<Entry>; 2]>,
+    buckets: Vec<Box<[[Option<Entry>; 2]]>>,
+    bucket_count: usize,
     generation: u16,
 }
 
 impl TranspositionTable {
+    #[cfg(test)]
     pub(crate) fn new(capacity: usize) -> Self {
+        Self::build(capacity, || false).expect("an unconditional TT build cannot stop")
+    }
+
+    /// Builds the table in bounded chunks so a wall-clock search can abandon
+    /// setup promptly. Node-budget mode observes the same polls but, because
+    /// setup does not add nodes, remains deterministic.
+    pub(crate) fn new_with_budget<B: SearchBudget>(
+        capacity: usize,
+        budget: &mut B,
+        nodes: u64,
+    ) -> Option<Self> {
+        Self::build(capacity, || budget.exhausted(nodes))
+    }
+
+    fn build(capacity: usize, mut exhausted: impl FnMut() -> bool) -> Option<Self> {
         debug_assert!(capacity >= 2);
-        Self {
-            // Capacity is an upper bound on entries. Odd capacities round
-            // down, retaining two real ways in every allocated bucket.
-            buckets: vec![[None, None]; capacity / 2],
-            generation: 0,
+        // Capacity is an upper bound on entries. Odd capacities round down,
+        // retaining two real ways in every allocated bucket.
+        let bucket_count = capacity / 2;
+        let mut buckets = Vec::with_capacity(bucket_count.div_ceil(BUCKETS_PER_CHUNK));
+        let mut remaining = bucket_count;
+        while remaining != 0 {
+            if exhausted() {
+                return None;
+            }
+            let chunk_len = remaining.min(BUCKETS_PER_CHUNK);
+            buckets.push(vec![[None, None]; chunk_len].into_boxed_slice());
+            remaining -= chunk_len;
         }
+        Some(Self {
+            buckets,
+            bucket_count,
+            generation: 0,
+        })
     }
 
     pub(crate) fn next_generation(&mut self) {
@@ -57,11 +92,19 @@ impl TranspositionTable {
     }
 
     fn index(&self, key: u64) -> usize {
-        key as usize % self.buckets.len()
+        key as usize % self.bucket_count
+    }
+
+    fn bucket(&self, index: usize) -> &[Option<Entry>; 2] {
+        &self.buckets[index / BUCKETS_PER_CHUNK][index % BUCKETS_PER_CHUNK]
+    }
+
+    fn bucket_mut(&mut self, index: usize) -> &mut [Option<Entry>; 2] {
+        &mut self.buckets[index / BUCKETS_PER_CHUNK][index % BUCKETS_PER_CHUNK]
     }
 
     pub(crate) fn probe(&self, identity: PreparedSearchIdentity) -> Option<Entry> {
-        self.buckets[self.index(identity.key())]
+        self.bucket(self.index(identity.key()))
             .iter()
             .flatten()
             .find(|entry| entry.identity == identity)
@@ -122,7 +165,7 @@ impl TranspositionTable {
         best_action: Option<usize>,
     ) {
         let index = self.index(identity.key());
-        let lane = self.replacement_lane(self.buckets[index], identity);
+        let lane = self.replacement_lane(*self.bucket(index), identity);
         let canonical_action = best_action.map(|code| {
             let canonical = if identity.mirrored() {
                 mirror_code(config, code)
@@ -131,7 +174,7 @@ impl TranspositionTable {
             };
             u16::try_from(canonical).expect("normal-duel policy fits in u16")
         });
-        self.buckets[index][lane] = Some(Entry {
+        self.bucket_mut(index)[lane] = Some(Entry {
             identity,
             depth,
             score,
