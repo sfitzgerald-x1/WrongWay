@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#07090f">
+  <title>Wrong Way — 3D Arena Concept</title>
+  <meta name="description" content="An interactive 3D tabletop concept for Wrong Way: Don't be mad.">
+  <link rel="stylesheet" href="concept-3d.css?v=1">
+</head>
+<body>
+  <div class="ambient ambient-red" aria-hidden="true"></div>
+  <div class="ambient ambient-blue" aria-hidden="true"></div>
+  <div class="noise" aria-hidden="true"></div>
+
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Return to the original Wrong Way client">
+      <span class="brand-mark" aria-hidden="true">
+        <i></i><i></i><i></i><i></i><i></i>
+      </span>
+      <span>
+        <strong>WRONG WAY</strong>
+        <small>DON'T BE MAD</small>
+      </span>
+    </a>
+
+    <div class="concept-badge">
+      <span></span>
+      Interactive 3D concept
+    </div>
+
+    <nav class="view-controls" aria-label="Camera controls">
+      <button id="viewLeft" type="button" aria-label="Rotate camera left">↶</button>
+      <button id="cameraHome" type="button" aria-label="Reset camera">Center view</button>
+      <button id="viewRight" type="button" aria-label="Rotate camera right">↷</button>
+    </nav>
+  </header>
+
+  <main>
+    <section class="intro" aria-labelledby="concept-title">
+      <p class="eyebrow"><span></span> Arena study / 01</p>
+      <h1 id="concept-title">Every blockade<br>changes the <em>landscape.</em></h1>
+      <p class="intro-copy">
+        The original tactical race, imagined as a premium tabletop arena.
+        Move with intent. Build in three dimensions. Leave your opponent only one way out.
+      </p>
+      <div class="intro-meta" aria-label="Concept characteristics">
+        <span><b>09 × 09</b> arena</span>
+        <span><b>10</b> walls each</span>
+        <span><b>01</b> way through</span>
+      </div>
+    </section>
+
+    <section class="game-layout" aria-label="Playable 3D concept">
+      <div class="arena-column">
+        <div class="match-strip">
+          <article class="player-card player-red active" id="cardA">
+            <span class="player-orb" aria-hidden="true"></span>
+            <span>
+              <small>PLAYER 01</small>
+              <strong>RED</strong>
+            </span>
+            <b id="wallsA">10</b>
+          </article>
+
+          <div class="round-mark">
+            <small>DUEL / ROUND</small>
+            <strong>01</strong>
+          </div>
+
+          <article class="player-card player-blue" id="cardB">
+            <b id="wallsB">10</b>
+            <span>
+              <small>PLAYER 02</small>
+              <strong>BLUE</strong>
+            </span>
+            <span class="player-orb" aria-hidden="true"></span>
+          </article>
+        </div>
+
+        <div class="scene" id="scene" tabindex="0" aria-label="Interactive 3D game board. Drag the empty space to rotate the camera.">
+          <div class="scene-glow" aria-hidden="true"></div>
+          <div class="world" id="world">
+            <div class="board-frame">
+              <div class="board" id="board" role="grid" aria-label="Nine by nine Wrong Way board"></div>
+              <div class="wall-layer" id="wallLayer" aria-hidden="true"></div>
+              <div class="piece-layer" id="pieceLayer" aria-hidden="true"></div>
+              <div class="wall-target-layer" id="wallTargetLayer"></div>
+            </div>
+          </div>
+          <div class="camera-tip">
+            <span aria-hidden="true">✦</span>
+            Drag the arena to orbit
+          </div>
+        </div>
+
+        <div class="action-dock">
+          <div class="mode-switch" aria-label="Choose an action">
+            <button class="mode-button active" type="button" data-mode="move">
+              <span class="mode-icon move-icon" aria-hidden="true">●</span>
+              <span><small>01</small> Move</span>
+              <kbd>M</kbd>
+            </button>
+            <button class="mode-button" type="button" data-mode="wall-h">
+              <span class="mode-icon wall-icon horizontal" aria-hidden="true"></span>
+              <span><small>02</small> Wall</span>
+              <kbd>H</kbd>
+            </button>
+            <button class="mode-button" type="button" data-mode="wall-v">
+              <span class="mode-icon wall-icon vertical" aria-hidden="true"></span>
+              <span><small>03</small> Wall</span>
+              <kbd>V</kbd>
+            </button>
+          </div>
+
+          <div class="dock-copy">
+            <span id="turnDot"></span>
+            <p>
+              <small id="turnLabel">RED TO MOVE</small>
+              <strong id="modeHint">Choose a glowing destination.</strong>
+            </p>
+          </div>
+
+          <div class="match-actions">
+            <button id="undoButton" type="button" disabled>Undo</button>
+            <button id="resetButton" type="button">New match</button>
+          </div>
+        </div>
+      </div>
+
+      <aside class="intel-rail" aria-label="Match intelligence">
+        <article class="intel-card route-card">
+          <header>
+            <span>LIVE ROUTE DATA</span>
+            <i aria-hidden="true"></i>
+          </header>
+          <div class="route-viz" aria-hidden="true">
+            <div class="route-line"></div>
+            <span class="route-node node-a"></span>
+            <span class="route-node node-mid"></span>
+            <span class="route-node node-b"></span>
+          </div>
+          <div class="route-stat red-stat">
+            <span><i></i> Red path</span>
+            <strong id="pathA">8</strong>
+          </div>
+          <div class="route-bar"><i id="pathBarA"></i></div>
+          <div class="route-stat blue-stat">
+            <span><i></i> Blue path</span>
+            <strong id="pathB">8</strong>
+          </div>
+          <div class="route-bar"><i id="pathBarB"></i></div>
+          <p id="routeInsight">The arena is balanced. One wall can change the tempo.</p>
+        </article>
+
+        <article class="intel-card objective-card">
+          <header>
+            <span>OBJECTIVE</span>
+            <b>01</b>
+          </header>
+          <div class="objective-art" aria-hidden="true">
+            <span class="finish-line"></span>
+            <span class="objective-piece"></span>
+            <span class="objective-arrow">↑</span>
+          </div>
+          <h2>Reach the opposite edge.</h2>
+          <p>Advance your pawn or place a wall. Every player must always retain a valid route to the finish.</p>
+        </article>
+
+        <article class="intel-card log-card">
+          <header>
+            <span>MATCH FEED</span>
+            <i aria-hidden="true"></i>
+          </header>
+          <ol id="actionLog" aria-live="polite"></ol>
+        </article>
+      </aside>
+    </section>
+  </main>
+
+  <footer>
+    <span>Wrong Way / spatial interface exploration</span>
+    <span>Original ruleset · new perspective</span>
+  </footer>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    var COLS = 9;
+    var ROWS = 9;
+    var CELL = 64;
+    var WW = 8;
+    var BARR = 10;
+    var CUR_MAP = 'duel';
+  </script>
+  <script src="js/game-logic.js"></script>
+  <script src="js/concept-3d.js"></script>
+</body>
+</html>
