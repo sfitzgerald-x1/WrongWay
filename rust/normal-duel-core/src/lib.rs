@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 
+mod search;
+
+pub use search::{search_for, search_nodes, SearchDiagnostics, SearchOptions, SearchReport};
+
 pub const RULESET: &str = "normal-duel-v1";
 pub const JUMP_RULE: &str = "permissive-adjacent-exit-v1";
 pub const REPETITION_THRESHOLD: u8 = 3;
@@ -62,6 +66,10 @@ pub enum NormalDuelError {
     InvalidPerftBudget,
     #[error("perft node budget exceeded")]
     PerftNodeBudget,
+    #[error("invalid search options")]
+    InvalidSearchOptions,
+    #[error("invalid search budget")]
+    InvalidSearchBudget,
 }
 
 impl NormalDuelError {
@@ -86,6 +94,8 @@ impl NormalDuelError {
             Self::PerftOverflow => "perft_overflow",
             Self::InvalidPerftBudget => "invalid_perft_budget",
             Self::PerftNodeBudget => "perft_node_budget",
+            Self::InvalidSearchOptions => "invalid_search_options",
+            Self::InvalidSearchBudget => "invalid_search_budget",
         }
     }
 }
@@ -1848,17 +1858,102 @@ impl CompactPositionKey {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct CompactRepetition {
     key: CompactPositionKey,
     count: u64,
     epoch: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PreparedSearchStructural {
+    config_hash: u64,
+    position: CompactPositionKey,
+    ply: u64,
+    outcome: Outcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreparedOracleStructural {
+    search: PreparedSearchStructural,
+    repetitions: Vec<(CompactPositionKey, u64)>,
+}
+
+/// Allocation-free, mirror-canonical identity for transposition-table probes.
+/// Equality intentionally excludes the orientation flag, so reflected states
+/// verify as the same entry. Bounds are reusable only when
+/// [`Self::bounds_reusable`] returns true; otherwise the entry is an ordering
+/// hint because threefold repetition depends on history.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PreparedSearchIdentity {
+    key: u64,
+    mirrored: bool,
+    bounds_reusable: bool,
+    structural: PreparedSearchStructural,
+}
+
+impl PartialEq for PreparedSearchIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.structural == other.structural
+    }
+}
+
+impl Eq for PreparedSearchIdentity {}
+
+impl PreparedSearchIdentity {
+    #[must_use]
+    pub(crate) const fn key(&self) -> u64 {
+        self.key
+    }
+
+    #[must_use]
+    pub(crate) const fn mirrored(&self) -> bool {
+        self.mirrored
+    }
+
+    /// True only for a fresh repetition epoch containing exactly the current
+    /// position at count one. TT scores from all other epochs are
+    /// history-dependent and must not be used as bounds.
+    #[must_use]
+    pub(crate) const fn bounds_reusable(&self) -> bool {
+        self.bounds_reusable
+    }
+}
+
+/// Context-complete identity used by the exact zero-wall solver. Unlike
+/// [`PreparedSearchIdentity`], it includes the active repetition multiset and
+/// must not be used in the alpha-beta hot path.
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedOracleIdentity {
+    key: u64,
+    mirrored: bool,
+    structural: PreparedOracleStructural,
+}
+
+impl PartialEq for PreparedOracleIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && self.structural == other.structural
+    }
+}
+
+impl Eq for PreparedOracleIdentity {}
+
+impl PreparedOracleIdentity {
+    #[must_use]
+    pub(crate) const fn key(&self) -> u64 {
+        self.key
+    }
+
+    #[must_use]
+    pub(crate) const fn mirrored(&self) -> bool {
+        self.mirrored
+    }
+}
+
 /// A complete game state converted once from the strict wire contract into the
 /// allocation-light search representation. Public methods remain checked;
 /// internal traversal consumes only action codes generated from this state.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedGameState {
     position: SearchPosition,
     ply: u64,
@@ -1977,6 +2072,67 @@ fn compact_legal_codes(config: &Config, state: &PreparedGameState) -> CodeList {
     output
 }
 
+fn mirror_wall_bits(config: &Config, walls: WallBits) -> WallBits {
+    let mut mirrored = WallBits::default();
+    let columns = usize::from(config.columns - 1);
+    for (source, target) in [
+        (walls.horizontal, &mut mirrored.horizontal),
+        (walls.vertical, &mut mirrored.vertical),
+    ] {
+        for anchor in 0..config.anchors_per_axis() {
+            if source & (1_u64 << anchor) != 0 {
+                let row = anchor / columns;
+                let column = anchor % columns;
+                let reflected = row * columns + (columns - 1 - column);
+                *target |= 1_u64 << reflected;
+            }
+        }
+    }
+    mirrored
+}
+
+fn mirror_compact_position_key(config: &Config, key: CompactPositionKey) -> CompactPositionKey {
+    let mirror_coord = |coord: Coord| Coord {
+        r: coord.r,
+        c: config.columns - 1 - coord.c,
+    };
+    CompactPositionKey {
+        pawns: Players {
+            a: mirror_coord(key.pawns.a),
+            b: mirror_coord(key.pawns.b),
+        },
+        walls: mirror_wall_bits(config, key.walls),
+        stock: key.stock,
+        turn: key.turn,
+    }
+}
+
+fn compact_identity_order(
+    config: &Config,
+    key: CompactPositionKey,
+) -> (usize, usize, u64, u64, u64, u64, u8) {
+    (
+        square(config, key.pawns.a),
+        square(config, key.pawns.b),
+        key.walls.horizontal,
+        key.walls.vertical,
+        key.stock.a,
+        key.stock.b,
+        u8::from(matches!(key.turn, Player::B)),
+    )
+}
+
+fn compact_identity_hash(config: &Config, key: CompactPositionKey) -> u64 {
+    let ordered = compact_identity_order(config, key);
+    let mut hash = mix64(ordered.0 as u64);
+    hash ^= mix64(ordered.1 as u64 ^ 0x9e37_79b9_7f4a_7c15);
+    hash ^= mix64(ordered.2 ^ 0xbf58_476d_1ce4_e5b9);
+    hash ^= mix64(ordered.3 ^ 0x94d0_49bb_1331_11eb);
+    hash ^= mix64(ordered.4 ^ 0xd6e8_feb8_6659_fd93);
+    hash ^= mix64(ordered.5 ^ 0xa076_1d64_78bd_642f);
+    hash ^ mix64(u64::from(ordered.6) ^ 0xe703_7ed1_a0b4_28db)
+}
+
 impl PreparedGameState {
     pub fn from_game_state(config: &Config, state: &GameState) -> Result<Self> {
         let state = validate_state(config, state)?;
@@ -2006,6 +2162,106 @@ impl PreparedGameState {
             return Err(NormalDuelError::InvalidConfig);
         }
         Ok(compact_legal_codes(config, self).iter().collect())
+    }
+
+    /// Allocation-free transposition identity including board, side, stock,
+    /// ply and outcome, canonicalized through the supported left/right mirror.
+    /// The full repetition history is deliberately excluded from this hot-path
+    /// key; callers must honor [`PreparedSearchIdentity::bounds_reusable`].
+    pub(crate) fn search_identity(&self, config: &Config) -> PreparedSearchIdentity {
+        let direct = CompactPositionKey::from_search(&self.position);
+        let reflected = mirror_compact_position_key(config, direct);
+        let direct_hash = compact_identity_hash(config, direct);
+        let reflected_hash = compact_identity_hash(config, reflected);
+        let mirrored = reflected_hash < direct_hash
+            || (reflected_hash == direct_hash
+                && compact_identity_order(config, reflected)
+                    < compact_identity_order(config, direct));
+        let position = if mirrored { reflected } else { direct };
+        let structural = PreparedSearchStructural {
+            config_hash: self.position.config_hash,
+            position,
+            ply: self.ply,
+            outcome: self.outcome,
+        };
+        let current = CompactPositionKey::from_search(&self.position);
+        let mut active_count = 0_usize;
+        let mut current_is_one = false;
+        for repetition in self
+            .repetitions
+            .iter()
+            .filter(|entry| entry.epoch == self.epoch)
+        {
+            active_count += 1;
+            current_is_one = repetition.key == current && repetition.count == 1;
+        }
+        let bounds_reusable = active_count == 1 && current_is_one;
+        let outcome_domain: u64 = match self.outcome {
+            Outcome::Ongoing => 0,
+            Outcome::Win {
+                winner: Player::A, ..
+            } => 1,
+            Outcome::Win {
+                winner: Player::B, ..
+            } => 2,
+            Outcome::Draw {
+                reason: DrawReason::ThreefoldRepetition,
+            } => 3,
+            Outcome::Draw {
+                reason: DrawReason::PlyCap,
+            } => 4,
+        };
+        let key = compact_identity_hash(config, position)
+            ^ mix64(self.ply ^ outcome_domain.rotate_left(17));
+        PreparedSearchIdentity {
+            key,
+            mirrored,
+            bounds_reusable,
+            structural,
+        }
+    }
+
+    /// Context-complete, mirror-canonical identity for exact solvers. This
+    /// allocates and sorts the active repetition context and should remain off
+    /// the normal alpha-beta probe path.
+    pub(crate) fn oracle_identity(&self, config: &Config) -> PreparedOracleIdentity {
+        let search = self.search_identity(config);
+        let canonicalize = |key| {
+            if search.mirrored {
+                mirror_compact_position_key(config, key)
+            } else {
+                key
+            }
+        };
+        let mut repetitions: Vec<_> = self
+            .repetitions
+            .iter()
+            .filter(|entry| entry.epoch == self.epoch)
+            .map(|entry| (canonicalize(entry.key), entry.count))
+            .collect();
+        repetitions.sort_by_key(|(key, _)| compact_identity_order(config, *key));
+        let structural = PreparedOracleStructural {
+            search: search.structural,
+            repetitions,
+        };
+        let mut context_hash = search.key;
+        for (index, (key, count)) in structural.repetitions.iter().enumerate() {
+            context_hash ^= mix64(
+                compact_identity_hash(config, *key)
+                    ^ count.rotate_left((index % 63) as u32)
+                    ^ index as u64,
+            );
+        }
+        PreparedOracleIdentity {
+            key: mix64(context_hash),
+            mirrored: search.mirrored,
+            structural,
+        }
+    }
+
+    /// Consume one matching undo token and restore the exact prior state.
+    fn undo_generated_code(&mut self, undo: PreparedUndo) -> bool {
+        self.undo_generated(undo)
     }
 
     fn apply_generated_code(&mut self, config: &Config, code: usize) -> Result<PreparedUndo> {
