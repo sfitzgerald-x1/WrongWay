@@ -16,6 +16,11 @@ clocks, timeouts, disconnects, forfeits, online/server authority, items, stock
 grants, and wall destruction are excluded. A state containing any excluded
 mechanic MUST be rejected rather than implicitly reinterpreted.
 
+For future AI implementation, tuning, benchmarking, self-play, training,
+truth-track, and release work, canonical scope is 9x9 only. The existing 7x7
+configuration and fixtures remain historical compatibility and do not create
+new AI-work targets.
+
 The shipped client does not yet implement threefold repetition or the ply-cap
 draw. This contract deliberately specifies future behavior; it is not a claim
 that current online games already use these outcomes. The two complete 1v1 move
