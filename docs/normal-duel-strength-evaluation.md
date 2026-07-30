@@ -7,6 +7,11 @@ The Stage 2 product bar is:
   behavior; and
 - the paired-opening cluster 95% score interval has a lower bound above 50%.
 
+This is the canonical 9x9 AI acceptance protocol. Existing 7x7 rules,
+fixtures, and harness unit-test configurations remain historical compatibility;
+they are not targets for new AI implementation, tuning, benchmarking,
+self-play, training, truth-track, and release work, nor for future evaluation.
+
 An enforced claim is fail-closed: it must use strength mode, at least 200
 evaluated opening pairs, exact verified corpus provenance, and subprocess-isolated
 descriptors for both engines. Lower sample sizes and in-process engines are
@@ -29,6 +34,12 @@ These values are exported from
 `scripts/evaluation/normal-duel-strength-constants.mjs`. Enforced evaluation
 rejects alternate seeds, board sizes, starting players, configurations,
 generator metadata, deadlines, and corpus subsets.
+
+The 900 ms protocol is the enforced deadline for automated and pinned-Hard
+acceptance. It is distinct from the feature-flagged, human-facing `Hard+`
+15,000 ms per-turn ceiling. Routine CI, smoke, and regression tests may use
+shorter deterministic logical-clock deadlines or fixed-node/fixed-depth limits;
+they must never use the 15,000 ms human-facing budget.
 
 The repository's checked-in 12-opening book is a smoke and regression artifact,
 not enough to claim the gate. No 400-game run is part of this harness change.
@@ -53,11 +64,10 @@ hard-coded trust root:
   `87468038df741428fe25f8532f8871459f181554a6dbadf4e151b6bf44621f4c`.
 
 This is the explicitly frozen pre-AI-development product baseline, not a
-moving alias for the latest `main`. The plan's exit gate freezes the direct
-Hard call and orchestration at this commit in
-`docs/ai-engine-plan.md` lines 359–364, and the benchmark protocol repeats that
-pin at lines 480–483. In that plan, “current-Hard” means the product opponent
-current at the moment the development baseline was frozen. Later
+moving alias for the latest `main`. [The plan](./ai-engine-plan.md)'s Stage 2 exit gate and its
+**Match design** baseline protocol freeze the direct Hard call and
+orchestration at this commit. In that plan, “current-Hard” means the product
+opponent current at the moment the development baseline was frozen. Later
 rules-routing implementation PRs therefore do not move the opponent or change
 the 66% denominator.
 
@@ -95,9 +105,11 @@ identity is fixed to `hard-product-46a871c7`, version
 public fields is not accepted.
 
 The VM exposes board dimensions and a minimal `Date.now` capability. `Date.now`
-delegates to the injected monotonic clock, so the original relative 700 ms
-cutoff remains intact without wall-clock jumps. The outer protocol passes the
-absolute `deadlineAtMs`; clock rollback fails closed.
+delegates to the injected monotonic clock, so the pinned baseline retains its
+original relative 700 ms cutoff without wall-clock jumps and self-limits at
+roughly 700 ms. The outer acceptance protocol gives both engines the canonical
+900 ms active-time allowance and passes the absolute `deadlineAtMs`; clock
+rollback fails closed.
 
 ## Engine adapter contract
 

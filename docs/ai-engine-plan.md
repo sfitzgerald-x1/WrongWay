@@ -2,24 +2,32 @@
 
 ## Status
 
-- **Scope:** The normal 1v1 Duel ruleset, beginning with 9×9 Duel and 7×7
-  Blitz, with Chaos, Hammer, random drops, Classic, 2v2, clocks, and online
-  authority treated as explicit follow-up integrations.
+- **Scope:** Canonical 9×9 normal 1v1 Duel only. Existing 7×7 rules,
+  fixtures, and compatibility paths are legacy compatibility, not future AI
+  implementation, tuning, benchmarking, self-play, training, truth-track, and
+  release work. Chaos, Hammer, random drops, Classic, 2v2, clocks, and online
+  authority remain outside this AI plan.
 - **Decision:** Build a rules-faithful classical engine first, then use it as
   the foundation and benchmark for learned search.
 - **Recommended deployment path:** JavaScript reference engine → native/WASM
   alpha-beta engine → optional Gumbel AlphaZero training → measured hybrid.
 - **Primary strength bar:** An observed win rate of at least 66% against the
   pinned current Hard product behavior over at least 200 opening pairs, plus a
-  separate paired 95% confidence interval demonstrating superiority over 50%.
+  paired-cluster 95% **score** interval whose lower bound exceeds 50%; a
+  win-rate interval is companion reporting only.
+- **Acceptance budget:** Automated and pinned-Hard acceptance uses the
+  canonical 900 ms active-time protocol per turn. The eventual feature-flagged,
+  human-facing `Hard+` experience has a separate 15,000 ms per-turn ceiling;
+  routine tests and CI must never use that 15-second budget.
 - **Non-goal:** Claiming that full 9×9, ten-barricade WrongWay is solved.
 
 ## Executive decision
 
 The project should follow a staged hybrid strategy:
 
-1. Extract one authoritative, parameterized `normal-duel-v1` rules engine and
-   prove that every in-repository consumer migrated to it agrees.
+1. Retain one authoritative, parameterized `normal-duel-v1` rules engine and
+   prove that every in-repository consumer migrated to it agrees; all new AI
+   work targets its canonical 9×9 profile.
 2. Make games finite with an explicit threefold-repetition draw and a defensive
    ply cap.
 3. Build a fast bitboard alpha-beta engine with a transposition table and an
@@ -28,7 +36,7 @@ The project should follow a staged hybrid strategy:
 4. Ship that engine behind a new difficulty level once it decisively beats the
    current Hard bot.
 5. Only then train a policy-and-value network with Gumbel AlphaZero-style
-   self-play, first on 7×7 to validate the pipeline and then on 9×9.
+   self-play on canonical 9×9.
 6. Choose the final browser search architecture from measured
    strength-per-millisecond, potentially distilling the learned model into the
    alpha-beta engine.
@@ -122,11 +130,13 @@ ply cap
 ruleset version
 ```
 
-The first ruleset is `normal-duel-v1` with special modes and external clocks
-disabled. It supports 9×9 Duel and 7×7 Blitz. Classic is not just another Duel
-size: it has 9 columns × 13 rows, starts both pawns on the bottom row, and gives
-both players goal row 0. Chaos, Hammer, random drops, Classic, and 2v2 require
-separately versioned contracts or adapters rather than implicit reuse.
+The canonical AI ruleset is the 9×9 `normal-duel-v1` Duel profile with special
+modes and external clocks disabled. Existing 7×7 rules and fixtures remain
+legacy compatibility outside this plan; they do not authorize new AI pipeline
+work. Classic is not just another Duel size: it has 9 columns × 13
+rows, starts both pawns on the bottom row, and gives both players goal row 0.
+Chaos, Hammer, random drops, Classic, and 2v2 require separately versioned
+contracts or adapters rather than implicit reuse.
 
 ### Position and game state
 
@@ -163,9 +173,10 @@ For 9×9 `normal-duel-v1`, use the fixed 209-action encoding:
 
 A legal-action mask distinguishes legal actions from the full policy space.
 Destination encoding is unambiguous because a pawn move has exactly one
-resulting square. Smaller boards use the same three contiguous action classes
-with configuration-derived offsets. Every ongoing normal-duel state must have
-at least one legal pawn action, so an all-zero mask is an invariant violation.
+resulting square. Smaller boards retain the same three contiguous action
+classes with configuration-derived offsets as existing compatibility behavior.
+Every ongoing normal-duel state must have at least one legal pawn action, so an
+all-zero mask is an invariant violation.
 
 The 209 actions intentionally do not encode Hammer wall destruction, stochastic
 system drops, item pickup as a separate action, or 2v2 turns. Those rulesets
@@ -201,8 +212,8 @@ draw: threefold repetition | ply cap
 ```
 
 Adopt threefold repetition of the full position key. The search checks both
-the actual game history and the current search path. Add a 200-ply cap for 9×9
-as a defensive backstop, configurable for other variants.
+the actual game history and the current search path. Add a 200-ply cap for
+canonical 9×9 as a defensive backstop, configurable for other variants.
 
 Timeout, skipped-turn, disconnect, and forfeit results are typed external
 adjudication events owned by the clock/client/server layer, not board-rule
@@ -262,9 +273,11 @@ The Rust crate should compile to:
 **Work**
 
 - Document the 1v1 permissive jump rule with positive and negative examples.
-- Publish the `normal-duel-v1` scope and explicitly reject special-mode states.
+- Publish the canonical 9×9 `normal-duel-v1` scope and explicitly reject
+  special-mode states.
 - Add the threefold-repetition and ply-cap outcomes to the contract.
-- Extract a pure, parameterized JavaScript engine.
+- Retain the pure, parameterized JavaScript engine and its existing
+  compatibility profiles; all new AI work targets its canonical 9×9 profile.
 - Replace the inline human validator, `getMovesFrom`, and `moveTowardGoal` with
   calls into it for normal Duel.
 - Add a headless Node harness.
@@ -272,13 +285,13 @@ The Rust crate should compile to:
   legal action set, selected action, next state, and outcome.
 - Add perft-style legal-node counts to depth 3–4 across curated and randomized
   positions.
-- Keep special modes, Classic, 2v2, clocks, and online server authority on
-  explicit legacy/integration paths until separately migrated.
+- Keep 7×7 compatibility, special modes, Classic, 2v2, clocks, and online
+  server authority on explicit legacy/integration paths outside this AI plan.
 
 **Exit gate**
 
 - No independent `normal-duel-v1` move or wall-legality implementation remains
-  among migrated in-repository consumers.
+  among any migrated in-repository consumers.
 - The local/PVC client produces the same legal moves and wall decisions for the
   pre-extraction golden corpus.
 - Tests lock in permissive side exits, edge/corner jumps, wall intersection,
@@ -300,7 +313,7 @@ The Rust crate should compile to:
 - Implement fast apply/undo and full legal move generation.
 - Use Zobrist hashing over pawns, walls, stock, side, and rules configuration.
 - Canonicalize the left/right mirror symmetry for Duel; separately evaluate
-  row-flip plus player-swap normalization only for configurations where starts,
+  row-flip-plus-player-swap normalization only for configurations whose starts,
   goals, and rules prove it valid. Do not apply it to Classic.
 - Evaluate a wall-cut fast path against the existing `disjointPaths2` and
   `aiDisjoint` implementations and compare its ordering value with
@@ -356,16 +369,18 @@ replays before making product-performance claims about the oracle's hit rate.
 **Exit gate**
 
 - An observed win rate of at least 66% against the pinned current-Hard product
-  baseline over at least 200 opening pairs (400 side-swapped games), with the
-  same move-time budget on recorded hardware. This point-estimate target is not
-  presented as proof that the population win probability is at least 66%.
+  baseline over at least 200 opening pairs (400 side-swapped games), using the
+  canonical 900 ms active-time protocol per turn on recorded hardware. This
+  point-estimate target is not presented as proof that the population win
+  probability is at least 66%.
 - The baseline is the client's direct `aiDuelHard` call for Duel, plus the
   anti-stall move replacement, per-game `aiProgRef` reset, and `recentAi`
   history behavior from commit `46a871c7`.
 - Win rate is `wins / completed games after permitted pair reruns`; draws are
-  not wins. Report a paired-cluster 95% confidence interval over opening pairs,
-  whose lower bound must exceed 50%, plus the companion score rate
-  `(wins + 0.5 × draws) / games` and raw draw rate.
+  not wins. The release bar is a paired-cluster 95% **score** interval over
+  opening pairs, whose lower bound must exceed 50%; report its score rate as
+  `(wins + 0.5 × draws) / games` and raw draw rate. A win-rate confidence
+  interval is companion reporting only.
 - A crash, illegal action, null/no-move result, or engine deadline failure by
   either agent counts as that agent's loss. Only predeclared external
   harness/hardware failures may void a game, in which case the entire opening
@@ -381,7 +396,9 @@ replays before making product-performance claims about the oracle's hit rate.
 **Work**
 
 - Compile the search engine to WASM.
-- Add it behind a `Hard+` feature flag at the existing client think-time budget.
+- Add it behind a `Hard+` feature flag with a separate, human-facing 15,000 ms
+  per-turn ceiling. This product budget is not an acceptance, benchmark, or
+  routine-test budget.
 - Add draw state, messaging, replay storage, and local result handling.
 - Add online draw/rules synchronization only in a coordinated change with the
   authoritative server and a versioned protocol compatibility check.
@@ -391,7 +408,14 @@ replays before making product-performance claims about the oracle's hit rate.
 
 **Exit gate**
 
-- Desktop and representative mobile browser budgets are respected.
+- The feature-flagged human-facing `Hard+` path stays at or below its 15,000 ms
+  per-turn ceiling while meeting a measured per-device responsiveness budget.
+  Record that evidence on desktop and at least one representative mobile device;
+  this does not assume that a full 15 seconds is viable on mobile.
+- Automated/pinned-Hard acceptance continues to use the canonical 900 ms
+  active-time protocol. Routine CI and regression tests may use shorter
+  deterministic logical-clock deadlines or fixed-node/fixed-depth limits, but
+  never 15,000 ms.
 - Draws round-trip correctly through local and replay modes.
 - Any enabled online mode has passed server/client conformance for the exact
   rules-contract version; otherwise online draw adjudication remains disabled.
@@ -413,21 +437,18 @@ This stage starts only after Stage 3 has shipped or met its release gate.
 
 **Training**
 
-- Validate the complete loop on 7×7 with 16–64 Gumbel search simulations per
-  move.
-- Move to 9×9 after deterministic replay, checkpoint promotion, and evaluation
-  are reliable.
+- Validate the complete loop on canonical 9×9, selecting Gumbel simulation
+  counts by measured strength per budget only after deterministic replay,
+  checkpoint promotion, and evaluation are reliable.
 - Use the full legal-action mask from the authoritative engine.
 - Gate checkpoints through paired-opening matches against alpha-beta rather
   than self-play Elo alone.
 
-7×7 is a pipeline test, not a solved stepping stone or a promise of direct
-strategy transfer. Ten walls on 7×7 create a different wall density from 9×9.
-
 **Exit gate**
 
-- The learned agent beats Stage 2 alpha-beta at equal wall-clock time with a
-  statistically meaningful confidence interval.
+- The learned agent beats Stage 2 alpha-beta under the same canonical 900 ms
+  active-time protocol per turn, with a statistically meaningful confidence
+  interval.
 - It retains 100% legality and passes the exact reduced-position suite.
 - Adversarial wall-defense, corridor, tempo, and repetition probes show no
   regression against the classical baseline.
@@ -445,7 +466,6 @@ In parallel, expand exact truth data:
 
 - all zero-wall positions encountered in evaluation;
 - complete 3×3 and reduced 5×5 variants;
-- low-wall 7×7 strata where feasible;
 - proof-number search from selected tactical positions.
 
 These are validation assets and exact engine components, not evidence that the
@@ -481,9 +501,14 @@ Pin the baseline to the client's direct `aiDuelHard` call for
 `map === 'duel' && difficulty === 'hard'`, including the anti-stall replacement,
 its per-game counter reset, and the `recentAi` window, at commit `46a871c7`.
 Refactor its `Date.now()` dependency behind an injectable monotonic
-clock/deadline without changing search decisions. Use the real 700 ms deadline
-on pinned hardware for the primary product-strength claim and a deterministic
-logical clock or fixed node/depth budget for reproducible regression tests.
+clock/deadline without changing search decisions. The pinned-Hard acceptance
+runner gives both agents the canonical 900 ms active-time allowance per turn on
+pinned hardware. The pinned baseline retains its original internal 700 ms
+cutoff and therefore self-limits at roughly 700 ms; this asymmetry is baseline
+behavior and neither changes nor substitutes for the outer 900 ms protocol.
+Routine tests may use shorter deterministic logical-clock deadlines or fixed
+node/depth budgets for reproducibility, but never the human-facing 15,000 ms
+budget.
 Inject random seeds for any ladder agent that uses randomness.
 
 Use opening pairs as the statistical cluster when computing the 95% confidence
@@ -539,7 +564,7 @@ CI should run, in increasing cost:
 | Deterministic matches exaggerate conclusions | Paired opening book, side swaps, confidence intervals, SPRT |
 | Hand evaluation plateaus in wall-war positions | Feature ablation, adversarial suites, optional learned policy/value stage |
 | ML effort expands without a product result | Make Stage 3 independently shippable; require a measured win over alpha-beta to proceed |
-| 7×7 behavior fails to transfer | Use 7×7 only to validate infrastructure; retrain and retune on 9×9 |
+| AI scope drifts from canonical 9×9 | Reject new 7×7 AI implementation, tuning, benchmarking, self-play, training, truth-track, and release work; retain existing 7×7 material only as legacy compatibility |
 | Search and UI disagree under deadlines | Engine-owned deadlines, immutable last-completed iteration, WASM integration tests |
 
 ## Practical strength versus proof
@@ -552,7 +577,7 @@ The intended claims must remain distinct:
   no known exploit under the evaluation suite, but without a proof of optimality.
 - **Provably optimal play:** Limit claims to exactly enumerated reduced
   configurations and zero-wall strata. Do not describe full 9×9 or full-stock
-  7×7 as solved.
+  7×7 as solved; the latter is a historical claim guard, not future AI scope.
 
 Generalized Quoridor was proved PSPACE-complete in 2026
 ([Drop, Rin, and van der Velde](https://arxiv.org/abs/2605.22747);
@@ -569,8 +594,9 @@ Keep changes reviewable and independently reversible:
 1. **Normal-duel rules contract and fixtures:** scope/exclusions, examples,
    state/action serialization, repetition semantics, and golden positions
    without client rewiring.
-2. **JavaScript reference core:** pure 9×9/7×7 normal-Duel functions, Node
-   tests, and shadow comparisons against existing local Duel.
+2. **JavaScript reference core:** retain pure, parameterized normal-Duel
+   functions, Node tests, and shadow comparisons against existing local Duel;
+   new AI work targets only the canonical 9×9 profile.
 3. **Consumer migration:** replace `getValidMoves`, `getMovesFrom`,
    `moveTowardGoal`, and normal-Duel `tryWall` call paths; keep special modes on
    explicit legacy dispatch.
@@ -582,7 +608,9 @@ Keep changes reviewable and independently reversible:
 6. **Rust parity core:** native/WASM crate, corpus replay, perft, and benchmarks.
 7. **Alpha-beta v1:** search, repetition-safe TT, evaluation, zero-wall oracle,
    deterministic baseline, and ladder.
-8. **Separately versioned adapters:** Classic, Chaos, Hammer, random drops, and
-   2v2, each with its own contract and corpus.
 
 No Rust or ML work should merge before the Stage 0 parity gate is green.
+
+Separately versioned adapters for Classic, Chaos, Hammer, random drops, and
+2v2 are future separate work outside the current AI plan, not immediate AI PRs;
+each needs its own contract and corpus.
