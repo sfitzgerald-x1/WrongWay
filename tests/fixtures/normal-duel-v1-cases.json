@@ -1,0 +1,509 @@
+{
+  "fixtureFormat": "normal-duel-v1-fixtures-1.0.0",
+  "ruleset": "normal-duel-v1",
+  "configs": {
+    "standard-a": {
+      "ruleset": "normal-duel-v1",
+      "rows": 9,
+      "columns": 9,
+      "start": {"A": {"r": 8, "c": 4}, "B": {"r": 0, "c": 4}},
+      "goalRows": {"A": 0, "B": 8},
+      "initialStock": {"A": 10, "B": 10},
+      "jumpRule": "permissive-adjacent-exit-v1",
+      "repetitionThreshold": 3,
+      "plyCap": 200,
+      "firstPlayer": "A"
+    },
+    "standard-b": {
+      "ruleset": "normal-duel-v1",
+      "rows": 9,
+      "columns": 9,
+      "start": {"A": {"r": 8, "c": 4}, "B": {"r": 0, "c": 4}},
+      "goalRows": {"A": 0, "B": 8},
+      "initialStock": {"A": 10, "B": 10},
+      "jumpRule": "permissive-adjacent-exit-v1",
+      "repetitionThreshold": 3,
+      "plyCap": 200,
+      "firstPlayer": "B"
+    },
+    "blitz-a": {
+      "ruleset": "normal-duel-v1",
+      "rows": 7,
+      "columns": 7,
+      "start": {"A": {"r": 6, "c": 3}, "B": {"r": 0, "c": 3}},
+      "goalRows": {"A": 0, "B": 6},
+      "initialStock": {"A": 10, "B": 10},
+      "jumpRule": "permissive-adjacent-exit-v1",
+      "repetitionThreshold": 3,
+      "plyCap": 200,
+      "firstPlayer": "A"
+    },
+    "blitz-b": {
+      "ruleset": "normal-duel-v1",
+      "rows": 7,
+      "columns": 7,
+      "start": {"A": {"r": 6, "c": 3}, "B": {"r": 0, "c": 3}},
+      "goalRows": {"A": 0, "B": 6},
+      "initialStock": {"A": 10, "B": 10},
+      "jumpRule": "permissive-adjacent-exit-v1",
+      "repetitionThreshold": 3,
+      "plyCap": 200,
+      "firstPlayer": "B"
+    }
+  },
+  "cases": [
+    {
+      "id": "initial-9x9-a",
+      "kind": "query",
+      "configId": "standard-a",
+      "position": {
+        "pawns": {"A": {"r": 8, "c": 4}, "B": {"r": 0, "c": 4}},
+        "walls": [],
+        "stock": {"A": 10, "B": 10},
+        "turn": "A"
+      },
+      "expect": {
+        "legalActionCount": 131,
+        "legalPawnDestinations": [
+          {"r": 7, "c": 4},
+          {"r": 8, "c": 3},
+          {"r": 8, "c": 5}
+        ]
+      }
+    },
+    {
+      "id": "initial-9x9-b",
+      "kind": "query",
+      "configId": "standard-b",
+      "position": {
+        "pawns": {"A": {"r": 8, "c": 4}, "B": {"r": 0, "c": 4}},
+        "walls": [],
+        "stock": {"A": 10, "B": 10},
+        "turn": "B"
+      },
+      "expect": {
+        "legalActionCount": 131,
+        "legalPawnDestinations": [
+          {"r": 0, "c": 3},
+          {"r": 0, "c": 5},
+          {"r": 1, "c": 4}
+        ]
+      }
+    },
+    {
+      "id": "initial-7x7-a",
+      "kind": "query",
+      "configId": "blitz-a",
+      "position": {
+        "pawns": {"A": {"r": 6, "c": 3}, "B": {"r": 0, "c": 3}},
+        "walls": [],
+        "stock": {"A": 10, "B": 10},
+        "turn": "A"
+      },
+      "expect": {
+        "legalActionCount": 75,
+        "legalPawnDestinations": [
+          {"r": 5, "c": 3},
+          {"r": 6, "c": 2},
+          {"r": 6, "c": 4}
+        ]
+      }
+    },
+    {
+      "id": "initial-7x7-b",
+      "kind": "query",
+      "configId": "blitz-b",
+      "position": {
+        "pawns": {"A": {"r": 6, "c": 3}, "B": {"r": 0, "c": 3}},
+        "walls": [],
+        "stock": {"A": 10, "B": 10},
+        "turn": "B"
+      },
+      "expect": {
+        "legalActionCount": 75,
+        "legalPawnDestinations": [
+          {"r": 0, "c": 2},
+          {"r": 0, "c": 4},
+          {"r": 1, "c": 3}
+        ]
+      }
+    },
+    {
+      "id": "permissive-jump-open",
+      "kind": "query",
+      "configId": "standard-a",
+      "position": {
+        "pawns": {"A": {"r": 4, "c": 4}, "B": {"r": 3, "c": 4}},
+        "walls": [],
+        "stock": {"A": 10, "B": 10},
+        "turn": "A"
+      },
+      "expect": {
+        "legalPawnDestinations": [
+          {"r": 2, "c": 4},
+          {"r": 3, "c": 3},
+          {"r": 3, "c": 5},
+          {"r": 4, "c": 3},
+          {"r": 4, "c": 5},
+          {"r": 5, "c": 4}
+        ]
+      }
+    },
+    {
+      "id": "permissive-jump-straight-blocked",
+      "kind": "query",
+      "configId": "standard-a",
+      "position": {
+        "pawns": {"A": {"r": 4, "c": 4}, "B": {"r": 3, "c": 4}},
+        "walls": ["H-2-4"],
+        "stock": {"A": 9, "B": 10},
+        "turn": "A"
+      },
+      "expect": {
+        "legalPawnDestinations": [
+          {"r": 3, "c": 3},
+          {"r": 3, "c": 5},
+          {"r": 4, "c": 3},
+          {"r": 4, "c": 5},
+          {"r": 5, "c": 4}
+        ]
+      }
+    },
+    {
+      "id": "permissive-jump-corner",
+      "kind": "query",
+      "configId": "standard-a",
+      "position": {
+        "pawns": {"A": {"r": 1, "c": 0}, "B": {"r": 0, "c": 0}},
+        "walls": [],
+        "stock": {"A": 10, "B": 10},
+        "turn": "A"
+      },
+      "expect": {
+        "legalPawnDestinations": [
+          {"r": 0, "c": 1},
+          {"r": 1, "c": 1},
+          {"r": 2, "c": 0}
+        ]
+      }
+    },
+    {
+      "id": "ordinary-move-wall-blocked",
+      "kind": "query",
+      "configId": "standard-a",
+      "position": {
+        "pawns": {"A": {"r": 8, "c": 4}, "B": {"r": 0, "c": 4}},
+        "walls": ["H-7-4"],
+        "stock": {"A": 10, "B": 9},
+        "turn": "A"
+      },
+      "expect": {
+        "legalPawnDestinations": [
+          {"r": 8, "c": 3},
+          {"r": 8, "c": 5}
+        ]
+      }
+    },
+    {
+      "id": "wall-geometry-path",
+      "kind": "query",
+      "configId": "standard-a",
+      "position": {
+        "pawns": {"A": {"r": 8, "c": 4}, "B": {"r": 0, "c": 4}},
+        "walls": ["H-0-0"],
+        "stock": {"A": 10, "B": 9},
+        "turn": "A"
+      },
+      "action": {"kind": "wall", "wall": "H-0-2"},
+      "expect": {
+        "legal": true,
+        "actionCode": 83,
+        "pathsRemain": true,
+        "legacyComparable": true
+      }
+    },
+    {
+      "id": "wall-overlap-rejected",
+      "kind": "query",
+      "configId": "standard-a",
+      "position": {
+        "pawns": {"A": {"r": 8, "c": 4}, "B": {"r": 0, "c": 4}},
+        "walls": ["H-0-0"],
+        "stock": {"A": 9, "B": 10},
+        "turn": "B"
+      },
+      "action": {"kind": "wall", "wall": "H-0-1"},
+      "expect": {
+        "legal": false,
+        "actionCode": 82,
+        "legacyComparable": true
+      }
+    },
+    {
+      "id": "wall-crossing-rejected",
+      "kind": "query",
+      "configId": "standard-a",
+      "position": {
+        "pawns": {"A": {"r": 8, "c": 4}, "B": {"r": 0, "c": 4}},
+        "walls": ["H-0-0"],
+        "stock": {"A": 9, "B": 10},
+        "turn": "B"
+      },
+      "action": {"kind": "wall", "wall": "V-0-0"},
+      "expect": {
+        "legal": false,
+        "actionCode": 145,
+        "legacyComparable": true
+      }
+    },
+    {
+      "id": "wall-duplicate-rejected",
+      "kind": "query",
+      "configId": "standard-a",
+      "position": {
+        "pawns": {"A": {"r": 8, "c": 4}, "B": {"r": 0, "c": 4}},
+        "walls": ["H-0-0"],
+        "stock": {"A": 9, "B": 10},
+        "turn": "B"
+      },
+      "action": {"kind": "wall", "wall": "H-0-0"},
+      "expect": {
+        "legal": false,
+        "actionCode": 81,
+        "legacyComparable": true
+      }
+    },
+    {
+      "id": "wall-out-of-bounds-rejected",
+      "kind": "query",
+      "configId": "standard-a",
+      "position": {
+        "pawns": {"A": {"r": 8, "c": 4}, "B": {"r": 0, "c": 4}},
+        "walls": [],
+        "stock": {"A": 10, "B": 10},
+        "turn": "A"
+      },
+      "action": {"kind": "wall", "wall": "H-8-0"},
+      "expect": {
+        "legal": false,
+        "legacyComparable": false
+      }
+    },
+    {
+      "id": "wall-zero-stock-rejected",
+      "kind": "query",
+      "configId": "standard-a",
+      "position": {
+        "pawns": {"A": {"r": 8, "c": 4}, "B": {"r": 0, "c": 4}},
+        "walls": [
+          "H-1-7",
+          "H-3-3",
+          "H-4-3",
+          "H-5-4",
+          "H-6-1",
+          "H-6-6",
+          "V-0-2",
+          "V-0-6",
+          "V-0-7",
+          "V-6-0"
+        ],
+        "stock": {"A": 0, "B": 10},
+        "turn": "A"
+      },
+      "action": {"kind": "wall", "wall": "H-0-0"},
+      "expect": {
+        "legal": false,
+        "actionCode": 81,
+        "legacyComparable": false
+      }
+    },
+    {
+      "id": "wall-path-cut-rejected",
+      "kind": "query",
+      "configId": "standard-a",
+      "position": {
+        "pawns": {"A": {"r": 8, "c": 4}, "B": {"r": 0, "c": 4}},
+        "walls": ["H-6-6", "V-7-3", "V-7-6"],
+        "stock": {"A": 7, "B": 10},
+        "turn": "A"
+      },
+      "action": {"kind": "wall", "wall": "H-6-4"},
+      "expect": {
+        "legal": false,
+        "actionCode": 133,
+        "pathsRemain": false,
+        "legacyComparable": true
+      }
+    },
+    {
+      "id": "wall-resets-repetition",
+      "kind": "transition",
+      "configId": "standard-a",
+      "state": {
+        "position": {
+          "pawns": {"A": {"r": 8, "c": 4}, "B": {"r": 0, "c": 4}},
+          "walls": [],
+          "stock": {"A": 10, "B": 10},
+          "turn": "A"
+        },
+        "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",76,4,[],[],10,10,\"A\"]",
+        "ply": 4,
+        "historyStartPly": 0,
+        "repetitionCounts": [
+          {
+            "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",75,3,[],[],10,10,\"A\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",75,4,[],[],10,10,\"B\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",76,3,[],[],10,10,\"B\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",76,4,[],[],10,10,\"A\"]",
+            "count": 2
+          }
+        ],
+        "outcome": {"kind": "ongoing"}
+      },
+      "action": {"kind": "wall", "wall": "H-0-0"},
+      "nextState": {
+        "position": {
+          "pawns": {"A": {"r": 8, "c": 4}, "B": {"r": 0, "c": 4}},
+          "walls": ["H-0-0"],
+          "stock": {"A": 9, "B": 10},
+          "turn": "B"
+        },
+        "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",76,4,[0],[],9,10,\"B\"]",
+        "ply": 5,
+        "historyStartPly": 5,
+        "repetitionCounts": [
+          {
+            "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",76,4,[0],[],9,10,\"B\"]",
+            "count": 1
+          }
+        ],
+        "outcome": {"kind": "ongoing"}
+      },
+      "expect": {
+        "legal": true,
+        "actionCode": 81,
+        "pathsRemain": true,
+        "legacyComparable": true
+      }
+    },
+    {
+      "id": "pawn-preserves-repetition",
+      "kind": "transition",
+      "configId": "standard-b",
+      "state": {
+        "position": {
+          "pawns": {"A": {"r": 8, "c": 4}, "B": {"r": 0, "c": 4}},
+          "walls": [],
+          "stock": {"A": 10, "B": 10},
+          "turn": "B"
+        },
+        "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"B\",76,4,[],[],10,10,\"B\"]",
+        "ply": 0,
+        "historyStartPly": 0,
+        "repetitionCounts": [
+          {
+            "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"B\",76,4,[],[],10,10,\"B\"]",
+            "count": 1
+          }
+        ],
+        "outcome": {"kind": "ongoing"}
+      },
+      "action": {"kind": "pawn", "to": {"r": 0, "c": 3}},
+      "nextState": {
+        "position": {
+          "pawns": {"A": {"r": 8, "c": 4}, "B": {"r": 0, "c": 3}},
+          "walls": [],
+          "stock": {"A": 10, "B": 10},
+          "turn": "A"
+        },
+        "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"B\",76,3,[],[],10,10,\"A\"]",
+        "ply": 1,
+        "historyStartPly": 0,
+        "repetitionCounts": [
+          {
+            "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"B\",76,3,[],[],10,10,\"A\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"B\",76,4,[],[],10,10,\"B\"]",
+            "count": 1
+          }
+        ],
+        "outcome": {"kind": "ongoing"}
+      },
+      "expect": {
+        "legal": true,
+        "actionCode": 3,
+        "legacyComparable": true
+      }
+    },
+    {
+      "id": "goal-beats-ply-cap",
+      "kind": "adjudication",
+      "configId": "standard-a",
+      "facts": {
+        "goalWinner": "A",
+        "resultingPositionCount": 3,
+        "resultingPly": 200
+      },
+      "expect": {
+        "outcome": {"kind": "win", "winner": "A", "reason": "goal"}
+      }
+    },
+    {
+      "id": "threefold-beats-ply-cap",
+      "kind": "adjudication",
+      "configId": "standard-a",
+      "facts": {
+        "goalWinner": null,
+        "resultingPositionCount": 3,
+        "resultingPly": 200
+      },
+      "expect": {
+        "outcome": {"kind": "draw", "reason": "threefold_repetition"}
+      }
+    },
+    {
+      "id": "ply-cap-boundary",
+      "kind": "adjudication",
+      "configId": "standard-a",
+      "facts": {
+        "goalWinner": null,
+        "resultingPositionCount": 1,
+        "resultingPly": 200
+      },
+      "expect": {
+        "outcome": {"kind": "draw", "reason": "ply_cap"}
+      }
+    },
+    {
+      "id": "terminal-action-rejected",
+      "kind": "rejection",
+      "description": "No action is legal after a terminal outcome.",
+      "input": {
+        "outcome": {"kind": "draw", "reason": "ply_cap"},
+        "action": {"kind": "pawn", "to": {"r": 7, "c": 4}}
+      },
+      "expect": {"error": "terminal_state"}
+    },
+    {
+      "id": "hammer-feature-rejected",
+      "kind": "rejection",
+      "description": "Hammer state cannot be reinterpreted as normal Duel.",
+      "input": {
+        "ruleset": "normal-duel-v1",
+        "features": {"hammer": true}
+      },
+      "expect": {"error": "unsupported_feature"}
+    }
+  ]
+}

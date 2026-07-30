@@ -1,0 +1,318 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wrongway.local/normal-duel-v1-fixtures-1.0.0.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fixtureFormat", "ruleset", "configs", "cases"],
+  "properties": {
+    "fixtureFormat": {"const": "normal-duel-v1-fixtures-1.0.0"},
+    "ruleset": {"const": "normal-duel-v1"},
+    "configs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["standard-a", "standard-b", "blitz-a", "blitz-b"],
+      "properties": {
+        "standard-a": {"$ref": "#/$defs/config"},
+        "standard-b": {"$ref": "#/$defs/config"},
+        "blitz-a": {"$ref": "#/$defs/config"},
+        "blitz-b": {"$ref": "#/$defs/config"}
+      }
+    },
+    "cases": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/case"}
+    }
+  },
+  "$defs": {
+    "player": {"enum": ["A", "B"]},
+    "coord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["r", "c"],
+      "properties": {
+        "r": {"type": "integer", "minimum": 0, "maximum": 8},
+        "c": {"type": "integer", "minimum": 0, "maximum": 8}
+      }
+    },
+    "playersCoord": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["A", "B"],
+      "properties": {
+        "A": {"$ref": "#/$defs/coord"},
+        "B": {"$ref": "#/$defs/coord"}
+      }
+    },
+    "playersInt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["A", "B"],
+      "properties": {
+        "A": {"type": "integer", "minimum": 0},
+        "B": {"type": "integer", "minimum": 0}
+      }
+    },
+    "wall": {
+      "type": "string",
+      "pattern": "^[HV]-(0|[1-9][0-9]*)-(0|[1-9][0-9]*)$"
+    },
+    "config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ruleset",
+        "rows",
+        "columns",
+        "start",
+        "goalRows",
+        "initialStock",
+        "jumpRule",
+        "repetitionThreshold",
+        "plyCap",
+        "firstPlayer"
+      ],
+      "properties": {
+        "ruleset": {"const": "normal-duel-v1"},
+        "rows": {"enum": [7, 9]},
+        "columns": {"enum": [7, 9]},
+        "start": {"$ref": "#/$defs/playersCoord"},
+        "goalRows": {"$ref": "#/$defs/playersInt"},
+        "initialStock": {"$ref": "#/$defs/playersInt"},
+        "jumpRule": {"const": "permissive-adjacent-exit-v1"},
+        "repetitionThreshold": {"const": 3},
+        "plyCap": {"type": "integer", "minimum": 1},
+        "firstPlayer": {"$ref": "#/$defs/player"}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "rows": {"const": 7},
+            "columns": {"const": 7}
+          }
+        },
+        {
+          "properties": {
+            "rows": {"const": 9},
+            "columns": {"const": 9}
+          }
+        }
+      ]
+    },
+    "position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pawns", "walls", "stock", "turn"],
+      "properties": {
+        "pawns": {"$ref": "#/$defs/playersCoord"},
+        "walls": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/wall"}
+        },
+        "stock": {"$ref": "#/$defs/playersInt"},
+        "turn": {"$ref": "#/$defs/player"}
+      }
+    },
+    "outcome": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {"kind": {"const": "ongoing"}}
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "winner", "reason"],
+          "properties": {
+            "kind": {"const": "win"},
+            "winner": {"$ref": "#/$defs/player"},
+            "reason": {"const": "goal"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "reason"],
+          "properties": {
+            "kind": {"const": "draw"},
+            "reason": {"enum": ["threefold_repetition", "ply_cap"]}
+          }
+        }
+      ]
+    },
+    "repetitionCount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["positionKey", "count"],
+      "properties": {
+        "positionKey": {"type": "string", "minLength": 2},
+        "count": {"type": "integer", "minimum": 1}
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "position",
+        "positionKey",
+        "ply",
+        "historyStartPly",
+        "repetitionCounts",
+        "outcome"
+      ],
+      "properties": {
+        "position": {"$ref": "#/$defs/position"},
+        "positionKey": {"type": "string", "minLength": 2},
+        "ply": {"type": "integer", "minimum": 0},
+        "historyStartPly": {"type": "integer", "minimum": 0},
+        "repetitionCounts": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/repetitionCount"}
+        },
+        "outcome": {"$ref": "#/$defs/outcome"}
+      }
+    },
+    "action": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "to"],
+          "properties": {
+            "kind": {"const": "pawn"},
+            "to": {"$ref": "#/$defs/coord"}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "wall"],
+          "properties": {
+            "kind": {"const": "wall"},
+            "wall": {"$ref": "#/$defs/wall"}
+          }
+        }
+      ]
+    },
+    "queryExpect": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "legal": {"type": "boolean"},
+        "actionCode": {"type": "integer", "minimum": 0},
+        "legalActionCount": {"type": "integer", "minimum": 0},
+        "legalPawnDestinations": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/coord"}
+        },
+        "pathsRemain": {"type": "boolean"},
+        "legacyComparable": {"type": "boolean"}
+      }
+    },
+    "queryCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "configId", "position", "expect"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+        "kind": {"const": "query"},
+        "description": {"type": "string"},
+        "configId": {"type": "string"},
+        "position": {"$ref": "#/$defs/position"},
+        "action": {"$ref": "#/$defs/action"},
+        "expect": {"$ref": "#/$defs/queryExpect"}
+      }
+    },
+    "transitionCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "configId",
+        "state",
+        "action",
+        "nextState",
+        "expect"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+        "kind": {"const": "transition"},
+        "description": {"type": "string"},
+        "configId": {"type": "string"},
+        "state": {"$ref": "#/$defs/state"},
+        "action": {"$ref": "#/$defs/action"},
+        "nextState": {"$ref": "#/$defs/state"},
+        "expect": {"$ref": "#/$defs/queryExpect"}
+      }
+    },
+    "adjudicationFacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["goalWinner", "resultingPositionCount", "resultingPly"],
+      "properties": {
+        "goalWinner": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/player"}
+          ]
+        },
+        "resultingPositionCount": {"type": "integer", "minimum": 1},
+        "resultingPly": {"type": "integer", "minimum": 1}
+      }
+    },
+    "adjudicationCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "configId", "facts", "expect"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+        "kind": {"const": "adjudication"},
+        "description": {"type": "string"},
+        "configId": {"type": "string"},
+        "facts": {"$ref": "#/$defs/adjudicationFacts"},
+        "expect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["outcome"],
+          "properties": {"outcome": {"$ref": "#/$defs/outcome"}}
+        }
+      }
+    },
+    "rejectionCase": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "input", "expect"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+        "kind": {"const": "rejection"},
+        "description": {"type": "string"},
+        "input": {"type": "object"},
+        "expect": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["error"],
+          "properties": {
+            "error": {"enum": ["terminal_state", "unsupported_feature"]}
+          }
+        }
+      }
+    },
+    "case": {
+      "oneOf": [
+        {"$ref": "#/$defs/queryCase"},
+        {"$ref": "#/$defs/transitionCase"},
+        {"$ref": "#/$defs/adjudicationCase"},
+        {"$ref": "#/$defs/rejectionCase"}
+      ]
+    }
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "wrongway",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "test:contract": "node --test tests/normal-duel-contract.test.mjs"
+  },
+  "devDependencies": {
+    "ajv": "8.20.0"
+  }
+}
