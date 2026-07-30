@@ -7,9 +7,9 @@ use crate::{
 
 use super::budget::{DeadlineBudget, NodeBudget, SearchBudget};
 use super::eval::{evaluate, MATE_SCORE};
-use super::move_picker::Heuristics;
+use super::move_picker::{uses_profiled_ordering, Heuristics, OrderingHints};
 use super::oracle::ExactZeroWallOracle;
-use super::tt::{Bound, TranspositionTable};
+use super::tt::{mirror_code, Bound, TranspositionTable};
 
 const NEG_INFINITY: i32 = -MATE_SCORE - 1;
 const POS_INFINITY: i32 = MATE_SCORE + 1;
@@ -301,17 +301,26 @@ impl<B: SearchBudget> SearchContext<'_, B> {
         if actions.len == 0 {
             return Err(NormalDuelError::InvalidState);
         }
-        let ordered = self.heuristics.order(
+        let ordering_nodes = self.nodes;
+        let budget = &mut self.budget;
+        let Some(ordered) = self.heuristics.order(
             self.config,
             state,
             &actions,
-            tt_action,
-            ply,
-            previous_action,
-        );
+            OrderingHints {
+                tt_action,
+                ply,
+                previous_action,
+                canonical_mirrored: identity.mirrored(),
+            },
+            || budget.exhausted(ordering_nodes),
+        ) else {
+            return Ok(None);
+        };
         let mover = state.position.turn;
         let mut best = NEG_INFINITY;
         let mut best_action = None;
+        let mut best_tie_code = None;
         for (move_number, action) in ordered.into_iter().enumerate() {
             if self.stopped() {
                 return Ok(None);
@@ -373,9 +382,15 @@ impl<B: SearchBudget> SearchContext<'_, B> {
                 return Ok(None);
             };
             let score = -child.score;
-            if score > best || (score == best && Some(action.code) < best_action) {
+            let tie_code = if uses_profiled_ordering(self.config) && identity.mirrored() {
+                mirror_code(self.config, action.code)
+            } else {
+                action.code
+            };
+            if score > best || (score == best && Some(tie_code) < best_tie_code) {
                 best = score;
                 best_action = Some(action.code);
+                best_tie_code = Some(tie_code);
             }
             alpha = alpha.max(score);
             if alpha >= beta {
@@ -885,6 +900,71 @@ mod tests {
             let legal = crate::legal_action_codes(&config, &state).unwrap();
             assert!(legal.contains(&report.action_code.unwrap()));
         }
+    }
+
+    #[test]
+    fn cold_depth_one_equal_wins_resolve_to_mirrored_canonical_actions() {
+        let config = Config {
+            initial_stock: Players { a: 1, b: 1 },
+            ..zero_wall_config()
+        };
+        let left_codes = [67, 81, 58, 3, 49, 4, 40, 3, 31, 4, 22, 3, 13, 4];
+        let right_codes = left_codes.map(|code| mirror_code(&config, code));
+        let build = |codes: &[usize]| {
+            let mut state = create_initial_state(&config).unwrap();
+            for &code in codes {
+                state = apply_legal_action(&config, &state, &decode_action(&config, code).unwrap())
+                    .unwrap();
+            }
+            state
+        };
+        let left = build(&left_codes);
+        let right = build(&right_codes);
+        let left_prepared = PreparedGameState::from_game_state(&config, &left).unwrap();
+        let right_prepared = PreparedGameState::from_game_state(&config, &right).unwrap();
+        let left_identity = left_prepared.search_identity(&config);
+        let right_identity = right_prepared.search_identity(&config);
+        assert_eq!(left_identity, right_identity);
+        assert_ne!(left_identity.mirrored(), right_identity.mirrored());
+
+        let winning_codes = |state: &PreparedGameState| {
+            compact_legal_codes(&config, state)
+                .iter()
+                .filter(|&code| {
+                    let mut child = state.clone();
+                    child.apply_generated_code(&config, code).unwrap();
+                    matches!(
+                        child.outcome,
+                        Outcome::Win {
+                            winner: Player::A,
+                            ..
+                        }
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let left_wins = winning_codes(&left_prepared);
+        let right_wins = winning_codes(&right_prepared);
+        assert_eq!(left_wins.len(), 2);
+        assert_eq!(right_wins.len(), 2);
+
+        let options = SearchOptions {
+            max_depth: 1,
+            transposition_capacity: 64,
+            aspiration_window: 32,
+        };
+        let left_report = search_nodes(&config, &left, 100_000, options).unwrap();
+        let right_report = search_nodes(&config, &right, 100_000, options).unwrap();
+        assert_eq!(left_report.completed_depth, 1);
+        assert_eq!(right_report.completed_depth, 1);
+        assert_eq!(left_report.score, Some(MATE_SCORE - 1));
+        assert_eq!(right_report.score, Some(MATE_SCORE - 1));
+        assert!(left_wins.contains(&left_report.action_code.unwrap()));
+        assert!(right_wins.contains(&right_report.action_code.unwrap()));
+        assert_eq!(
+            mirror_code(&config, left_report.action_code.unwrap()),
+            right_report.action_code.unwrap()
+        );
     }
 
     #[test]
