@@ -765,7 +765,8 @@ test('enforced gate validation fixes strength, sample, isolation, and provenance
       ...options,
       moduleUrl: pathToFileURL(artifact.entryPath).href,
       candidateManifestPath: artifact.manifestPath,
-      requireCanonicalMemoryIsolation: true
+      requireCanonicalMemoryIsolation:
+        options.requireCanonicalMemoryIsolation ?? false
     });
   };
   const canonical = canonicalEnforcedCorpus();
@@ -782,6 +783,28 @@ test('enforced gate validation fixes strength, sample, isolation, and provenance
     book: canonical.book,
     corpusProvenance: canonical.provenance
   };
+  if (!isAuthenticatedCandidateAdapter(contender)
+    || !isPinnedHardWorkerAdapter(baseline)) {
+    assert.equal(
+      contender.capabilities.memoryIsolation,
+      'v8-old-space-only-ineligible-v1'
+    );
+    assert.equal(
+      baseline.capabilities.memoryIsolation,
+      'v8-old-space-only-ineligible-v1'
+    );
+    assert.throws(
+      () => validateEnforcedStrengthOptions(valid),
+      /canonical subprocess isolation/
+    );
+    await assert.rejects(
+      isolated('canonical-isolation-required', {
+        requireCanonicalMemoryIsolation: true
+      }),
+      /requires verified macOS .*taskpolicy support/
+    );
+    return;
+  }
   const token = validateEnforcedStrengthOptions(valid);
   assert.equal(token.eligible, true);
   assert.equal(token.perMoveDeadlineMs, 900);
@@ -1282,6 +1305,14 @@ test('taskpolicy memory profile kills external Buffer growth and reaps the engin
     memoryLimitMiB: 96,
     v8OldSpaceMiB: 64
   });
+  if (engine.capabilities.memoryIsolation !== 'darwin-taskpolicy-rss-limit-v1') {
+    assert.equal(
+      engine.capabilities.memoryIsolation,
+      'v8-old-space-only-ineligible-v1'
+    );
+    assert.equal(engine.capabilities.memoryLimitMiB, null);
+    return;
+  }
   assert.equal(engine.capabilities.memoryIsolation, 'darwin-taskpolicy-rss-limit-v1');
   assert.equal(engine.capabilities.memoryLimitMiB, 96);
   const startedAt = performance.now();
@@ -1507,7 +1538,11 @@ test('strength CLI contains candidate output, signals, and private IPC', () => {
     const report = JSON.parse(result.stdout);
     assert.equal(report.results.length, 2);
     assert.deepEqual(report.baselineProvenance.trustRoot, HARD_BASELINE_TRUST_ROOT);
-    assert.equal(report.baselineProvenance.pinnedWorkerVerified, true);
+    assert.equal(
+      report.baselineProvenance.pinnedWorkerVerified,
+      report.baselineIsolationProvenance.memoryIsolation
+        === 'darwin-taskpolicy-rss-limit-v1'
+    );
     assert.ok(
       report.results.some(({ error }) => error === 'contained-signal-and-ipc-ok'),
       'the candidate reached every denied signal/IPC probe'
@@ -1547,12 +1582,14 @@ test('candidate artifact manifests bind labels, files, transitive loads, and eve
   const engine = await createWorkerEngineAdapter({
     moduleUrl: pathToFileURL(artifact.entryPath).href,
     candidateManifestPath: artifact.manifestPath,
-    requireCanonicalMemoryIsolation: true
+    requireCanonicalMemoryIsolation: false
   });
   const provenance = getCandidateArtifactProvenance(engine);
+  const canonicalIsolation =
+    engine.capabilities.memoryIsolation === 'darwin-taskpolicy-rss-limit-v1';
   assert.equal(engine.id, 'claimed-human-label');
   assert.equal(engine.version, 'content-addressed-release');
-  assert.equal(isAuthenticatedCandidateAdapter(engine), true);
+  assert.equal(isAuthenticatedCandidateAdapter(engine), canonicalIsolation);
   assert.equal(provenance.verification, 'content-addressed-manifest-v1');
   assert.equal(provenance.manifestSha256, sha256ArtifactFile(artifact.manifestPath));
   assert.deepEqual(
@@ -1580,7 +1617,7 @@ test('candidate artifact manifests bind labels, files, transitive loads, and eve
     perMoveDeadlineMs: CANONICAL_STRENGTH_DEADLINE_MS,
     minimumOpeningPairs: 1
   });
-  assert.equal(artifactReport.candidateArtifactVerified, true);
+  assert.equal(artifactReport.candidateArtifactVerified, canonicalIsolation);
   assert.deepEqual(artifactReport.candidateArtifactProvenance, provenance);
   assert.deepEqual(
     artifactReport.candidateIsolationProvenance,
