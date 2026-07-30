@@ -1,5 +1,5 @@
 {
-  "fixtureFormat": "normal-duel-wasm-search-nodes-v1-1.0.0",
+  "fixtureFormat": "normal-duel-wasm-search-nodes-v1-1.2.0",
   "ruleset": "normal-duel-v1",
   "caseId": "initial-standard-a-non-power-of-two-tt",
   "request": {
@@ -46,8 +46,14 @@
     "nodes": 4096,
     "stopped": true,
     "principalVariation": [67],
+    "committedIterationNodes": [136],
+    "committedIterationScores": [94],
     "diagnostics": {
       "rootActionCount": 131,
+      "staticLeafCount": 3909,
+      "immediateGoalHorizonHits": 0,
+      "zeroWallOracleQueries": 0,
+      "zeroWallOracleSolutions": 0,
       "ttProbes": 187,
       "ttHits": 120,
       "ttBoundCutoffs": 84,
@@ -55,6 +61,73 @@
       "pvsResearches": 21,
       "aspirationResearches": 1,
       "repetitionHintOnlyProbes": 2
+    }
+  },
+  "defaultHorizon": {
+    "request": {
+      "config": {
+        "ruleset": "normal-duel-v1",
+        "rows": 7,
+        "columns": 7,
+        "start": {"A": {"r": 6, "c": 3}, "B": {"r": 0, "c": 3}},
+        "goalRows": {"A": 0, "B": 6},
+        "initialStock": {"A": 1, "B": 0},
+        "jumpRule": "permissive-adjacent-exit-v1",
+        "repetitionThreshold": 3,
+        "plyCap": 64,
+        "firstPlayer": "A"
+      },
+      "state": {
+        "position": {
+          "pawns": {"A": {"r": 6, "c": 2}, "B": {"r": 5, "c": 3}},
+          "walls": [],
+          "stock": {"A": 1, "B": 0},
+          "turn": "A"
+        },
+        "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,1,0,\"permissive-adjacent-exit-v1\",3,64,\"A\",44,38,[],[],1,0,\"A\"]",
+        "ply": 10,
+        "historyStartPly": 0,
+        "repetitionCounts": [
+          {"positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,1,0,\"permissive-adjacent-exit-v1\",3,64,\"A\",44,10,[],[],1,0,\"A\"]", "count": 1},
+          {"positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,1,0,\"permissive-adjacent-exit-v1\",3,64,\"A\",44,17,[],[],1,0,\"B\"]", "count": 1},
+          {"positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,1,0,\"permissive-adjacent-exit-v1\",3,64,\"A\",44,24,[],[],1,0,\"A\"]", "count": 1},
+          {"positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,1,0,\"permissive-adjacent-exit-v1\",3,64,\"A\",44,3,[],[],1,0,\"B\"]", "count": 1},
+          {"positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,1,0,\"permissive-adjacent-exit-v1\",3,64,\"A\",44,31,[],[],1,0,\"B\"]", "count": 1},
+          {"positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,1,0,\"permissive-adjacent-exit-v1\",3,64,\"A\",44,38,[],[],1,0,\"A\"]", "count": 1},
+          {"positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,1,0,\"permissive-adjacent-exit-v1\",3,64,\"A\",45,10,[],[],1,0,\"B\"]", "count": 1},
+          {"positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,1,0,\"permissive-adjacent-exit-v1\",3,64,\"A\",45,17,[],[],1,0,\"A\"]", "count": 1},
+          {"positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,1,0,\"permissive-adjacent-exit-v1\",3,64,\"A\",45,24,[],[],1,0,\"B\"]", "count": 1},
+          {"positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,1,0,\"permissive-adjacent-exit-v1\",3,64,\"A\",45,3,[],[],1,0,\"A\"]", "count": 1},
+          {"positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,1,0,\"permissive-adjacent-exit-v1\",3,64,\"A\",45,31,[],[],1,0,\"A\"]", "count": 1}
+        ],
+        "outcome": {"kind": "ongoing"}
+      },
+      "nodeBudget": 4096
+    },
+    "report": {
+      "action": {"kind": "wall", "wall": "H-5-3"},
+      "actionCode": 82,
+      "score": -406,
+      "completedDepth": 1,
+      "nodes": 4096,
+      "stopped": true,
+      "principalVariation": [82],
+      "committedIterationNodes": [76],
+      "committedIterationScores": [-406],
+      "diagnostics": {
+        "rootActionCount": 75,
+        "staticLeafCount": 2,
+        "immediateGoalHorizonHits": 73,
+        "zeroWallOracleQueries": 1,
+        "zeroWallOracleSolutions": 0,
+        "ttProbes": 2,
+        "ttHits": 1,
+        "ttBoundCutoffs": 0,
+        "betaCutoffs": 0,
+        "pvsResearches": 0,
+        "aspirationResearches": 0,
+        "repetitionHintOnlyProbes": 1
+      }
     }
   }
 }
