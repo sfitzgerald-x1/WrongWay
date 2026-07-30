@@ -1,0 +1,173 @@
+{
+  "manifestFormat": "normal-duel-balanced-opening-manifest-v1",
+  "bookFormat": "normal-duel-balanced-opening-book-v1",
+  "generatorVersion": "normal-duel-balanced-opening-generator-1.0.0",
+  "prng": "lcg32-v1",
+  "seed": 1831565813,
+  "openingCount": 12,
+  "targetPlies": [
+    4,
+    5,
+    6
+  ],
+  "configurationSha256": "1869dc2a71b4043aebee681e64283f42b93d13665f7ead9f1eca9ccb1a0b1da0",
+  "sha256": "e98e4865534bc197e213e6a6838a03f2df351038c6f6248025ccfd2eebd79f85",
+  "openings": [
+    {
+      "id": "balanced-9x9-001",
+      "seed": 53002960,
+      "targetPlies": 4,
+      "actionCodes": [
+        67,
+        134,
+        66,
+        3
+      ],
+      "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",66,3,[53],[],10,9,\"A\"]"
+    },
+    {
+      "id": "balanced-9x9-002",
+      "seed": 2842671087,
+      "targetPlies": 5,
+      "actionCodes": [
+        134,
+        3,
+        67,
+        2,
+        66
+      ],
+      "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",66,2,[53],[],9,10,\"B\"]"
+    },
+    {
+      "id": "balanced-9x9-003",
+      "seed": 1354466434,
+      "targetPlies": 6,
+      "actionCodes": [
+        67,
+        3,
+        66,
+        2,
+        198,
+        1
+      ],
+      "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",66,1,[],[53],9,10,\"A\"]"
+    },
+    {
+      "id": "balanced-9x9-004",
+      "seed": 4252137977,
+      "targetPlies": 4,
+      "actionCodes": [
+        67,
+        3,
+        66,
+        89
+      ],
+      "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",66,3,[8],[],10,9,\"A\"]"
+    },
+    {
+      "id": "balanced-9x9-005",
+      "seed": 2703842052,
+      "targetPlies": 5,
+      "actionCodes": [
+        67,
+        3,
+        198,
+        2,
+        199
+      ],
+      "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",67,2,[],[53,54],8,10,\"B\"]"
+    },
+    {
+      "id": "balanced-9x9-006",
+      "seed": 3375377043,
+      "targetPlies": 6,
+      "actionCodes": [
+        67,
+        89,
+        66,
+        200,
+        65,
+        3
+      ],
+      "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",65,3,[8],[55],10,8,\"A\"]"
+    },
+    {
+      "id": "balanced-9x9-007",
+      "seed": 3442650838,
+      "targetPlies": 4,
+      "actionCodes": [
+        89,
+        3,
+        200,
+        2
+      ],
+      "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",76,2,[8],[55],8,10,\"A\"]"
+    },
+    {
+      "id": "balanced-9x9-008",
+      "seed": 3968931901,
+      "targetPlies": 5,
+      "actionCodes": [
+        67,
+        127,
+        66,
+        3,
+        65
+      ],
+      "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",65,3,[46],[],10,9,\"B\"]"
+    },
+    {
+      "id": "balanced-9x9-009",
+      "seed": 1835695224,
+      "targetPlies": 6,
+      "actionCodes": [
+        127,
+        3,
+        67,
+        2,
+        66,
+        1
+      ],
+      "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",66,1,[46],[],9,10,\"A\"]"
+    },
+    {
+      "id": "balanced-9x9-010",
+      "seed": 1613174135,
+      "targetPlies": 4,
+      "actionCodes": [
+        67,
+        3,
+        66,
+        2
+      ],
+      "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",66,2,[],[],10,10,\"A\"]"
+    },
+    {
+      "id": "balanced-9x9-011",
+      "seed": 3382146154,
+      "targetPlies": 5,
+      "actionCodes": [
+        67,
+        3,
+        66,
+        2,
+        65
+      ],
+      "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",65,2,[],[],10,10,\"B\"]"
+    },
+    {
+      "id": "balanced-9x9-012",
+      "seed": 802953409,
+      "targetPlies": 6,
+      "actionCodes": [
+        67,
+        3,
+        66,
+        2,
+        65,
+        1
+      ],
+      "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",65,1,[],[],10,10,\"A\"]"
+    }
+  ]
+}
