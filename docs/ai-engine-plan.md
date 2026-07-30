@@ -9,6 +9,8 @@
   the foundation and benchmark for learned search.
 - **Recommended deployment path:** JavaScript reference engine → native/WASM
   alpha-beta engine → optional Gumbel AlphaZero training → measured hybrid.
+- **Primary strength bar:** At least a 66% win rate against the pinned current
+  Hard AI under the paired, seeded evaluation protocol defined below.
 - **Non-goal:** Claiming that full 9×9, ten-barricade WrongWay is solved.
 
 ## Executive decision
@@ -349,9 +351,10 @@ replays before making product-performance claims about the oracle's hit rate.
 
 **Exit gate**
 
-- At least a 90% score against a pinned current-Hard baseline under paired
+- At least a 66% win rate against a pinned current-Hard baseline under paired
   openings, injected random seeds, and the same move-time budget on recorded
-  hardware.
+  hardware. Win rate is `wins / all completed games`; draws are not counted as
+  wins, and the reported confidence interval must exclude 50%.
 - 100% agreement with exact reduced-position suites.
 - No deadline overrun beyond a defined small tolerance in native or WASM builds.
 - Full-width verification of all headline match results.
