@@ -1,0 +1,254 @@
+{
+  "corpusFormat": "normal-duel-v1-trajectories-1.1.0",
+  "generatorVersion": "normal-duel-trajectory-generator-1.1.0",
+  "selectionModes": {
+    "seeded-lcg32-v1": {
+      "prng": "lcg32-v1",
+      "seed": "uint32",
+      "transition": "state=(state*1664525+1013904223) mod 2^32",
+      "selection": "initialize from the uint32 seed; advance before every selection; filter the engine canonical ascending legal-action list to wall when step%3===0 and pawn otherwise; choose candidates[state%candidates.length]; modulo bias is intentional and no rejection sampling is used"
+    },
+    "explicit-actions-v1": {
+      "prng": null,
+      "seed": null,
+      "selection": "use the checked-in explicit legal action sequence for each terminal probe"
+    }
+  },
+  "lineCount": 33,
+  "sha256": "c9b113451dc0ba5c14b57b86ff0aa07407814e59398f23b799bbecb43440a467",
+  "trajectories": [
+    {
+      "trajectoryId": "sample-standard-9x9-a",
+      "selectionMode": "seeded-lcg32-v1",
+      "seed": 439041101,
+      "prng": "lcg32-v1",
+      "board": "9x9",
+      "firstPlayer": "A",
+      "plyCap": 200,
+      "configuration": {
+        "ruleset": "normal-duel-v1",
+        "rows": 9,
+        "columns": 9,
+        "start": {
+          "A": {
+            "r": 8,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 4
+          }
+        },
+        "goalRows": {
+          "A": 0,
+          "B": 8
+        },
+        "initialStock": {
+          "A": 10,
+          "B": 10
+        },
+        "jumpRule": "permissive-adjacent-exit-v1",
+        "repetitionThreshold": 3,
+        "plyCap": 200,
+        "firstPlayer": "A"
+      },
+      "configurationSha256": "6dab4c12e759303c041b81085fd9d4086949fccc1a873a97f27d0fb98fbcc39e",
+      "selectedActionCodes": [
+        153,
+        5,
+        67,
+        91,
+        58,
+        4
+      ],
+      "endReason": "sample_limit"
+    },
+    {
+      "trajectoryId": "sample-blitz-7x7-b",
+      "selectionMode": "seeded-lcg32-v1",
+      "seed": 1584363400,
+      "prng": "lcg32-v1",
+      "board": "7x7",
+      "firstPlayer": "B",
+      "plyCap": 200,
+      "configuration": {
+        "ruleset": "normal-duel-v1",
+        "rows": 7,
+        "columns": 7,
+        "start": {
+          "A": {
+            "r": 6,
+            "c": 3
+          },
+          "B": {
+            "r": 0,
+            "c": 3
+          }
+        },
+        "goalRows": {
+          "A": 0,
+          "B": 6
+        },
+        "initialStock": {
+          "A": 10,
+          "B": 10
+        },
+        "jumpRule": "permissive-adjacent-exit-v1",
+        "repetitionThreshold": 3,
+        "plyCap": 200,
+        "firstPlayer": "B"
+      },
+      "configurationSha256": "63e989719519ab08a13324b5d6e8705e039a2379f1fcd61a658c3e7a1e7e4798",
+      "selectedActionCodes": [
+        56,
+        46,
+        2,
+        64,
+        3,
+        39
+      ],
+      "endReason": "sample_limit"
+    },
+    {
+      "trajectoryId": "terminal-goal-7x7-a",
+      "selectionMode": "explicit-actions-v1",
+      "seed": null,
+      "prng": null,
+      "board": "7x7",
+      "firstPlayer": "A",
+      "plyCap": 200,
+      "configuration": {
+        "ruleset": "normal-duel-v1",
+        "rows": 7,
+        "columns": 7,
+        "start": {
+          "A": {
+            "r": 6,
+            "c": 3
+          },
+          "B": {
+            "r": 0,
+            "c": 3
+          }
+        },
+        "goalRows": {
+          "A": 0,
+          "B": 6
+        },
+        "initialStock": {
+          "A": 10,
+          "B": 10
+        },
+        "jumpRule": "permissive-adjacent-exit-v1",
+        "repetitionThreshold": 3,
+        "plyCap": 200,
+        "firstPlayer": "A"
+      },
+      "configurationSha256": "ba55c373d4ce946b08e42cb7e344e2846521a0315e858b1c0cde5acb4d4be437",
+      "selectedActionCodes": [
+        38,
+        2,
+        31,
+        3,
+        24,
+        2,
+        17,
+        3,
+        10,
+        2,
+        3
+      ],
+      "endReason": "goal"
+    },
+    {
+      "trajectoryId": "terminal-threefold-9x9-b",
+      "selectionMode": "explicit-actions-v1",
+      "seed": null,
+      "prng": null,
+      "board": "9x9",
+      "firstPlayer": "B",
+      "plyCap": 200,
+      "configuration": {
+        "ruleset": "normal-duel-v1",
+        "rows": 9,
+        "columns": 9,
+        "start": {
+          "A": {
+            "r": 8,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 4
+          }
+        },
+        "goalRows": {
+          "A": 0,
+          "B": 8
+        },
+        "initialStock": {
+          "A": 10,
+          "B": 10
+        },
+        "jumpRule": "permissive-adjacent-exit-v1",
+        "repetitionThreshold": 3,
+        "plyCap": 200,
+        "firstPlayer": "B"
+      },
+      "configurationSha256": "6420eb7cb603b0e0d2664946100ab92625994f3ebc5e18510275b1af68356373",
+      "selectedActionCodes": [
+        5,
+        75,
+        4,
+        76,
+        5,
+        75,
+        4,
+        76
+      ],
+      "endReason": "threefold_repetition"
+    },
+    {
+      "trajectoryId": "terminal-ply-cap-9x9-a",
+      "selectionMode": "explicit-actions-v1",
+      "seed": null,
+      "prng": null,
+      "board": "9x9",
+      "firstPlayer": "A",
+      "plyCap": 2,
+      "configuration": {
+        "ruleset": "normal-duel-v1",
+        "rows": 9,
+        "columns": 9,
+        "start": {
+          "A": {
+            "r": 8,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 4
+          }
+        },
+        "goalRows": {
+          "A": 0,
+          "B": 8
+        },
+        "initialStock": {
+          "A": 10,
+          "B": 10
+        },
+        "jumpRule": "permissive-adjacent-exit-v1",
+        "repetitionThreshold": 3,
+        "plyCap": 2,
+        "firstPlayer": "A"
+      },
+      "configurationSha256": "beae17ffa592bb63b9eb0a8b68de3018fa35443fb2a28247e7f5b76323b315fe",
+      "selectedActionCodes": [
+        67,
+        13
+      ],
+      "endReason": "ply_cap"
+    }
+  ]
+}

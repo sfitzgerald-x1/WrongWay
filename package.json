@@ -3,7 +3,10 @@
   "private": true,
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "test:contract": "node --test tests/normal-duel-contract.test.mjs"
+    "test:contract": "node --test tests/normal-duel-contract.test.mjs",
+    "check:normal-duel-trajectories": "node scripts/generate-normal-duel-trajectories.mjs --check",
+    "check:normal-duel-perft": "node scripts/generate-normal-duel-perft.mjs --check",
+    "check:normal-duel-corpora": "npm run check:normal-duel-trajectories && npm run check:normal-duel-perft"
   },
   "devDependencies": {
     "ajv": "8.20.0"

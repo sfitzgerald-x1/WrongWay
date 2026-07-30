@@ -511,19 +511,72 @@ export function legalActionMask(config, stateInput) {
   return mask;
 }
 
-export function applyAction(config, stateInput, action) {
-  const checked = configOf(config);
-  if (isObject(stateInput?.outcome) && stateInput.outcome.kind !== 'ongoing') fail('terminal_state');
-  const state = validateState(checked, stateInput);
-  const code = encodeAction(checked, action); const legal = legalPositionActionCodes(checked, state.position);
-  if (!legal.includes(code)) fail('illegal_action');
+/* Validate an action's shape and board-local representation. */
+function trustedAction(config, action) {
+  if (!isObject(action)) fail('invalid_action');
+  if (action.kind === 'pawn') {
+    exactKeys(action, PAWN_ACTION_KEYS, 'invalid_action');
+    if (!inBounds(config, action.to)) fail('invalid_action');
+    return { kind: 'pawn', to: cloneCoord(action.to) };
+  }
+  if (action.kind === 'wall') {
+    exactKeys(action, WALL_ACTION_KEYS, 'invalid_action');
+    return { kind: 'wall', wall: formatWall(parseWall(config, action.wall, 'invalid_action')) };
+  }
+  fail('invalid_action');
+}
+
+/*
+ * Test one already-normalized candidate without rebuilding the complete
+ * policy-action list. Pawn checks inspect at most the local legal-destination
+ * list; wall checks use the existing single-candidate geometry/path predicate.
+ */
+function isTrustedActionLegal(config, state, action) {
+  if (action.kind === 'pawn') {
+    return legalPawnDestinationsNormalized(config, state.position)
+      .some((destination) => sameCoord(destination, action.to));
+  }
+  return isLegalWallNormalized(config, state.position, new Set(state.position.walls), action.wall);
+}
+
+/* Transition a valid, ongoing state using a structurally valid legal action. */
+function applyTrustedAction(config, state, action) {
   const mover = state.position.turn; const position = clonePosition(state.position);
   if (action.kind === 'pawn') position.pawns[mover] = cloneCoord(action.to);
   else { position.walls.push(action.wall); position.stock[mover] -= 1; }
   position.turn = other(mover);
-  const normalized = normalizePosition(checked, position); const ply = state.ply + 1; const key = positionKeyNormalized(checked, normalized);
+  const normalized = normalizePosition(config, position); const ply = state.ply + 1; const key = positionKeyNormalized(config, normalized);
   const counts = action.kind === 'wall' ? new Map([[key, 1]]) : new Map(state.repetitionCounts.map(({ positionKey: countKey, count }) => [countKey, count]));
   if (action.kind === 'pawn') counts.set(key, (counts.get(key) ?? 0) + 1);
-  const outcome = adjudicate(checked, { goalWinner: normalized.pawns[mover].r === checked.goalRows[mover] ? mover : null, resultingPositionCount: counts.get(key), resultingPly: ply });
+  const outcome = adjudicate(config, { goalWinner: normalized.pawns[mover].r === config.goalRows[mover] ? mover : null, resultingPositionCount: counts.get(key), resultingPly: ply });
   return { position: normalized, positionKey: key, ply, historyStartPly: action.kind === 'wall' ? ply : state.historyStartPly, repetitionCounts: canonicalCounts(counts), outcome };
+}
+
+/**
+ * Apply one legal action without rebuilding the full policy-action list.
+ *
+ * This validates configuration, state, and action representation, checks the
+ * one pawn or wall candidate with its direct legality predicate, and produces
+ * the same immutable transition as `applyAction`. It is intended for callers
+ * that have just selected an item from `legalActions`; unlike `applyAction`,
+ * it does not enumerate all legal actions again.
+ */
+export function applyLegalAction(config, stateInput, action) {
+  const checked = configOf(config);
+  const state = validateState(checked, stateInput);
+  if (state.outcome.kind !== 'ongoing') fail('terminal_state');
+  const trusted = trustedAction(checked, action);
+  if (!isTrustedActionLegal(checked, state, trusted)) fail('illegal_action');
+  return applyTrustedAction(checked, state, trusted);
+}
+
+/** Apply an untrusted action after checking membership in the legal action set. */
+export function applyAction(config, stateInput, action) {
+  const checked = configOf(config);
+  if (isObject(stateInput?.outcome) && stateInput.outcome.kind !== 'ongoing') fail('terminal_state');
+  const state = validateState(checked, stateInput);
+  const trusted = trustedAction(checked, action);
+  const code = actionCode(checked, trusted); const legal = legalPositionActionCodes(checked, state.position);
+  if (!legal.includes(code)) fail('illegal_action');
+  return applyTrustedAction(checked, state, trusted);
 }

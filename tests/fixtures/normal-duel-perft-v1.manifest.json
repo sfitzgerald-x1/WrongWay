@@ -1,0 +1,1217 @@
+{
+  "fixtureFormat": "normal-duel-perft-v1-1.4.0",
+  "generatorVersion": "normal-duel-perft-generator-1.4.0",
+  "prng": {
+    "name": "lcg32-v1",
+    "transition": "state=(state*1664525+1013904223) mod 2^32",
+    "selection": "initialize from uint32 seed; advance before each selection; filter canonical ascending legal actions to walls only; choose walls[state%walls.length]; modulo bias is intentional and no rejection sampling is used"
+  },
+  "caseCount": 9,
+  "sha256": "79836da15dbf26fe339e5cc9f066b5f9765610ea9f2ef8f862a2f9d349247f3b",
+  "cases": [
+    {
+      "id": "initial-geometry-9x9-a",
+      "kind": "initial",
+      "configId": "standardA",
+      "config": {
+        "ruleset": "normal-duel-v1",
+        "rows": 9,
+        "columns": 9,
+        "start": {
+          "A": {
+            "r": 8,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 4
+          }
+        },
+        "goalRows": {
+          "A": 0,
+          "B": 8
+        },
+        "initialStock": {
+          "A": 10,
+          "B": 10
+        },
+        "jumpRule": "permissive-adjacent-exit-v1",
+        "repetitionThreshold": 3,
+        "plyCap": 200,
+        "firstPlayer": "A"
+      },
+      "provenance": {
+        "mode": "initial-state-v1",
+        "config": {
+          "ruleset": "normal-duel-v1",
+          "rows": 9,
+          "columns": 9,
+          "start": {
+            "A": {
+              "r": 8,
+              "c": 4
+            },
+            "B": {
+              "r": 0,
+              "c": 4
+            }
+          },
+          "goalRows": {
+            "A": 0,
+            "B": 8
+          },
+          "initialStock": {
+            "A": 10,
+            "B": 10
+          },
+          "jumpRule": "permissive-adjacent-exit-v1",
+          "repetitionThreshold": 3,
+          "plyCap": 200,
+          "firstPlayer": "A"
+        }
+      },
+      "perftOptions": null,
+      "state": {
+        "position": {
+          "pawns": {
+            "A": {
+              "r": 8,
+              "c": 4
+            },
+            "B": {
+              "r": 0,
+              "c": 4
+            }
+          },
+          "walls": [],
+          "stock": {
+            "A": 10,
+            "B": 10
+          },
+          "turn": "A"
+        },
+        "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",76,4,[],[],10,10,\"A\"]",
+        "ply": 0,
+        "historyStartPly": 0,
+        "repetitionCounts": [
+          {
+            "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",76,4,[],[],10,10,\"A\"]",
+            "count": 1
+          }
+        ],
+        "outcome": {
+          "kind": "ongoing"
+        }
+      },
+      "expect": {
+        "depth": 2,
+        "rootActionCount": 131,
+        "nodeVisits": 132,
+        "leavesByDepth": [
+          1,
+          131,
+          16677
+        ]
+      }
+    },
+    {
+      "id": "initial-geometry-7x7-a",
+      "kind": "initial",
+      "configId": "blitzA",
+      "config": {
+        "ruleset": "normal-duel-v1",
+        "rows": 7,
+        "columns": 7,
+        "start": {
+          "A": {
+            "r": 6,
+            "c": 3
+          },
+          "B": {
+            "r": 0,
+            "c": 3
+          }
+        },
+        "goalRows": {
+          "A": 0,
+          "B": 6
+        },
+        "initialStock": {
+          "A": 10,
+          "B": 10
+        },
+        "jumpRule": "permissive-adjacent-exit-v1",
+        "repetitionThreshold": 3,
+        "plyCap": 200,
+        "firstPlayer": "A"
+      },
+      "provenance": {
+        "mode": "initial-state-v1",
+        "config": {
+          "ruleset": "normal-duel-v1",
+          "rows": 7,
+          "columns": 7,
+          "start": {
+            "A": {
+              "r": 6,
+              "c": 3
+            },
+            "B": {
+              "r": 0,
+              "c": 3
+            }
+          },
+          "goalRows": {
+            "A": 0,
+            "B": 6
+          },
+          "initialStock": {
+            "A": 10,
+            "B": 10
+          },
+          "jumpRule": "permissive-adjacent-exit-v1",
+          "repetitionThreshold": 3,
+          "plyCap": 200,
+          "firstPlayer": "A"
+        }
+      },
+      "perftOptions": null,
+      "state": {
+        "position": {
+          "pawns": {
+            "A": {
+              "r": 6,
+              "c": 3
+            },
+            "B": {
+              "r": 0,
+              "c": 3
+            }
+          },
+          "walls": [],
+          "stock": {
+            "A": 10,
+            "B": 10
+          },
+          "turn": "A"
+        },
+        "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",45,3,[],[],10,10,\"A\"]",
+        "ply": 0,
+        "historyStartPly": 0,
+        "repetitionCounts": [
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",45,3,[],[],10,10,\"A\"]",
+            "count": 1
+          }
+        ],
+        "outcome": {
+          "kind": "ongoing"
+        }
+      },
+      "expect": {
+        "depth": 2,
+        "rootActionCount": 75,
+        "nodeVisits": 76,
+        "leavesByDepth": [
+          1,
+          75,
+          5357
+        ]
+      }
+    },
+    {
+      "id": "curated-remaining-walls-7x7-a",
+      "kind": "action-codes",
+      "configId": "blitzA",
+      "config": {
+        "ruleset": "normal-duel-v1",
+        "rows": 7,
+        "columns": 7,
+        "start": {
+          "A": {
+            "r": 6,
+            "c": 3
+          },
+          "B": {
+            "r": 0,
+            "c": 3
+          }
+        },
+        "goalRows": {
+          "A": 0,
+          "B": 6
+        },
+        "initialStock": {
+          "A": 10,
+          "B": 10
+        },
+        "jumpRule": "permissive-adjacent-exit-v1",
+        "repetitionThreshold": 3,
+        "plyCap": 200,
+        "firstPlayer": "A"
+      },
+      "provenance": {
+        "mode": "explicit-action-codes-v1",
+        "config": {
+          "ruleset": "normal-duel-v1",
+          "rows": 7,
+          "columns": 7,
+          "start": {
+            "A": {
+              "r": 6,
+              "c": 3
+            },
+            "B": {
+              "r": 0,
+              "c": 3
+            }
+          },
+          "goalRows": {
+            "A": 0,
+            "B": 6
+          },
+          "initialStock": {
+            "A": 10,
+            "B": 10
+          },
+          "jumpRule": "permissive-adjacent-exit-v1",
+          "repetitionThreshold": 3,
+          "plyCap": 200,
+          "firstPlayer": "A"
+        },
+        "actionCodes": [
+          49,
+          51,
+          53,
+          55,
+          57,
+          59,
+          61,
+          63,
+          65,
+          67,
+          69,
+          71,
+          73,
+          75,
+          77,
+          79,
+          81
+        ]
+      },
+      "perftOptions": null,
+      "state": {
+        "position": {
+          "pawns": {
+            "A": {
+              "r": 6,
+              "c": 3
+            },
+            "B": {
+              "r": 0,
+              "c": 3
+            }
+          },
+          "walls": [
+            "H-0-0",
+            "H-0-2",
+            "H-0-4",
+            "H-1-0",
+            "H-1-2",
+            "H-1-4",
+            "H-2-0",
+            "H-2-2",
+            "H-2-4",
+            "H-3-0",
+            "H-3-2",
+            "H-3-4",
+            "H-4-0",
+            "H-4-2",
+            "H-4-4",
+            "H-5-0",
+            "H-5-2"
+          ],
+          "stock": {
+            "A": 1,
+            "B": 2
+          },
+          "turn": "B"
+        },
+        "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",45,3,[0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32],[],1,2,\"B\"]",
+        "ply": 17,
+        "historyStartPly": 17,
+        "repetitionCounts": [
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",45,3,[0,2,4,6,8,10,12,14,16,18,20,22,24,26,28,30,32],[],1,2,\"B\"]",
+            "count": 1
+          }
+        ],
+        "outcome": {
+          "kind": "ongoing"
+        }
+      },
+      "expect": {
+        "depth": 3,
+        "rootActionCount": 18,
+        "nodeVisits": 320,
+        "leavesByDepth": [
+          1,
+          18,
+          283,
+          3861
+        ]
+      }
+    },
+    {
+      "id": "seeded-remaining-walls-9x9-a",
+      "kind": "seeded-walls",
+      "configId": "standardA",
+      "config": {
+        "ruleset": "normal-duel-v1",
+        "rows": 9,
+        "columns": 9,
+        "start": {
+          "A": {
+            "r": 8,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 4
+          }
+        },
+        "goalRows": {
+          "A": 0,
+          "B": 8
+        },
+        "initialStock": {
+          "A": 10,
+          "B": 10
+        },
+        "jumpRule": "permissive-adjacent-exit-v1",
+        "repetitionThreshold": 3,
+        "plyCap": 200,
+        "firstPlayer": "A"
+      },
+      "provenance": {
+        "mode": "seeded-wall-only-lcg32-v1",
+        "config": {
+          "ruleset": "normal-duel-v1",
+          "rows": 9,
+          "columns": 9,
+          "start": {
+            "A": {
+              "r": 8,
+              "c": 4
+            },
+            "B": {
+              "r": 0,
+              "c": 4
+            }
+          },
+          "goalRows": {
+            "A": 0,
+            "B": 8
+          },
+          "initialStock": {
+            "A": 10,
+            "B": 10
+          },
+          "jumpRule": "permissive-adjacent-exit-v1",
+          "repetitionThreshold": 3,
+          "plyCap": 200,
+          "firstPlayer": "A"
+        },
+        "algorithm": "lcg32-v1",
+        "seed": 25,
+        "plies": 18,
+        "selection": "initialize from uint32 seed; advance before each selection; filter canonical ascending legal actions to walls only; choose walls[state%walls.length]; modulo bias is intentional and no rejection sampling is used"
+      },
+      "perftOptions": {
+        "maxNodes": 4096
+      },
+      "state": {
+        "position": {
+          "pawns": {
+            "A": {
+              "r": 8,
+              "c": 4
+            },
+            "B": {
+              "r": 0,
+              "c": 4
+            }
+          },
+          "walls": [
+            "H-0-2",
+            "H-1-5",
+            "H-2-1",
+            "H-2-3",
+            "H-2-7",
+            "H-3-6",
+            "H-4-4",
+            "H-5-0",
+            "H-7-1",
+            "V-0-3",
+            "V-0-6",
+            "V-1-2",
+            "V-2-6",
+            "V-4-5",
+            "V-5-3",
+            "V-5-7",
+            "V-6-2",
+            "V-6-4"
+          ],
+          "stock": {
+            "A": 1,
+            "B": 1
+          },
+          "turn": "A"
+        },
+        "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",76,4,[2,13,17,19,23,30,36,40,57],[3,6,10,22,37,43,47,50,52],1,1,\"A\"]",
+        "ply": 18,
+        "historyStartPly": 18,
+        "repetitionCounts": [
+          {
+            "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",76,4,[2,13,17,19,23,30,36,40,57],[3,6,10,22,37,43,47,50,52],1,1,\"A\"]",
+            "count": 1
+          }
+        ],
+        "outcome": {
+          "kind": "ongoing"
+        }
+      },
+      "expect": {
+        "depth": 3,
+        "rootActionCount": 62,
+        "nodeVisits": 3719,
+        "leavesByDepth": [
+          1,
+          62,
+          3594,
+          20893
+        ]
+      }
+    },
+    {
+      "id": "seeded-wall-exhausted-9x9-a",
+      "kind": "seeded-walls",
+      "configId": "standardA",
+      "config": {
+        "ruleset": "normal-duel-v1",
+        "rows": 9,
+        "columns": 9,
+        "start": {
+          "A": {
+            "r": 8,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 4
+          }
+        },
+        "goalRows": {
+          "A": 0,
+          "B": 8
+        },
+        "initialStock": {
+          "A": 10,
+          "B": 10
+        },
+        "jumpRule": "permissive-adjacent-exit-v1",
+        "repetitionThreshold": 3,
+        "plyCap": 200,
+        "firstPlayer": "A"
+      },
+      "provenance": {
+        "mode": "seeded-wall-only-lcg32-v1",
+        "config": {
+          "ruleset": "normal-duel-v1",
+          "rows": 9,
+          "columns": 9,
+          "start": {
+            "A": {
+              "r": 8,
+              "c": 4
+            },
+            "B": {
+              "r": 0,
+              "c": 4
+            }
+          },
+          "goalRows": {
+            "A": 0,
+            "B": 8
+          },
+          "initialStock": {
+            "A": 10,
+            "B": 10
+          },
+          "jumpRule": "permissive-adjacent-exit-v1",
+          "repetitionThreshold": 3,
+          "plyCap": 200,
+          "firstPlayer": "A"
+        },
+        "algorithm": "lcg32-v1",
+        "seed": 439041101,
+        "plies": 20,
+        "selection": "initialize from uint32 seed; advance before each selection; filter canonical ascending legal actions to walls only; choose walls[state%walls.length]; modulo bias is intentional and no rejection sampling is used"
+      },
+      "perftOptions": null,
+      "state": {
+        "position": {
+          "pawns": {
+            "A": {
+              "r": 8,
+              "c": 4
+            },
+            "B": {
+              "r": 0,
+              "c": 4
+            }
+          },
+          "walls": [
+            "H-0-2",
+            "H-0-4",
+            "H-1-2",
+            "H-2-0",
+            "H-2-7",
+            "H-3-3",
+            "H-4-3",
+            "H-6-7",
+            "H-7-1",
+            "H-7-6",
+            "V-0-1",
+            "V-1-0",
+            "V-1-4",
+            "V-1-5",
+            "V-1-6",
+            "V-2-2",
+            "V-2-3",
+            "V-3-7",
+            "V-4-1",
+            "V-5-7"
+          ],
+          "stock": {
+            "A": 0,
+            "B": 0
+          },
+          "turn": "A"
+        },
+        "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",76,4,[2,4,10,16,23,27,35,55,57,62],[1,8,12,13,14,18,19,31,33,47],0,0,\"A\"]",
+        "ply": 20,
+        "historyStartPly": 20,
+        "repetitionCounts": [
+          {
+            "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",76,4,[2,4,10,16,23,27,35,55,57,62],[1,8,12,13,14,18,19,31,33,47],0,0,\"A\"]",
+            "count": 1
+          }
+        ],
+        "outcome": {
+          "kind": "ongoing"
+        }
+      },
+      "expect": {
+        "depth": 4,
+        "rootActionCount": 3,
+        "nodeVisits": 42,
+        "leavesByDepth": [
+          1,
+          3,
+          6,
+          20,
+          40
+        ]
+      }
+    },
+    {
+      "id": "seeded-wall-exhausted-7x7-a",
+      "kind": "seeded-walls",
+      "configId": "blitzA",
+      "config": {
+        "ruleset": "normal-duel-v1",
+        "rows": 7,
+        "columns": 7,
+        "start": {
+          "A": {
+            "r": 6,
+            "c": 3
+          },
+          "B": {
+            "r": 0,
+            "c": 3
+          }
+        },
+        "goalRows": {
+          "A": 0,
+          "B": 6
+        },
+        "initialStock": {
+          "A": 10,
+          "B": 10
+        },
+        "jumpRule": "permissive-adjacent-exit-v1",
+        "repetitionThreshold": 3,
+        "plyCap": 200,
+        "firstPlayer": "A"
+      },
+      "provenance": {
+        "mode": "seeded-wall-only-lcg32-v1",
+        "config": {
+          "ruleset": "normal-duel-v1",
+          "rows": 7,
+          "columns": 7,
+          "start": {
+            "A": {
+              "r": 6,
+              "c": 3
+            },
+            "B": {
+              "r": 0,
+              "c": 3
+            }
+          },
+          "goalRows": {
+            "A": 0,
+            "B": 6
+          },
+          "initialStock": {
+            "A": 10,
+            "B": 10
+          },
+          "jumpRule": "permissive-adjacent-exit-v1",
+          "repetitionThreshold": 3,
+          "plyCap": 200,
+          "firstPlayer": "A"
+        },
+        "algorithm": "lcg32-v1",
+        "seed": 3405691582,
+        "plies": 20,
+        "selection": "initialize from uint32 seed; advance before each selection; filter canonical ascending legal actions to walls only; choose walls[state%walls.length]; modulo bias is intentional and no rejection sampling is used"
+      },
+      "perftOptions": null,
+      "state": {
+        "position": {
+          "pawns": {
+            "A": {
+              "r": 6,
+              "c": 3
+            },
+            "B": {
+              "r": 0,
+              "c": 3
+            }
+          },
+          "walls": [
+            "H-0-2",
+            "H-1-4",
+            "H-2-3",
+            "H-2-5",
+            "H-3-1",
+            "H-3-4",
+            "H-4-1",
+            "H-4-5",
+            "H-5-0",
+            "V-0-4",
+            "V-0-5",
+            "V-1-0",
+            "V-1-1",
+            "V-1-2",
+            "V-2-4",
+            "V-3-0",
+            "V-3-3",
+            "V-3-5",
+            "V-5-1",
+            "V-5-3"
+          ],
+          "stock": {
+            "A": 0,
+            "B": 0
+          },
+          "turn": "A"
+        },
+        "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",45,3,[2,10,15,17,19,22,25,29,30],[4,5,6,7,8,16,18,21,23,31,33],0,0,\"A\"]",
+        "ply": 20,
+        "historyStartPly": 20,
+        "repetitionCounts": [
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",45,3,[2,10,15,17,19,22,25,29,30],[4,5,6,7,8,16,18,21,23,31,33],0,0,\"A\"]",
+            "count": 1
+          }
+        ],
+        "outcome": {
+          "kind": "ongoing"
+        }
+      },
+      "expect": {
+        "depth": 4,
+        "rootActionCount": 2,
+        "nodeVisits": 25,
+        "leavesByDepth": [
+          1,
+          2,
+          4,
+          10,
+          20
+        ]
+      }
+    },
+    {
+      "id": "ongoing-early-goal-child-7x7-a",
+      "kind": "action-codes",
+      "configId": "blitzEndgameA",
+      "config": {
+        "ruleset": "normal-duel-v1",
+        "rows": 7,
+        "columns": 7,
+        "start": {
+          "A": {
+            "r": 6,
+            "c": 3
+          },
+          "B": {
+            "r": 0,
+            "c": 3
+          }
+        },
+        "goalRows": {
+          "A": 0,
+          "B": 6
+        },
+        "initialStock": {
+          "A": 0,
+          "B": 0
+        },
+        "jumpRule": "permissive-adjacent-exit-v1",
+        "repetitionThreshold": 3,
+        "plyCap": 200,
+        "firstPlayer": "A"
+      },
+      "provenance": {
+        "mode": "explicit-action-codes-v1",
+        "config": {
+          "ruleset": "normal-duel-v1",
+          "rows": 7,
+          "columns": 7,
+          "start": {
+            "A": {
+              "r": 6,
+              "c": 3
+            },
+            "B": {
+              "r": 0,
+              "c": 3
+            }
+          },
+          "goalRows": {
+            "A": 0,
+            "B": 6
+          },
+          "initialStock": {
+            "A": 0,
+            "B": 0
+          },
+          "jumpRule": "permissive-adjacent-exit-v1",
+          "repetitionThreshold": 3,
+          "plyCap": 200,
+          "firstPlayer": "A"
+        },
+        "actionCodes": [
+          38,
+          2,
+          31,
+          3,
+          24,
+          2,
+          17,
+          3,
+          10,
+          2
+        ]
+      },
+      "perftOptions": null,
+      "state": {
+        "position": {
+          "pawns": {
+            "A": {
+              "r": 1,
+              "c": 3
+            },
+            "B": {
+              "r": 0,
+              "c": 2
+            }
+          },
+          "walls": [],
+          "stock": {
+            "A": 0,
+            "B": 0
+          },
+          "turn": "A"
+        },
+        "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",10,2,[],[],0,0,\"A\"]",
+        "ply": 10,
+        "historyStartPly": 0,
+        "repetitionCounts": [
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",10,2,[],[],0,0,\"A\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",10,3,[],[],0,0,\"B\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",17,2,[],[],0,0,\"B\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",17,3,[],[],0,0,\"A\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",24,2,[],[],0,0,\"A\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",24,3,[],[],0,0,\"B\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",31,2,[],[],0,0,\"B\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",31,3,[],[],0,0,\"A\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",38,2,[],[],0,0,\"A\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",38,3,[],[],0,0,\"B\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",45,3,[],[],0,0,\"A\"]",
+            "count": 1
+          }
+        ],
+        "outcome": {
+          "kind": "ongoing"
+        }
+      },
+      "expect": {
+        "depth": 3,
+        "rootActionCount": 4,
+        "nodeVisits": 20,
+        "leavesByDepth": [
+          1,
+          4,
+          11,
+          50
+        ]
+      }
+    },
+    {
+      "id": "terminal-goal-win-7x7-a",
+      "kind": "action-codes",
+      "configId": "blitzEndgameA",
+      "config": {
+        "ruleset": "normal-duel-v1",
+        "rows": 7,
+        "columns": 7,
+        "start": {
+          "A": {
+            "r": 6,
+            "c": 3
+          },
+          "B": {
+            "r": 0,
+            "c": 3
+          }
+        },
+        "goalRows": {
+          "A": 0,
+          "B": 6
+        },
+        "initialStock": {
+          "A": 0,
+          "B": 0
+        },
+        "jumpRule": "permissive-adjacent-exit-v1",
+        "repetitionThreshold": 3,
+        "plyCap": 200,
+        "firstPlayer": "A"
+      },
+      "provenance": {
+        "mode": "explicit-action-codes-v1",
+        "config": {
+          "ruleset": "normal-duel-v1",
+          "rows": 7,
+          "columns": 7,
+          "start": {
+            "A": {
+              "r": 6,
+              "c": 3
+            },
+            "B": {
+              "r": 0,
+              "c": 3
+            }
+          },
+          "goalRows": {
+            "A": 0,
+            "B": 6
+          },
+          "initialStock": {
+            "A": 0,
+            "B": 0
+          },
+          "jumpRule": "permissive-adjacent-exit-v1",
+          "repetitionThreshold": 3,
+          "plyCap": 200,
+          "firstPlayer": "A"
+        },
+        "actionCodes": [
+          38,
+          2,
+          31,
+          3,
+          24,
+          2,
+          17,
+          3,
+          10,
+          2,
+          3
+        ]
+      },
+      "perftOptions": null,
+      "state": {
+        "position": {
+          "pawns": {
+            "A": {
+              "r": 0,
+              "c": 3
+            },
+            "B": {
+              "r": 0,
+              "c": 2
+            }
+          },
+          "walls": [],
+          "stock": {
+            "A": 0,
+            "B": 0
+          },
+          "turn": "B"
+        },
+        "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",3,2,[],[],0,0,\"B\"]",
+        "ply": 11,
+        "historyStartPly": 0,
+        "repetitionCounts": [
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",10,2,[],[],0,0,\"A\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",10,3,[],[],0,0,\"B\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",17,2,[],[],0,0,\"B\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",17,3,[],[],0,0,\"A\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",24,2,[],[],0,0,\"A\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",24,3,[],[],0,0,\"B\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",3,2,[],[],0,0,\"B\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",31,2,[],[],0,0,\"B\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",31,3,[],[],0,0,\"A\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",38,2,[],[],0,0,\"A\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",38,3,[],[],0,0,\"B\"]",
+            "count": 1
+          },
+          {
+            "positionKey": "[\"normal-duel-v1\",7,7,45,3,0,6,0,0,\"permissive-adjacent-exit-v1\",3,200,\"A\",45,3,[],[],0,0,\"A\"]",
+            "count": 1
+          }
+        ],
+        "outcome": {
+          "kind": "win",
+          "winner": "A",
+          "reason": "goal"
+        }
+      },
+      "expect": {
+        "depth": 4,
+        "rootActionCount": 0,
+        "nodeVisits": 1,
+        "leavesByDepth": [
+          1,
+          0,
+          0,
+          0,
+          0
+        ]
+      }
+    },
+    {
+      "id": "seeded-first-player-b-9x9",
+      "kind": "seeded-walls",
+      "configId": "standardB",
+      "config": {
+        "ruleset": "normal-duel-v1",
+        "rows": 9,
+        "columns": 9,
+        "start": {
+          "A": {
+            "r": 8,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 4
+          }
+        },
+        "goalRows": {
+          "A": 0,
+          "B": 8
+        },
+        "initialStock": {
+          "A": 10,
+          "B": 10
+        },
+        "jumpRule": "permissive-adjacent-exit-v1",
+        "repetitionThreshold": 3,
+        "plyCap": 200,
+        "firstPlayer": "B"
+      },
+      "provenance": {
+        "mode": "seeded-wall-only-lcg32-v1",
+        "config": {
+          "ruleset": "normal-duel-v1",
+          "rows": 9,
+          "columns": 9,
+          "start": {
+            "A": {
+              "r": 8,
+              "c": 4
+            },
+            "B": {
+              "r": 0,
+              "c": 4
+            }
+          },
+          "goalRows": {
+            "A": 0,
+            "B": 8
+          },
+          "initialStock": {
+            "A": 10,
+            "B": 10
+          },
+          "jumpRule": "permissive-adjacent-exit-v1",
+          "repetitionThreshold": 3,
+          "plyCap": 200,
+          "firstPlayer": "B"
+        },
+        "algorithm": "lcg32-v1",
+        "seed": 16909060,
+        "plies": 20,
+        "selection": "initialize from uint32 seed; advance before each selection; filter canonical ascending legal actions to walls only; choose walls[state%walls.length]; modulo bias is intentional and no rejection sampling is used"
+      },
+      "perftOptions": null,
+      "state": {
+        "position": {
+          "pawns": {
+            "A": {
+              "r": 8,
+              "c": 4
+            },
+            "B": {
+              "r": 0,
+              "c": 4
+            }
+          },
+          "walls": [
+            "H-0-6",
+            "H-1-1",
+            "H-1-5",
+            "H-2-3",
+            "H-2-7",
+            "H-3-7",
+            "H-5-1",
+            "H-7-5",
+            "V-0-1",
+            "V-1-7",
+            "V-2-0",
+            "V-2-6",
+            "V-3-3",
+            "V-4-1",
+            "V-4-6",
+            "V-6-0",
+            "V-6-6",
+            "V-6-7",
+            "V-7-2",
+            "V-7-4"
+          ],
+          "stock": {
+            "A": 0,
+            "B": 0
+          },
+          "turn": "B"
+        },
+        "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"B\",76,4,[6,9,13,19,23,31,41,61],[1,15,16,22,27,33,38,48,54,55,58,60],0,0,\"B\"]",
+        "ply": 20,
+        "historyStartPly": 20,
+        "repetitionCounts": [
+          {
+            "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"B\",76,4,[6,9,13,19,23,31,41,61],[1,15,16,22,27,33,38,48,54,55,58,60],0,0,\"B\"]",
+            "count": 1
+          }
+        ],
+        "outcome": {
+          "kind": "ongoing"
+        }
+      },
+      "expect": {
+        "depth": 4,
+        "rootActionCount": 3,
+        "nodeVisits": 42,
+        "leavesByDepth": [
+          1,
+          3,
+          6,
+          20,
+          50
+        ]
+      }
+    }
+  ]
+}
