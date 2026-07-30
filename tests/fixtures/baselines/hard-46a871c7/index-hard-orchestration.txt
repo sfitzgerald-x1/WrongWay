@@ -1,0 +1,49 @@
+Source: index.html at 46a871c7b061a33922bdb9c6d78355e2e9b6b607
+Exact fragments: lines 4526-4528, 5118-5122, 5582-5587, 5623-5651
+
+  // Anti-Stall-Wächter für Bot: bestDist = bisher kleinste BFS-Distanz zum Ziel, stall = Züge ohne Fortschritt
+  const aiProgRef=useRef({best:Infinity,stall:0});
+  const[goldenWalls,setGoldenWalls]=useState(new Set());
+
+    setBreakingWall(null);setHammerDrag(false);setHammerTarget(null);setCollecting([]);
+    hammerWave2Ref.current=false;
+    hammerWave1ClearedRef.current=null;
+    aiProgRef.current={best:Infinity,stall:0};
+    dropNextRef.current=effDrop?dropInterval(effDrop):99999;
+
+      // Letzte 5 AI-Positionen (inkl. aktuelle) für Anti-Cycling
+      const recentAi=[{r:b.r,c:b.c}];
+      for(let i=moves.length-1;i>=0&&recentAi.length<6;i--){
+        const m=moves[i];
+        if(m.type==='move'&&m.p==='B')recentAi.push({r:m.r,c:m.c});
+      }
+
+      if(!d){
+        _hamCtx=st.hammerMode?buildHamCtx(hms,hh,a,b):null;
+        // Duell-Modus: dedizierte aggressive/strategische KI (A*-Distanz, Blocken/Vordrang)
+        if(mp==='duel'&&aiDifficulty==='hard'){
+          d=aiDuelHard(b,a,w,bl.B,bl.A,recentAi,chaosItem,aiGoal,humGoal);
+        }else if(mp==='duel'&&aiDifficulty==='normal'){
+          d=aiDuelNormal(b,a,w,bl.B,bl.A,recentAi,chaosItem,aiGoal,humGoal);
+        }else{
+          d=aiMove(b,a,w,bl.B,bl.A,aiDifficulty,recentAi,chaosItem,aiGoal,humGoal);
+        }
+        _hamCtx=null;
+      }
+      // ── Anti-Stall-Garantie ──
+      // Greift NUR wenn der Bot mehrere Züge in Folge keinen Distanz-Fortschritt macht.
+      // Dann wird der deterministische BFS-Schritt erzwungen → garantiert Fortschritt, kein Kreiseln.
+      // Strategische Barrikaden-Züge und Item-Pickups bleiben unangetastet.
+      if(d&&d.type==='move'){
+        const beforeP=bfsPath(b,w,aiGoal);
+        const beforeD=beforeP?beforeP.length-1:Infinity;
+        const afterP=bfsPath(d.pos,w,aiGoal);
+        const afterD=afterP?afterP.length-1:Infinity;
+        const isItem=!!(chaosItem&&d.pos.r===chaosItem.r&&d.pos.c===chaosItem.c);
+        if(afterD<beforeD||isItem)aiProgRef.current.stall=0;
+        else aiProgRef.current.stall++;
+        if(aiProgRef.current.stall>=3&&afterD>=beforeD&&!isItem&&beforeP){
+          const forced=moveTowardGoal(b,a,w,beforeP);
+          if(forced){d={type:'move',pos:forced};aiProgRef.current.stall=0;}
+        }
+      }

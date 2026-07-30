@@ -1,0 +1,48 @@
+{
+  "baselineFormat": "wrongway-hard-product-baseline-v1",
+  "baselineId": "hard-product-46a871c7",
+  "sourceRepository": "https://github.com/YavruKusch/WrongWay",
+  "sourceCommit": "46a871c7b061a33922bdb9c6d78355e2e9b6b607",
+  "sourceCommitAuthor": "Hüseyin Tunay",
+  "sourceCommitDate": "2026-07-24T20:57:20+02:00",
+  "license": {
+    "status": "no-standalone-license-file-at-source-commit",
+    "notice": "These are unmodified in-repository source snapshots used only to reproduce the team-authorized product baseline. They are not a replacement product implementation."
+  },
+  "sources": [
+    {
+      "path": "js/game-logic.js",
+      "snapshot": "game-logic.js",
+      "sha256": "db8dc06882f015d78460882e0ab629f660d0a4c1c7600d986a0e0a979139e75a"
+    },
+    {
+      "path": "js/ai.js",
+      "snapshot": "ai.js",
+      "sha256": "07ec05bb99602e36a879095ec159728bbf0ba520338d0a20a904888f2b57a777"
+    },
+    {
+      "path": "index.html",
+      "snapshot": "index-hard-orchestration.txt",
+      "sha256": "87468038df741428fe25f8532f8871459f181554a6dbadf4e151b6bf44621f4c",
+      "snapshotKind": "exact-line-fragments-with-provenance-header",
+      "snapshotSha256": "8dd628e49934e3bb401833d6b69a8854ed6f1dffaee945fbc399bc2a4d2e72bc",
+      "sourceLineRanges": ["4526-4528", "5118-5122", "5582-5587", "5623-5651"],
+      "role": "product orchestration provenance: direct Duel aiDuelHard call, recentAi construction, anti-stall replacement, and per-game aiProgRef reset"
+    }
+  ],
+  "productBehavior": {
+    "scope": "local normal Duel Hard AI only",
+    "originalProductSide": "B",
+    "pairedSideAAdapter": "rotate board, walls, roles, and same-side history 180 degrees; run pinned B oracle and B orchestration; inverse-rotate action",
+    "decisionFunction": "aiDuelHard",
+    "internalTimeBudgetMs": 700,
+    "searchDepthLimit": 3,
+    "recentAiPositions": 6,
+    "antiStallThreshold": 3,
+    "antiStallReplacement": "moveTowardGoal on the pre-decision BFS path",
+    "progressReset": {
+      "best": "Infinity",
+      "stall": 0
+    }
+  }
+}
