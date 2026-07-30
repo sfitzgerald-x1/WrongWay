@@ -1,0 +1,60 @@
+{
+  "fixtureFormat": "normal-duel-wasm-search-nodes-v1-1.0.0",
+  "ruleset": "normal-duel-v1",
+  "caseId": "initial-standard-a-non-power-of-two-tt",
+  "request": {
+    "config": {
+      "ruleset": "normal-duel-v1",
+      "rows": 9,
+      "columns": 9,
+      "start": {"A": {"r": 8, "c": 4}, "B": {"r": 0, "c": 4}},
+      "goalRows": {"A": 0, "B": 8},
+      "initialStock": {"A": 10, "B": 10},
+      "jumpRule": "permissive-adjacent-exit-v1",
+      "repetitionThreshold": 3,
+      "plyCap": 200,
+      "firstPlayer": "A"
+    },
+    "state": {
+      "position": {
+        "pawns": {"A": {"r": 8, "c": 4}, "B": {"r": 0, "c": 4}},
+        "walls": [],
+        "stock": {"A": 10, "B": 10},
+        "turn": "A"
+      },
+      "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",76,4,[],[],10,10,\"A\"]",
+      "ply": 0,
+      "historyStartPly": 0,
+      "repetitionCounts": [{
+        "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",76,4,[],[],10,10,\"A\"]",
+        "count": 1
+      }],
+      "outcome": {"kind": "ongoing"}
+    },
+    "nodeBudget": 4096,
+    "options": {
+      "maxDepth": 6,
+      "transpositionCapacity": 1009,
+      "aspirationWindow": 64
+    }
+  },
+  "report": {
+    "action": {"kind": "pawn", "to": {"r": 7, "c": 4}},
+    "actionCode": 67,
+    "score": 94,
+    "completedDepth": 1,
+    "nodes": 4096,
+    "stopped": true,
+    "principalVariation": [67],
+    "diagnostics": {
+      "rootActionCount": 131,
+      "ttProbes": 187,
+      "ttHits": 120,
+      "ttBoundCutoffs": 84,
+      "betaCutoffs": 94,
+      "pvsResearches": 21,
+      "aspirationResearches": 1,
+      "repetitionHintOnlyProbes": 2
+    }
+  }
+}

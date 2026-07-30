@@ -92,7 +92,7 @@ impl TranspositionTable {
     }
 
     fn index(&self, key: u64) -> usize {
-        key as usize % self.bucket_count
+        (key % u64::try_from(self.bucket_count).expect("bucket count fits in u64")) as usize
     }
 
     fn bucket(&self, index: usize) -> &[Option<Entry>; 2] {
@@ -233,6 +233,14 @@ mod tests {
         for code in 0..config.policy_size() {
             assert_eq!(mirror_code(&config, mirror_code(&config, code)), code);
         }
+    }
+
+    #[test]
+    fn bucket_index_reduces_the_full_u64_key_before_narrowing() {
+        let table = TranspositionTable::new(6);
+        let key = u64::from(u32::MAX) + 1;
+
+        assert_eq!(table.index(key), 1);
     }
 
     #[test]

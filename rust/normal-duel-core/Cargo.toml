@@ -16,6 +16,12 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
 
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+# `performance.now()` is available as a monotonic clock in browser and Node
+# JavaScript hosts.
+# Keep this target-specific so native builds continue to use `std::time::Instant`.
+wasm-bindgen = "=0.2.126"
+
 [dev-dependencies]
 serde_json = "1.0"
 

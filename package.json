@@ -10,6 +10,8 @@
     "check:normal-duel-throughput-benchmark": "node scripts/run-normal-duel-throughput-benchmark.mjs --smoke",
     "build:normal-duel-wasm": "node scripts/build-normal-duel-wasm.mjs",
     "check:normal-duel-wasm": "npm run build:normal-duel-wasm && node scripts/check-normal-duel-wasm.mjs",
+    "build:normal-duel-wasm-candidate": "node scripts/build-normal-duel-wasm-candidate.mjs",
+    "check:normal-duel-wasm-candidate": "npm run build:normal-duel-wasm-candidate && node scripts/check-normal-duel-wasm-candidate.mjs",
     "benchmark:normal-duel-throughput": "node scripts/run-normal-duel-throughput-benchmark.mjs"
   },
   "devDependencies": {

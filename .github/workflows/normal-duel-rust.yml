@@ -59,6 +59,8 @@ jobs:
         run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
       - name: Instantiate browser package and check JS boundary parity
         run: npm run check:normal-duel-wasm
+      - name: Build and verify hermetic search candidate
+        run: npm run check:normal-duel-wasm-candidate
 
   msrv:
     name: Rust 1.77 minimum version

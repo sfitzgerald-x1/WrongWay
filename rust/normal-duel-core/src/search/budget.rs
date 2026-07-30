@@ -1,4 +1,16 @@
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+use std::time::Instant;
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[wasm_bindgen::prelude::wasm_bindgen]
+extern "C" {
+    /// Browser and Node JavaScript hosts expose the high-resolution
+    /// `performance` clock globally. Unlike `Date.now()`, it is monotonic.
+    #[wasm_bindgen::prelude::wasm_bindgen(js_namespace = performance, js_name = now)]
+    fn performance_now_millis() -> f64;
+}
 
 pub(crate) trait SearchBudget {
     fn exhausted(&mut self, visited_nodes: u64) -> bool;
@@ -23,20 +35,51 @@ impl SearchBudget for NodeBudget {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DeadlineBudget {
+    #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     deadline: Instant,
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    started_millis: f64,
+    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+    duration_millis: f64,
 }
 
 impl DeadlineBudget {
     pub(crate) fn new(duration: Duration) -> Option<Self> {
-        Instant::now()
-            .checked_add(duration)
-            .map(|deadline| Self { deadline })
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            Instant::now()
+                .checked_add(duration)
+                .map(|deadline| Self { deadline })
+        }
+
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            const MAX_SAFE_MILLIS: f64 = 9_007_199_254_740_991.0;
+            let started_millis = performance_now_millis();
+            let duration_millis = duration.as_secs_f64() * 1_000.0;
+            (started_millis.is_finite()
+                && duration_millis.is_finite()
+                && duration_millis <= MAX_SAFE_MILLIS)
+                .then_some(Self {
+                    started_millis,
+                    duration_millis,
+                })
+        }
     }
 }
 
 impl SearchBudget for DeadlineBudget {
     fn exhausted(&mut self, _visited_nodes: u64) -> bool {
-        Instant::now() >= self.deadline
+        #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+        {
+            Instant::now() >= self.deadline
+        }
+
+        #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+        {
+            let elapsed_millis = performance_now_millis() - self.started_millis;
+            !elapsed_millis.is_finite() || elapsed_millis >= self.duration_millis
+        }
     }
 }
 
