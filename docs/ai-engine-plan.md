@@ -2,8 +2,9 @@
 
 ## Status
 
-- **Scope:** Two-player 2D WrongWay, beginning with 9×9 Duel and keeping
-  board size, starting positions, goal rows, and barricade stock configurable.
+- **Scope:** The normal 1v1 Duel ruleset, beginning with 9×9 Duel and 7×7
+  Blitz, with Chaos, Hammer, random drops, Classic, 2v2, clocks, and online
+  authority treated as explicit follow-up integrations.
 - **Decision:** Build a rules-faithful classical engine first, then use it as
   the foundation and benchmark for learned search.
 - **Recommended deployment path:** JavaScript reference engine → native/WASM
@@ -14,8 +15,8 @@
 
 The project should follow a staged hybrid strategy:
 
-1. Extract one authoritative, parameterized rules engine and prove that the
-   client, AI, and headless simulations agree with it.
+1. Extract one authoritative, parameterized `normal-duel-v1` rules engine and
+   prove that every in-repository consumer migrated to it agrees.
 2. Make games finite with an explicit threefold-repetition draw and a defensive
    ply cap.
 3. Build a fast bitboard alpha-beta engine with a transposition table and an
@@ -44,6 +45,11 @@ when the opponent is adjacent through an open edge, the mover may use any
 unblocked exit from the opponent's cell other than the square it came from.
 Side exits therefore remain legal even when the straight exit is open.
 
+There is also a third, partial implementation in `moveTowardGoal` in
+[`js/ai.js`](../js/ai.js#L205). It independently chooses the first available
+exit when the next path square is occupied and is used by normal AI advancement
+and the client anti-stall override. All three paths must be migrated together.
+
 The 2v2 implementation in
 [`js/game-logic.js`](../js/game-logic.js#L78) instead follows conventional
 Quoridor behavior: take the straight jump when available and allow side exits
@@ -51,10 +57,12 @@ only when it is blocked. The 1v1 engine must preserve the former behavior; 2v2
 should remain outside the first extraction unless its rule is deliberately
 changed.
 
-Wall/path rules are also coupled to browser globals and spread across
-[`js/game-logic.js`](../js/game-logic.js#L14),
-[`js/ai.js`](../js/ai.js), and inline client code. An AI port made before this
-duplication is removed could be fast, deterministic, and wrong.
+Core 1v1 wall legality is already shared through `tryWall`, but it is coupled
+to mutable browser globals such as `ROWS`, `COLS`, `CUR_MAP`, and `_hamCtx` in
+[`js/game-logic.js`](../js/game-logic.js#L159). AI candidate generation and
+special-mode policy remain spread through [`js/ai.js`](../js/ai.js) and inline
+client code. A port made before these boundaries are explicit could be fast,
+deterministic, and wrong.
 
 ### The current Hard bot omits strategic wall classes
 
@@ -72,9 +80,22 @@ action set.
 ### Draw behavior is undefined
 
 The client currently models a winner but no draw, and uses an AI anti-stall
-override in [`index.html`](../index.html#L4526) and
-[`index.html`](../index.html#L5635). Search values and self-play targets are not
+state ref in [`index.html`](../index.html#L4527) with enforcement in
+[`index.html`](../index.html#L5639). Search values and self-play targets are not
 well-defined until cycling has a rules-level outcome.
+
+### Online authority is outside this repository
+
+The production WebSocket service is authoritative for online geometry, moves,
+walls, turns, winners, and ranked results. Its implementation is not present in
+this repository. A client-only rules extraction therefore cannot claim global
+authority for online matches or safely introduce an online draw result.
+
+Stage 0 establishes one source of truth for the local client, headless harness,
+and bots in this repository. Online draw/rules parity is a separate integration
+gate requiring the server repository, a versioned protocol, coordinated
+deployment, and rollback. Until that gate passes, the new engine must not
+silently adjudicate an online result that the server does not recognize.
 
 ## Rules contract
 
@@ -93,12 +114,14 @@ initial barricade stock for A and B
 jump rule identifier
 repetition threshold
 ply cap
+ruleset version
 ```
 
-The first supported configurations are 9×9 Duel and 7×7 Blitz. Existing 1v1
-variants may use the same core when their configuration and special item rules
-are explicitly represented. The 2v2 rules are not implicitly folded into this
-contract.
+The first ruleset is `normal-duel-v1` with special modes and external clocks
+disabled. It supports 9×9 Duel and 7×7 Blitz. Classic is not just another Duel
+size: it is 9×13, starts both pawns on the bottom row, and gives both players
+goal row 0. Chaos, Hammer, random drops, Classic, and 2v2 require separately
+versioned contracts or adapters rather than implicit reuse.
 
 ### Position and game state
 
@@ -116,13 +139,18 @@ rules/configuration identifier
 ```
 
 Stock cannot be inferred from placed walls because wall ownership is not
-recorded. History is kept outside the position key for repetition adjudication.
-Wall placement is irreversible, so repetition history may be reset after every
-wall placement.
+part of the board position, and special modes can grant stock or inject/remove
+walls. The full `GameState` additionally contains the repetition history/counts,
+ply count, and terminal outcome/reason. These fields are serialized in corpora
+even when they are excluded from the transposition position key.
+
+Within `normal-duel-v1`, wall placement is irreversible, so repetition history
+may be reset after every placement. This optimization is invalid for Hammer or
+any future ruleset that can remove walls.
 
 ### Actions
 
-For 9×9, use the fixed 209-action encoding:
+For 9×9 `normal-duel-v1`, use the fixed 209-action encoding:
 
 - `0..80`: pawn destination square
 - `81..144`: horizontal wall anchor
@@ -131,19 +159,29 @@ For 9×9, use the fixed 209-action encoding:
 A legal-action mask distinguishes legal actions from the full policy space.
 Destination encoding is unambiguous because a pawn move has exactly one
 resulting square. Smaller boards use the same three contiguous action classes
-with configuration-derived offsets.
+with configuration-derived offsets. Every ongoing normal-duel state must have
+at least one legal pawn action, so an all-zero mask is an invariant violation.
+
+The 209 actions intentionally do not encode Hammer wall destruction, stochastic
+system drops, item pickup as a separate action, or 2v2 turns. Those rulesets
+need distinct versioned action schemas.
 
 ### Wall legality
 
-A wall is legal only when:
+A wall is legal in `normal-duel-v1` only when:
 
 1. its anchor and orientation are in bounds;
 2. it does not overlap or cross an existing wall under current geometry rules;
 3. both players retain a wall-only path to their goal rows.
 
-Pawn locations do not participate in the connectivity check. This matches the
-existing 1v1 behavior in
+Pawn locations do not participate in the normal-duel connectivity check. This
+matches the base path check in
 [`js/game-logic.js`](../js/game-logic.js#L167).
+
+Hammer is explicitly different: `_hamCtx` can reject a placement based on pawn
+reachability to remaining hammers, and steel walls affect wall destruction.
+Those mechanics remain on a legacy/special-mode path until their own contract
+is implemented.
 
 ### Terminal outcomes
 
@@ -151,14 +189,18 @@ The engine returns an outcome and an explicit reason:
 
 ```text
 ongoing
-A win: goal | timeout | forfeit
-B win: goal | timeout | forfeit
+A win: goal
+B win: goal
 draw: threefold repetition | ply cap
 ```
 
 Adopt threefold repetition of the full position key. The search checks both
 the actual game history and the current search path. Add a 200-ply cap for 9×9
 as a defensive backstop, configurable for other variants.
+
+Timeout, skipped-turn, disconnect, and forfeit results are typed external
+adjudication events owned by the clock/client/server layer, not board-rule
+outcomes inferred by the pure engine.
 
 Superko is not recommended: making repeated positions illegal adds
 history-dependent move legality, complicates transposition tables, and gives a
@@ -175,7 +217,7 @@ policy/value model a less natural state representation.
                     │ Pure JS reference engine │
                     └──────┬───────────┬──────┘
                            │           │
-                    browser client  golden JSONL
+             local client + bots   golden JSONL
                                        │
                             ┌──────────▼──────────┐
                             │ Rust native/WASM core│
@@ -187,6 +229,12 @@ policy/value model a less natural state representation.
                                    └────┬───┘
                                         │
                               measured hybrid target
+```
+
+```text
+authoritative online server (separate repository)
+          ⇅ versioned rules/protocol conformance
+local client adapter (this repository)
 ```
 
 The JavaScript engine is the behavioral reference, not the performance target.
@@ -208,23 +256,32 @@ The Rust crate should compile to:
 **Work**
 
 - Document the 1v1 permissive jump rule with positive and negative examples.
+- Publish the `normal-duel-v1` scope and explicitly reject special-mode states.
 - Add the threefold-repetition and ply-cap outcomes to the contract.
 - Extract a pure, parameterized JavaScript engine.
-- Replace the inline human validator and AI move generator with calls into it.
+- Replace the inline human validator, `getMovesFrom`, and `moveTowardGoal` with
+  calls into it for normal Duel.
 - Add a headless Node harness.
 - Generate deterministic JSONL trajectories containing configuration, state,
   legal action set, selected action, next state, and outcome.
 - Add perft-style legal-node counts to depth 3–4 across curated and randomized
   positions.
-- Keep 2v2 on its existing rules path until separately migrated.
+- Keep special modes, Classic, 2v2, clocks, and online server authority on
+  explicit legacy/integration paths until separately migrated.
 
 **Exit gate**
 
-- No independent 1v1 move or wall legality implementation remains.
-- The existing client produces the same legal moves and wall decisions for the
+- No independent `normal-duel-v1` move or wall-legality implementation remains
+  among migrated in-repository consumers.
+- The local/PVC client produces the same legal moves and wall decisions for the
   pre-extraction golden corpus.
 - Tests lock in permissive side exits, edge/corner jumps, wall intersection,
-  path preservation, stock accounting, terminal goals, repetition, and ply cap.
+  malformed wall rejection, path preservation, stock accounting, non-empty
+  action masks, terminal goals, repetition, and ply cap.
+- Unsupported rulesets fail closed rather than silently using normal-duel
+  semantics.
+- Online behavior remains unchanged until server conformance is independently
+  available and verified.
 
 ### Stage 1 — Rust core and parity
 
@@ -236,9 +293,12 @@ The Rust crate should compile to:
 - Implement bit-parallel flood fill and shortest-distance maps.
 - Implement fast apply/undo and full legal move generation.
 - Use Zobrist hashing over pawns, walls, stock, side, and rules configuration.
-- Canonicalize the left/right mirror symmetry where applicable; separately
-  evaluate row-flip plus player-swap normalization.
-- Add a wall-cut fast path so full connectivity BFS runs only when necessary.
+- Canonicalize the left/right mirror symmetry for Duel; separately evaluate
+  row-flip plus player-swap normalization only for configurations where starts,
+  goals, and rules prove it valid. Do not apply it to Classic.
+- Evaluate a wall-cut fast path against the existing disjoint-path references
+  in `disjointPaths2`, `aiDisjoint`, and `worstWallDelay`; retain full BFS as the
+  correctness reference.
 - Replay every JavaScript golden trajectory and compare every legal action and
   transition.
 
@@ -256,6 +316,9 @@ The Rust crate should compile to:
 - Iterative deepening with a hard wall-clock deadline.
 - Principal variation search and aspiration windows.
 - A bounded transposition table with bound type, depth, score, and best action.
+- A repetition-safe TT policy: include the necessary repetition context in the
+  key or suppress reusable bounds at path-dependent nodes. Exact suites must
+  run with a correctness mode that cannot reuse a history-invalid score.
 - TT, killer, counter-move, and history ordering.
 - Staged generation: pawn moves and highest-scored walls first, then the
   complete remaining wall set if no cutoff occurs.
@@ -280,16 +343,20 @@ Wall ordering must include:
 
 For a fixed wall layout with no stock remaining, solve the pawn-position graph
 exactly, including the permissive jump and repetition-draw rules. Cache the
-result by wall-layout hash. This makes the most common endgame stratum exact
-and provides ground truth for tests and future learning.
+result by wall-layout hash. This makes zero-wall endgames exact and provides
+ground truth for tests and future learning. Measure their frequency from real
+replays before making product-performance claims about the oracle's hit rate.
 
 **Exit gate**
 
-- At least a 90% score against the current Hard bot under paired openings and
-  the same move-time budget.
+- At least a 90% score against a pinned current-Hard baseline under paired
+  openings, injected random seeds, and the same move-time budget on recorded
+  hardware.
 - 100% agreement with exact reduced-position suites.
 - No deadline overrun beyond a defined small tolerance in native or WASM builds.
 - Full-width verification of all headline match results.
+- Deterministic fixed-node/fixed-depth suites reproduce search regressions
+  independently of wall-clock variance.
 
 ### Stage 3 — Product integration
 
@@ -297,8 +364,9 @@ and provides ground truth for tests and future learning.
 
 - Compile the search engine to WASM.
 - Add it behind a `Hard+` feature flag at the existing client think-time budget.
-- Add draw state, messaging, replay storage, online synchronization, and result
-  handling.
+- Add draw state, messaging, replay storage, and local result handling.
+- Add online draw/rules synchronization only in a coordinated change with the
+  authoritative server and a versioned protocol compatibility check.
 - Remove the anti-stall override once all active agents honor formal draw rules.
 - Add telemetry that records engine version, budget, completed depth, nodes,
   and outcome without storing private player data.
@@ -306,7 +374,9 @@ and provides ground truth for tests and future learning.
 **Exit gate**
 
 - Desktop and representative mobile browser budgets are respected.
-- Draws round-trip correctly through local, replay, and supported online modes.
+- Draws round-trip correctly through local and replay modes.
+- Any enabled online mode has passed server/client conformance for the exact
+  rules-contract version; otherwise online draw adjudication remains disabled.
 - A rollback to the previous bot requires only disabling the feature flag.
 
 ### Stage 4 — Gumbel AlphaZero self-play
@@ -315,7 +385,7 @@ This stage starts only after Stage 3 has shipped or met its release gate.
 
 **Model**
 
-- 209-way masked policy head on 9×9.
+- 209-way masked policy head on 9×9 `normal-duel-v1`.
 - Scalar value head with win/draw/loss targets.
 - Input planes for both pawns, horizontal walls, vertical walls, remaining
   stock, and side to move.
@@ -389,8 +459,10 @@ opening, play a pair with the agents on opposite sides. Report:
 - average and percentile move time;
 - nodes, completed depth, and wall/pawn action mix.
 
-Use SPRT or an equivalent sequential gate for engine promotions. Keep two
-non-binding diagnostic suites:
+Run the legacy bots with injected deterministic random seeds. Use fixed
+node/depth budgets for reproducible regression tests and pinned-hardware
+wall-clock budgets for product-strength claims. Use SPRT or an equivalent
+sequential gate for engine promotions. Keep two non-binding diagnostic suites:
 
 - exact solved positions, which require 100% value/action agreement;
 - adversarial probes targeting wall defense, wall chains, corridor traps,
@@ -422,8 +494,10 @@ CI should run, in increasing cost:
 
 | Risk | Control |
 | --- | --- |
-| Rules drift between UI, AI, native engine, and trainer | Single JS reference, versioned contract, golden trajectories, perft |
-| New draw rule changes product behavior | Treat it as a visible rules change; update client, sync, replay, and agents together |
+| Rules drift between UI, AI, native engine, trainer, and online server | Single JS reference for in-repo consumers, versioned server protocol, golden trajectories, perft, cross-service conformance |
+| Authoritative server code is unavailable | Keep online adjudication unchanged; do not claim global single-sourcing or enable online draws until the server repository is in scope |
+| Special modes invalidate normal-duel assumptions | Version rulesets/action schemas; reject unsupported states; migrate Hammer, Chaos, drops, Classic, and 2v2 separately |
+| New draw rule changes product behavior | Treat it as a visible rules change; update local client, replay, agents, and later the server in coordinated gates |
 | Wall pruning hides strategically necessary moves | Order all walls; do not delete them in proof mode; re-run headline matches full-width |
 | Deterministic matches exaggerate conclusions | Paired opening book, side swaps, confidence intervals, SPRT |
 | Hand evaluation plateaus in wall-war positions | Feature ablation, adversarial suites, optional learned policy/value stage |
@@ -455,13 +529,23 @@ treating full-game strength as an empirical engineering objective.
 
 Keep changes reviewable and independently reversible:
 
-1. **Rules contract and fixtures:** examples, state/action serialization,
-   repetition semantics, and golden positions without client rewiring.
-2. **JavaScript engine extraction:** pure core plus Node tests.
-3. **Client/AI migration:** remove duplicated 1v1 validators and demonstrate
-   parity.
-4. **Draw plumbing:** local client, replay, online protocol, and presentation.
-5. **Rust parity core:** native/WASM crate, corpus replay, perft, and benchmarks.
-6. **Alpha-beta v1:** search, TT, evaluation, zero-wall oracle, and ladder.
+1. **Normal-duel rules contract and fixtures:** scope/exclusions, examples,
+   state/action serialization, repetition semantics, and golden positions
+   without client rewiring.
+2. **JavaScript reference core:** pure 9×9/7×7 normal-Duel functions, Node
+   tests, and shadow comparisons against existing local Duel.
+3. **Consumer migration:** replace `getValidMoves`, `getMovesFrom`,
+   `moveTowardGoal`, and normal-Duel `tryWall` call paths; keep special modes on
+   explicit legacy dispatch.
+4. **Corpus/perft CI:** freeze deterministic trajectories and complete legal
+   node counts; add seeded transition and serialization properties.
+5. **Local draw plumbing:** engine history, UI, replay, and local agents.
+   Online draws require a separate coordinated server/protocol PR in the
+   authoritative server repository.
+6. **Rust parity core:** native/WASM crate, corpus replay, perft, and benchmarks.
+7. **Alpha-beta v1:** search, repetition-safe TT, evaluation, zero-wall oracle,
+   deterministic baseline, and ladder.
+8. **Separately versioned adapters:** Classic, Chaos, Hammer, random drops, and
+   2v2, each with its own contract and corpus.
 
 No Rust or ML work should merge before the Stage 0 parity gate is green.
