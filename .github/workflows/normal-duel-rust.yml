@@ -1,0 +1,103 @@
+name: Normal duel Rust
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 8 * * 1"
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Native format, test, and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Check formatting
+        working-directory: rust
+        run: cargo fmt --all -- --check
+      - name: Run native tests
+        working-directory: rust
+        run: cargo test --workspace --all-targets --locked
+      - name: Run Clippy
+        working-directory: rust
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Check cross-engine throughput harness
+        run: npm run check:normal-duel-throughput-benchmark
+
+  wasm:
+    name: Browser WebAssembly package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.2
+          cache: npm
+      - run: npm ci
+      - name: Check wasm32-unknown-unknown
+        working-directory: rust
+        run: cargo check --workspace --target wasm32-unknown-unknown --locked
+      - name: Build wasm32-unknown-unknown
+        working-directory: rust
+        run: cargo build --workspace --target wasm32-unknown-unknown --locked
+      - name: Install matching wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.126 --locked
+      - name: Instantiate browser package and check JS boundary parity
+        run: npm run check:normal-duel-wasm
+
+  msrv:
+    name: Rust 1.77 minimum version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.77.0
+      - name: Check all targets at MSRV
+        working-directory: rust
+        run: cargo check --workspace --all-targets --locked
+
+  miri:
+    name: Miri core safety
+    runs-on: ubuntu-latest
+    env:
+      MIRIFLAGS: -Zmiri-strict-provenance
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-05-07
+          components: miri
+      - name: Prepare Miri sysroot
+        working-directory: rust
+        run: cargo miri setup
+      - name: Run core under Miri
+        working-directory: rust
+        run: cargo miri test --locked --package wrongway-normal-duel --lib miri_core_smoke
+
+  benchmark:
+    name: Pinned 100x throughput gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.2
+          cache: npm
+      - run: npm ci
+      - name: Run seven-sample cross-engine benchmark
+        run: npm run benchmark:normal-duel-throughput -- --warmup 1 --samples 7 --min-speedup 100
