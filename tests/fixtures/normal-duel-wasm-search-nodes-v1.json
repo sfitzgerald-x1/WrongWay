@@ -1,5 +1,5 @@
 {
-  "fixtureFormat": "normal-duel-wasm-search-nodes-v1-1.2.0",
+  "fixtureFormat": "normal-duel-wasm-search-nodes-v1-1.3.0",
   "ruleset": "normal-duel-v1",
   "caseId": "initial-standard-a-non-power-of-two-tt",
   "request": {
@@ -54,6 +54,10 @@
       "immediateGoalHorizonHits": 0,
       "zeroWallOracleQueries": 0,
       "zeroWallOracleSolutions": 0,
+      "zeroWallOracleQuotaBackoffs": 0,
+      "zeroWallOraclePostBackoffMemoHits": 0,
+      "zeroWallOraclePostBackoffMemoMisses": 0,
+      "zeroWallOraclePostBackoffParentExhaustions": 0,
       "ttProbes": 198,
       "ttHits": 131,
       "ttBoundCutoffs": 95,
@@ -120,6 +124,10 @@
         "immediateGoalHorizonHits": 73,
         "zeroWallOracleQueries": 1,
         "zeroWallOracleSolutions": 0,
+        "zeroWallOracleQuotaBackoffs": 0,
+        "zeroWallOraclePostBackoffMemoHits": 0,
+        "zeroWallOraclePostBackoffMemoMisses": 0,
+        "zeroWallOraclePostBackoffParentExhaustions": 0,
         "ttProbes": 2,
         "ttHits": 1,
         "ttBoundCutoffs": 0,

@@ -12,8 +12,53 @@ extern "C" {
     fn performance_now_millis() -> f64;
 }
 
+/// Fixed-node regression searches reserve 4,096 nodes for a canonical 9x9
+/// exact-oracle attempt (8.192% of the standard 50,000-node evaluation run).
+pub(crate) const FIXED_ORACLE_NODE_QUOTA: u64 = 4_096;
+
+// Deadline searches retain a duration-scaled node cap as a secondary hard
+// bound on an unexpectedly large exact-oracle tree. Their primary bound is a
+// local wall-clock slice equal to 10% of the requested duration, clamped to
+// 1–1,500 ms. This quota deliberately is not justified by, or coupled to,
+// ordinary negamax throughput.
+const DEADLINE_ORACLE_NODES_PER_MILLISECOND: u128 = 50;
+const DEADLINE_ORACLE_MAX_NODES: u128 = 750_000;
+const DEADLINE_ORACLE_SLICE_DIVISOR: u32 = 10;
+const DEADLINE_ORACLE_MIN_SLICE: Duration = Duration::from_millis(1);
+const DEADLINE_ORACLE_MAX_SLICE: Duration = Duration::from_millis(1_500);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CanonicalOracleLimits {
+    pub(crate) node_quota: u64,
+    /// `None` keeps deterministic fixed-node searches independent of time.
+    pub(crate) wall_clock_slice: Option<Duration>,
+}
+
+pub(crate) fn deadline_oracle_node_quota(duration: Duration) -> u64 {
+    let quota = duration
+        .as_millis()
+        .saturating_mul(DEADLINE_ORACLE_NODES_PER_MILLISECOND)
+        .clamp(
+            u128::from(FIXED_ORACLE_NODE_QUOTA),
+            DEADLINE_ORACLE_MAX_NODES,
+        );
+    u64::try_from(quota).unwrap_or(u64::MAX)
+}
+
+pub(crate) fn deadline_oracle_wall_clock_slice(duration: Duration) -> Duration {
+    (duration / DEADLINE_ORACLE_SLICE_DIVISOR)
+        .clamp(DEADLINE_ORACLE_MIN_SLICE, DEADLINE_ORACLE_MAX_SLICE)
+}
+
 pub(crate) trait SearchBudget {
     fn exhausted(&mut self, visited_nodes: u64) -> bool;
+
+    fn canonical_oracle_limits(&self) -> CanonicalOracleLimits {
+        CanonicalOracleLimits {
+            node_quota: FIXED_ORACLE_NODE_QUOTA,
+            wall_clock_slice: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -35,6 +80,7 @@ impl SearchBudget for NodeBudget {
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DeadlineBudget {
+    duration: Duration,
     #[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
     deadline: Instant,
     #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -49,7 +95,7 @@ impl DeadlineBudget {
         {
             Instant::now()
                 .checked_add(duration)
-                .map(|deadline| Self { deadline })
+                .map(|deadline| Self { duration, deadline })
         }
 
         #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
@@ -61,6 +107,7 @@ impl DeadlineBudget {
                 && duration_millis.is_finite()
                 && duration_millis <= MAX_SAFE_MILLIS)
                 .then_some(Self {
+                    duration,
                     started_millis,
                     duration_millis,
                 })
@@ -79,6 +126,13 @@ impl SearchBudget for DeadlineBudget {
         {
             let elapsed_millis = performance_now_millis() - self.started_millis;
             !elapsed_millis.is_finite() || elapsed_millis >= self.duration_millis
+        }
+    }
+
+    fn canonical_oracle_limits(&self) -> CanonicalOracleLimits {
+        CanonicalOracleLimits {
+            node_quota: deadline_oracle_node_quota(self.duration),
+            wall_clock_slice: Some(deadline_oracle_wall_clock_slice(self.duration)),
         }
     }
 }
@@ -138,5 +192,82 @@ impl SearchBudget for ExactCutoffBudget {
             self.allowed_polls_at_target -= 1;
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deadline_oracle_quota_scales_and_caps_without_overflow() {
+        assert_eq!(
+            deadline_oracle_node_quota(Duration::ZERO),
+            FIXED_ORACLE_NODE_QUOTA
+        );
+        assert_eq!(
+            deadline_oracle_node_quota(Duration::from_millis(1)),
+            FIXED_ORACLE_NODE_QUOTA
+        );
+        assert_eq!(
+            deadline_oracle_node_quota(Duration::from_millis(800)),
+            40_000
+        );
+        assert_eq!(deadline_oracle_node_quota(Duration::from_secs(15)), 750_000);
+        assert_eq!(deadline_oracle_node_quota(Duration::from_secs(16)), 750_000);
+        assert_eq!(deadline_oracle_node_quota(Duration::MAX), 750_000);
+    }
+
+    #[test]
+    fn deadline_oracle_slice_scales_without_timing_or_overflow() {
+        assert_eq!(
+            deadline_oracle_wall_clock_slice(Duration::ZERO),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            deadline_oracle_wall_clock_slice(Duration::from_millis(800)),
+            Duration::from_millis(80)
+        );
+        assert_eq!(
+            deadline_oracle_wall_clock_slice(Duration::from_millis(1_900)),
+            Duration::from_millis(190)
+        );
+        assert_eq!(
+            deadline_oracle_wall_clock_slice(Duration::from_millis(4_900)),
+            Duration::from_millis(490)
+        );
+        assert_eq!(
+            deadline_oracle_wall_clock_slice(Duration::from_millis(9_900)),
+            Duration::from_millis(990)
+        );
+        assert_eq!(
+            deadline_oracle_wall_clock_slice(Duration::from_millis(14_900)),
+            Duration::from_millis(1_490)
+        );
+        assert_eq!(
+            deadline_oracle_wall_clock_slice(Duration::MAX),
+            Duration::from_millis(1_500)
+        );
+    }
+
+    #[test]
+    fn budget_modes_report_distinct_canonical_limits_without_timing() {
+        let fixed = NodeBudget::new(50_000);
+        assert_eq!(
+            fixed.canonical_oracle_limits(),
+            CanonicalOracleLimits {
+                node_quota: FIXED_ORACLE_NODE_QUOTA,
+                wall_clock_slice: None,
+            }
+        );
+
+        let deadline = DeadlineBudget::new(Duration::from_millis(800)).unwrap();
+        assert_eq!(
+            deadline.canonical_oracle_limits(),
+            CanonicalOracleLimits {
+                node_quota: 40_000,
+                wall_clock_slice: Some(Duration::from_millis(80)),
+            }
+        );
     }
 }
