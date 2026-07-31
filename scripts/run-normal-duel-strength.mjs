@@ -13,6 +13,7 @@ import { pathToFileURL } from 'node:url';
 import { createPinnedHardBaseline } from './evaluation/hard-baseline-46a871c7.mjs';
 import {
   createPinnedHardWorkerAdapter,
+  createRecycledNormalDuelWasmCandidateAdapter,
   createWorkerEngineAdapter
 } from './evaluation/worker-engine-proxy.mjs';
 import {
@@ -49,7 +50,8 @@ function parseArguments(argv) {
     nodeBudget: null,
     openingLimit: null,
     minimumOpeningPairs: MINIMUM_STRENGTH_OPENING_PAIRS,
-    enforceGate: false
+    enforceGate: false,
+    recycleNormalDuelWasmPerDecision: false
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
@@ -69,9 +71,20 @@ function parseArguments(argv) {
     else if (argument === '--minimum-opening-pairs') {
       options.minimumOpeningPairs = integer(argv[++index], 'minimum-opening-pairs', 1);
     } else if (argument === '--enforce-gate') options.enforceGate = true;
-    else fail(`unknown argument ${argument}`);
+    else if (argument === '--recycle-normal-duel-wasm-per-decision') {
+      options.recycleNormalDuelWasmPerDecision = true;
+    } else fail(`unknown argument ${argument}`);
   }
   if (!options.candidate) fail('--candidate is required');
+  // Per-decision recycling wraps a subprocess-isolated, manifest-authenticated
+  // candidate, so it is rejected here — before any engine is loaded — rather
+  // than failing later inside admission.
+  if (options.recycleNormalDuelWasmPerDecision && options.mode !== STRENGTH_MODE) {
+    fail('--recycle-normal-duel-wasm-per-decision requires strength mode');
+  }
+  if (options.recycleNormalDuelWasmPerDecision && !options.candidateManifest) {
+    fail('--recycle-normal-duel-wasm-per-decision requires --candidate-manifest');
+  }
   if (options.mode === REGRESSION_MODE && options.nodeBudget === null) {
     fail('--node-budget is required in regression mode');
   }
@@ -162,12 +175,17 @@ async function main() {
     fail(`--enforce-gate requires at least ${options.minimumOpeningPairs} evaluated openings`);
   }
   const useSubprocesses = options.mode === STRENGTH_MODE;
-  const candidate = await loadCandidate(
+  const isolatedCandidate = await loadCandidate(
     options.candidate,
     useSubprocesses,
     options.candidateManifest,
     options.enforceGate
   );
+  // Only the candidate is ever recycled. The pinned Hard baseline keeps its
+  // per-game subprocess lifecycle in every run.
+  const candidate = options.recycleNormalDuelWasmPerDecision
+    ? await createRecycledNormalDuelWasmCandidateAdapter(isolatedCandidate)
+    : isolatedCandidate;
   const baseline = useSubprocesses
     ? await createPinnedHardWorkerAdapter({
       requireCanonicalMemoryIsolation: options.enforceGate
