@@ -470,6 +470,75 @@ impl<B: SearchBudget> SearchContext<'_, B> {
     }
 }
 
+/// Score a child position from the root mover's perspective for an evaluated
+/// fallback. Terminal outcomes must be handled before the static evaluator:
+/// a generated action can win for the root mover or adjudicate a draw.
+fn fallback_score_from_root(
+    config: &Config,
+    root_player: crate::Player,
+    child: &PreparedGameState,
+) -> i32 {
+    match child.outcome {
+        Outcome::Ongoing => -evaluate(config, child),
+        Outcome::Draw { .. } => 0,
+        Outcome::Win { winner, .. } if winner == root_player => MATE_SCORE,
+        Outcome::Win { .. } => -MATE_SCORE,
+    }
+}
+
+/// Pick a legal 9x9 pawn fallback from the static evaluator when both wall
+/// stocks are exhausted. The exact zero-stock oracle normally supersedes this
+/// choice, but a fixed node budget can stop the oracle before it commits an
+/// iteration. In that case the old lowest-code fallback can walk away from a
+/// goal or oscillate in a corridor even though the evaluator distinguishes the
+/// available pawn exits.
+///
+/// This is deliberately restricted to canonical 9x9 zero-stock roots. It
+/// neither changes legal generation nor spends search nodes; it is only the
+/// deterministic action returned when the regular search cannot commit.
+fn zero_stock_evaluation_fallback(
+    config: &Config,
+    root: &PreparedGameState,
+    actions: &CodeList,
+) -> Result<Option<usize>> {
+    if config.rows != 9
+        || config.columns != 9
+        || root.position.stock.a != 0
+        || root.position.stock.b != 0
+    {
+        return Ok(actions.iter().next());
+    }
+
+    let mut codes = actions.iter();
+    let Some(first_code) = codes.next() else {
+        return Ok(None);
+    };
+    let root_player = root.position.turn;
+    // Clone the fully prepared state once, then keep the repetition state and
+    // all compact caches transactionally exact through generated apply/undo.
+    // `CodeList` is ascending, so retaining the seeded first action on equal
+    // scores preserves the historic deterministic lowest-code tie policy.
+    let mut child = root.clone();
+    let first_undo = child.apply_generated_code(config, first_code)?;
+    let mut best_action = first_code;
+    let mut best_score = fallback_score_from_root(config, root_player, &child);
+    if !child.undo_generated_code(first_undo) {
+        return Err(NormalDuelError::InvalidState);
+    }
+    for code in codes {
+        let undo = child.apply_generated_code(config, code)?;
+        let score = fallback_score_from_root(config, root_player, &child);
+        if !child.undo_generated_code(undo) {
+            return Err(NormalDuelError::InvalidState);
+        }
+        if score > best_score {
+            best_score = score;
+            best_action = code;
+        }
+    }
+    Ok(Some(best_action))
+}
+
 fn run<B: SearchBudget>(
     config: &Config,
     state: &GameState,
@@ -481,13 +550,17 @@ fn run<B: SearchBudget>(
     // The deadline is created by search_for before entering this shared path.
     // We cannot return before deriving a validated legal fallback, but poll
     // each bounded setup phase and skip expensive search infrastructure once
-    // expiration is observed. Node mode sees the same polls without adding
-    // nodes, preserving its deterministic result.
+    // expiration is observed. A setup-time expiration intentionally keeps the
+    // historical lowest-code fallback: do not start static evaluation after a
+    // deadline poll has already failed. Later oracle, TT, or iteration
+    // exhaustion instead returns the evaluated fallback selected below. Node
+    // mode sees the same polls without adding nodes, preserving its
+    // deterministic result.
     let expired_after_validation = budget.exhausted(0);
     let root = PreparedGameState::from_game_state(config, &validated)?;
     let expired_after_preparation = budget.exhausted(0);
     let root_actions = compact_legal_codes(config, &root);
-    let fallback = root_actions.iter().next();
+    let default_fallback = root_actions.iter().next();
     if !root.outcome.is_ongoing() {
         let stopped = expired_after_validation || expired_after_preparation || budget.exhausted(0);
         let score = match root.outcome {
@@ -514,7 +587,14 @@ fn run<B: SearchBudget>(
         });
     }
     let expired_after_actions = budget.exhausted(0);
-    if expired_after_validation || expired_after_preparation || expired_after_actions {
+    let expired_before_fallback =
+        expired_after_validation || expired_after_preparation || expired_after_actions;
+    let fallback = if expired_before_fallback {
+        default_fallback
+    } else {
+        zero_stock_evaluation_fallback(config, &root, &root_actions)?
+    };
+    if expired_before_fallback {
         return Ok(SearchReport {
             action_code: fallback,
             score: None,
@@ -865,6 +945,162 @@ mod tests {
             .contains(&first.action_code.unwrap()));
     }
 
+    fn nonterminal_9x9_pawn_fallback_state(config: &Config) -> GameState {
+        let mut state = create_initial_state(config).unwrap();
+        // B is six pawn steps from its goal. Its lowest legal action is the
+        // backward code 13, while the forward code 31 is a nonterminal route
+        // improvement. A stays clear of B's local pawn geometry.
+        for code in [75, 13, 74, 22, 75] {
+            state =
+                apply_legal_action(config, &state, &decode_action(config, code).unwrap()).unwrap();
+        }
+        assert_eq!(state.position.turn, Player::B);
+        assert_eq!(state.position.pawns.b, Coord { r: 2, c: 4 });
+        assert!(state.outcome.is_ongoing());
+        state
+    }
+
+    #[test]
+    fn zero_stock_9x9_nonterminal_fallback_uses_static_route_score() {
+        let config = zero_wall_config();
+        let state = nonterminal_9x9_pawn_fallback_state(&config);
+        let prepared = PreparedGameState::from_game_state(&config, &state).unwrap();
+        let actions = compact_legal_codes(&config, &prepared);
+        assert_eq!(actions.iter().collect::<Vec<_>>(), vec![13, 21, 23, 31]);
+
+        let root_player = prepared.position.turn;
+        let mut child = prepared.clone();
+        for code in actions.iter() {
+            let undo = child.apply_generated_code(&config, code).unwrap();
+            assert!(child.outcome.is_ongoing(), "no child is an immediate win");
+            assert!(child.undo_generated_code(undo));
+        }
+        let low_undo = child.apply_generated_code(&config, 13).unwrap();
+        let low_score = fallback_score_from_root(&config, root_player, &child);
+        assert!(child.undo_generated_code(low_undo));
+        let forward_undo = child.apply_generated_code(&config, 31).unwrap();
+        let forward_score = fallback_score_from_root(&config, root_player, &child);
+        assert!(child.undo_generated_code(forward_undo));
+        assert!(
+            forward_score > low_score,
+            "the -evaluate(child) arm prefers the non-lowest forward code"
+        );
+        assert_eq!(
+            zero_stock_evaluation_fallback(&config, &prepared, &actions).unwrap(),
+            Some(31)
+        );
+
+        // One node enters the root and then leaves the exact zero-stock
+        // oracle unresolved. This is later search exhaustion, not an expired
+        // setup poll, so the public depth-zero fallback remains evaluated.
+        let report = search_nodes(
+            &config,
+            &state,
+            1,
+            SearchOptions {
+                max_depth: 4,
+                transposition_capacity: 2,
+                aspiration_window: 32,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.completed_depth, 0);
+        assert_eq!(report.action_code, Some(31));
+        assert!(report.stopped);
+        assert_eq!(report.diagnostics.zero_wall_oracle_queries, 1);
+        assert_eq!(report.diagnostics.zero_wall_oracle_solutions, 0);
+    }
+
+    #[test]
+    fn preexpired_9x9_setup_keeps_lowest_fallback_without_evaluation() {
+        let config = zero_wall_config();
+        let state = nonterminal_9x9_pawn_fallback_state(&config);
+        let prepared = PreparedGameState::from_game_state(&config, &state).unwrap();
+        let actions = compact_legal_codes(&config, &prepared);
+        assert_eq!(actions.iter().next(), Some(13));
+        assert_eq!(
+            zero_stock_evaluation_fallback(&config, &prepared, &actions).unwrap(),
+            Some(31),
+            "the fixture distinguishes evaluated and lowest-code fallbacks"
+        );
+
+        // The third setup poll is the one immediately before fallback
+        // selection. Once it expires, run() must preserve the old low-code
+        // path and not evaluate child positions after the failed poll.
+        let report = run(
+            &config,
+            &state,
+            CheckBudget::new(2),
+            SearchOptions {
+                max_depth: 4,
+                transposition_capacity: 2,
+                aspiration_window: 32,
+            },
+        )
+        .unwrap();
+        assert!(report.stopped);
+        assert_eq!(report.completed_depth, 0);
+        assert_eq!(report.action_code, Some(13));
+    }
+
+    #[test]
+    fn stocked_9x9_fallback_preserves_lowest_legal_action() {
+        let config = Config {
+            initial_stock: Players { a: 10, b: 10 },
+            ..zero_wall_config()
+        };
+        let state = nonterminal_9x9_pawn_fallback_state(&config);
+        let prepared = PreparedGameState::from_game_state(&config, &state).unwrap();
+        let actions = compact_legal_codes(&config, &prepared);
+        assert_eq!(prepared.position.stock, Players { a: 10, b: 10 });
+        assert_eq!(
+            zero_stock_evaluation_fallback(&config, &prepared, &actions).unwrap(),
+            actions.iter().next()
+        );
+    }
+
+    #[test]
+    fn zero_stock_9x9_fallback_scores_pawn_exits_before_oracle_exhaustion() {
+        let config = zero_wall_config();
+        let mut state = create_initial_state(&config).unwrap();
+        // B reaches one step from its goal while A keeps the turn sequence
+        // legal without occupying or touching that goal square. The lowest
+        // pawn code is B's backward move (58), whereas code 76 wins
+        // immediately.
+        for code in [75, 13, 74, 22, 75, 31, 76, 40, 75, 49, 74, 58, 75, 67, 74] {
+            state = apply_legal_action(&config, &state, &decode_action(&config, code).unwrap())
+                .unwrap();
+        }
+        assert_eq!(state.position.turn, Player::B);
+        assert_eq!(state.position.pawns.b, Coord { r: 7, c: 4 });
+
+        let prepared = PreparedGameState::from_game_state(&config, &state).unwrap();
+        let actions = compact_legal_codes(&config, &prepared);
+        assert_eq!(actions.iter().next(), Some(58));
+        assert!(actions.iter().any(|code| code == 76));
+        assert_eq!(
+            zero_stock_evaluation_fallback(&config, &prepared, &actions).unwrap(),
+            Some(76)
+        );
+
+        // A one-node fixed budget makes the zero-stock oracle stop before a
+        // committed iteration, so the evaluated fallback is the public move.
+        let report = search_nodes(
+            &config,
+            &state,
+            1,
+            SearchOptions {
+                max_depth: 4,
+                transposition_capacity: 2,
+                aspiration_window: 32,
+            },
+        )
+        .unwrap();
+        assert_eq!(report.completed_depth, 0);
+        assert_eq!(report.action_code, Some(76));
+        assert!(report.stopped);
+    }
+
     #[test]
     fn default_search_options_use_the_profiled_aspiration_window() {
         assert_eq!(SearchOptions::default().aspiration_window, 256);
@@ -1183,28 +1419,23 @@ mod tests {
     fn exhausted_budget_returns_deterministic_legal_fallback() {
         let config = zero_wall_config();
         let state = create_initial_state(&config).unwrap();
-        let report = search_nodes(
-            &config,
-            &state,
-            1,
-            SearchOptions {
-                max_depth: 8,
-                ..SearchOptions::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(report.completed_depth, 0);
-        assert!(report.stopped);
-        assert_eq!(report.score, None);
-        assert!(report.committed_iteration_nodes.is_empty());
-        assert!(report.committed_iteration_scores.is_empty());
-        assert_eq!(
-            report.action_code,
-            crate::legal_action_codes(&config, &state)
-                .unwrap()
-                .into_iter()
-                .next()
-        );
+        let options = SearchOptions {
+            max_depth: 8,
+            ..SearchOptions::default()
+        };
+        let first = search_nodes(&config, &state, 1, options).unwrap();
+        let second = search_nodes(&config, &state, 1, options).unwrap();
+        assert_eq!(first.action_code, second.action_code);
+        for report in [&first, &second] {
+            assert_eq!(report.completed_depth, 0);
+            assert!(report.stopped);
+            assert_eq!(report.score, None);
+            assert!(report.committed_iteration_nodes.is_empty());
+            assert!(report.committed_iteration_scores.is_empty());
+        }
+        assert!(crate::legal_action_codes(&config, &state)
+            .unwrap()
+            .contains(&first.action_code.unwrap()));
     }
 
     #[test]
