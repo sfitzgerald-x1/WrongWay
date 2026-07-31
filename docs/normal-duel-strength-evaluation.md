@@ -41,6 +41,34 @@ acceptance. It is distinct from the feature-flagged, human-facing `Hard+`
 shorter deterministic logical-clock deadlines or fixed-node/fixed-depth limits;
 they must never use the 15,000 ms human-facing budget.
 
+Fixed-node regression mode is auxiliary and deterministic for both sides. By
+default every game receives a fresh logical clock starting at 0 ms and advancing
+exactly 4 ms per `now()` poll. The `normal-duel-regression-logical-clock-v1`
+profile was calibrated from 12 canonical 9x9 pinned-Hard opening roots: the
+median observed real work per clock poll was 4.189 ms, and the nine roots near
+Hard's 700 ms cutoff used 165–186 polls. This was a single macOS calibration
+under Node 22.22.2, not a portable throughput claim. The rounded 4 ms tick
+approximates that median work while making ablation comparisons repeatable. It
+is not a product timing model and cannot produce release or strength-gate
+evidence. Regression mode is in-process only: the harness rejects any worker
+adapter before starting a game because worker IPC cannot share the logical
+clock synchronously.
+
+The built-in regression profile also gives pinned Hard a separate 10,000 ms
+real-time VM safety ceiling. This is only a runaway guard; it does not replace
+or shorten Hard's logical 700 ms decision cutoff. A safety-ceiling overrun is
+reported as `clock_profile_exceeded`, not as a generic crash. Strength mode
+retains its existing real deadline and VM-timeout behavior.
+
+Every game records its clock profile in `settings.clockProfile`, and the
+top-level report records the selected `clockProfile`. Explicit `clockFactory`
+callers may provide their own `clockProfile`; an override without one is
+reported as `caller-supplied-clock-unprofiled-v1`. Strength mode continues to
+use the real monotonic `performance.now` profile. Per-engine telemetry records
+the `clockProfileId` and timing source; deterministic regression measurements
+use `deterministic-logical-clock-time`, distinct from strength mode's
+`trusted-harness-active-time`.
+
 The repository's checked-in 12-opening book is a smoke and regression artifact,
 not enough to claim the gate. No 400-game run is part of this harness change.
 
@@ -266,6 +294,8 @@ The following are immediate losses for the offending engine:
 - illegal action;
 - active-time deadline overrun or subprocess timeout;
 - process-memory ceiling overrun;
+- in logical-clock regression mode, a pinned-Hard real safety-ceiling overrun,
+  reported as `clock_profile_exceeded`;
 - in fixed-node regression mode, a node-budget-capable engine omitting node
   telemetry or reporting more than the requested budget.
 
@@ -316,7 +346,8 @@ the association. `--opening-limit` is therefore disallowed with
 
 ## Running an evaluation
 
-Fast deterministic regression mode uses a fixed candidate node budget:
+Fast deterministic regression mode uses a fixed candidate node budget and the
+auxiliary deterministic logical clock described above:
 
 ```sh
 node scripts/run-normal-duel-strength.mjs \
@@ -345,6 +376,10 @@ It rejects regression mode, any `--opening-limit`, noncanonical seeds or
 deadlines, an absent or invalid `--candidate-manifest`, unverified corpora,
 noncanonical memory isolation, non-subprocess candidates, and non-pinned
 baselines before play.
+
+The logical regression result is suitable for paired candidate A/B comparisons
+only. The official 900 ms gate remains the real-monotonic, subprocess-isolated
+strength protocol and is unchanged by the regression clock profile.
 
 The candidate manifest is canonical JSON with keys in this exact order,
 strictly path-sorted file records, and a trailing newline:

@@ -43,9 +43,13 @@ import {
   CANONICAL_STRENGTH_INITIALIZATION_CAP_MS,
   CANONICAL_STRENGTH_OBSERVER_CAP_MS,
   CANONICAL_STRENGTH_SEED,
+  CALLER_SUPPLIED_CLOCK_PROFILE,
+  DETERMINISTIC_REGRESSION_CLOCK_PROFILE,
+  deterministicRegressionClockFactory,
   MINIMUM_STRENGTH_OPENING_PAIRS,
   normalDuelConfig,
   pairedClusterConfidenceIntervals,
+  REAL_MONOTONIC_CLOCK_PROFILE,
   REGRESSION_MODE,
   runEvaluation,
   runMatch,
@@ -2166,7 +2170,11 @@ test('evaluation pairs every opening across sides and reports strength, telemetr
   assert.equal(report.summary.wins + report.summary.losses + report.summary.draws, 4);
   assert.equal(report.summary.telemetry.contender.nodes.reportedDecisions,
     report.summary.telemetry.contender.decisions);
-  assert.equal(report.summary.telemetry.contender.timing.source, 'trusted-harness-active-time');
+  assert.equal(report.summary.telemetry.contender.timing.source, 'caller-supplied-clock-time');
+  assert.equal(
+    report.summary.telemetry.contender.timing.clockProfileId,
+    CALLER_SUPPLIED_CLOCK_PROFILE.id
+  );
   assert.ok(report.summary.telemetry.contender.untrustedSelfReportedTiming.reportedDecisions > 0);
   assert.ok(report.summary.telemetry.contender.actionMix.pawn > 0);
   assert.equal(report.summary.gate.sampleSizeMet, false);
@@ -2185,4 +2193,325 @@ test('evaluation pairs every opening across sides and reports strength, telemetr
     pairedClusterConfidenceIntervals(report.results, contender.id),
     report.summary.confidenceIntervals
   );
+});
+
+test('canonical 9x9 default regression evaluations repeat actions, outcomes, and telemetry', async () => {
+  const book = JSON.parse(readFileSync(BOOK_URL, 'utf8'));
+  const smokeBook = { ...book, openings: book.openings.slice(0, 1) };
+
+  async function evaluate() {
+    const actions = [];
+    const contender = scriptedEngine('deterministic-candidate', goalAction, {
+      observe(transition, context) {
+        actions.push({
+          gameId: context.gameId,
+          player: transition.player,
+          actionCode: encodeAction(context.config, transition.action)
+        });
+      }
+    });
+    const report = await runEvaluation({
+      contender,
+      baseline: scriptedEngine('deterministic-baseline', goalAction),
+      book: smokeBook,
+      mode: REGRESSION_MODE,
+      nodeBudget: 100,
+      minimumOpeningPairs: 1
+    });
+    return { actions, report };
+  }
+
+  const first = await evaluate();
+  const second = await evaluate();
+  assert.deepEqual(second.actions, first.actions);
+  assert.deepEqual(second.report.results, first.report.results);
+  assert.deepEqual(second.report.summary, first.report.summary);
+  assert.deepEqual(first.report.clockProfile, DETERMINISTIC_REGRESSION_CLOCK_PROFILE);
+  assert.equal(
+    first.report.summary.telemetry.contender.timing.source,
+    'deterministic-logical-clock-time'
+  );
+  assert.equal(
+    first.report.summary.telemetry.contender.timing.clockProfileId,
+    DETERMINISTIC_REGRESSION_CLOCK_PROFILE.id
+  );
+  for (const result of first.report.results) {
+    assert.deepEqual(result.settings.clockProfile, DETERMINISTIC_REGRESSION_CLOCK_PROFILE);
+  }
+});
+
+test('canonical 9x9 pinned Hard near-cutoff roots repeat actions, results, and telemetry', async () => {
+  const book = JSON.parse(readFileSync(BOOK_URL, 'utf8'));
+
+  async function evaluate(opening, hardSide) {
+    const actions = [];
+    const opponent = scriptedEngine('bounded-hard-opponent', () => null, {
+      observe(transition) {
+        actions.push({
+          player: transition.player,
+          actionCode: encodeAction(book.config, transition.action)
+        });
+      }
+    });
+    const opponentSide = hardSide === 'A' ? 'B' : 'A';
+    const result = await runMatch({
+      config: book.config,
+      opening,
+      engines: {
+        [hardSide]: createPinnedHardBaseline(),
+        [opponentSide]: opponent
+      },
+      contenderSide: hardSide,
+      gameInPair: 0,
+      seed: CANONICAL_STRENGTH_SEED,
+      mode: REGRESSION_MODE,
+      nodeBudget: 100
+    });
+    return { actions, result };
+  }
+
+  for (const opening of [book.openings[1], book.openings[2]]) {
+    const hardSide = opening.targetPlies % 2 === 0 ? 'A' : 'B';
+    const opponentSide = hardSide === 'A' ? 'B' : 'A';
+    const first = await evaluate(opening, hardSide);
+    const second = await evaluate(opening, hardSide);
+    assert.equal(first.actions.length, 1, `${opening.id} bounds play after one Hard root`);
+    assert.deepEqual(second.actions, first.actions, opening.id);
+    assert.deepEqual(second.result, first.result, opening.id);
+    assert.equal(first.result.resultKind, 'forfeit', opening.id);
+    assert.equal(first.result.failedPlayer, opponentSide, opening.id);
+    assert.deepEqual(
+      first.result.settings.clockProfile,
+      DETERMINISTIC_REGRESSION_CLOCK_PROFILE,
+      opening.id
+    );
+    const elapsed = first.result.telemetry[hardSide].decisionMilliseconds[0];
+    assert.ok(elapsed >= 700, `${opening.id} logical elapsed ${elapsed} ms reached cutoff`);
+    assert.ok(elapsed <= 760, `${opening.id} logical elapsed ${elapsed} ms stayed cutoff-bound`);
+    assert.equal(elapsed % 4, 0, opening.id);
+    assert.equal(
+      first.result.telemetry[hardSide].clockProfileId,
+      DETERMINISTIC_REGRESSION_CLOCK_PROFILE.id,
+      opening.id
+    );
+    assert.equal(
+      first.result.telemetry[hardSide].timingSource,
+      'deterministic-logical-clock-time',
+      opening.id
+    );
+  }
+});
+
+test('canonical 9x9 pinned Hard reports a regression real safety-ceiling overrun distinctly', async () => {
+  const book = JSON.parse(readFileSync(BOOK_URL, 'utf8'));
+  const opening = book.openings[1];
+  const hardSide = opening.targetPlies % 2 === 0 ? 'A' : 'B';
+  const opponentSide = hardSide === 'A' ? 'B' : 'A';
+  const result = await runMatch({
+    config: book.config,
+    opening,
+    engines: {
+      [hardSide]: createPinnedHardBaseline(),
+      [opponentSide]: scriptedEngine('safety-ceiling-opponent', () => null)
+    },
+    contenderSide: hardSide,
+    gameInPair: 0,
+    seed: CANONICAL_STRENGTH_SEED,
+    mode: REGRESSION_MODE,
+    nodeBudget: 100,
+    clock: { now: () => 0 },
+    clockProfile: {
+      id: 'test-stalled-regression-clock-v1',
+      source: 'test-stalled-logical-clock',
+      deterministic: true,
+      realSafetyCeilingMilliseconds: 1
+    }
+  });
+  assert.equal(result.resultKind, 'forfeit');
+  assert.equal(result.failedPlayer, hardSide);
+  assert.equal(result.reason, 'clock_profile_exceeded');
+  assert.match(result.error, /regression clock-profile safety ceiling/);
+});
+
+test('canonical 9x9 regression rejects worker adapters before play', async () => {
+  const book = JSON.parse(readFileSync(BOOK_URL, 'utf8'));
+  const smokeBook = { ...book, openings: book.openings.slice(0, 1) };
+  const worker = await createWorkerEngineAdapter({
+    moduleUrl: `data:text/javascript,${encodeURIComponent(`
+      export default {
+        id: 'regression-worker',
+        version: 'test-v1',
+        capabilities: { nodeBudget: true },
+        createSession() {
+          return {
+            selectAction() { return null; },
+            observe() {},
+            close() {}
+          };
+        }
+      };
+    `)}`
+  });
+  let sessionsStarted = 0;
+  const inProcess = scriptedEngine('regression-in-process', goalAction);
+  const countedInProcess = Object.freeze({
+    ...inProcess,
+    createSession(context) {
+      sessionsStarted += 1;
+      return inProcess.createSession(context);
+    }
+  });
+  await assert.rejects(runEvaluation({
+    contender: worker,
+    baseline: countedInProcess,
+    book: smokeBook,
+    mode: REGRESSION_MODE,
+    nodeBudget: 100,
+    minimumOpeningPairs: 1
+  }), /fixed-node regression mode requires in-process engine adapters/);
+  assert.equal(sessionsStarted, 0);
+});
+
+test('deterministic regression clock factory gives every canonical 9x9 game a fresh clock', () => {
+  const first = deterministicRegressionClockFactory();
+  const second = deterministicRegressionClockFactory();
+  assert.deepEqual(
+    [first.now(), first.now(), first.now()],
+    [0, 4, 8]
+  );
+  assert.deepEqual(
+    [second.now(), second.now()],
+    [0, 4]
+  );
+});
+
+test('direct canonical 9x9 matches resolve mode-aware defaults and explicit clock provenance', async () => {
+  const book = JSON.parse(readFileSync(BOOK_URL, 'utf8'));
+  const opening = book.openings[0];
+  const matchOptions = {
+    config: book.config,
+    opening,
+    engines: {
+      A: scriptedEngine('direct-clock-a', goalAction),
+      B: scriptedEngine('direct-clock-b', () => null)
+    },
+    contenderSide: 'A',
+    gameInPair: 0,
+    seed: CANONICAL_STRENGTH_SEED
+  };
+  const strength = await runMatch({
+    ...matchOptions,
+    mode: STRENGTH_MODE,
+    perMoveDeadlineMs: CANONICAL_STRENGTH_DEADLINE_MS
+  });
+  assert.deepEqual(strength.settings.clockProfile, REAL_MONOTONIC_CLOCK_PROFILE);
+  assert.equal(strength.telemetry.A.timingSource, 'trusted-harness-active-time');
+  assert.equal(strength.telemetry.A.clockProfileId, REAL_MONOTONIC_CLOCK_PROFILE.id);
+
+  const explicit = await runMatch({
+    ...matchOptions,
+    mode: REGRESSION_MODE,
+    nodeBudget: 100,
+    clock: tickingClock(2)
+  });
+  assert.deepEqual(explicit.settings.clockProfile, CALLER_SUPPLIED_CLOCK_PROFILE);
+  assert.equal(explicit.telemetry.A.timingSource, 'caller-supplied-clock-time');
+
+  await assert.rejects(runMatch({
+    ...matchOptions,
+    mode: REGRESSION_MODE,
+    nodeBudget: 100,
+    clockProfile: { id: 'profile-without-clock' }
+  }), /clockProfile requires an explicit clock/);
+});
+
+test('canonical 9x9 explicit clock overrides retain caller-supplied provenance', async () => {
+  const book = JSON.parse(readFileSync(BOOK_URL, 'utf8'));
+  const smokeBook = { ...book, openings: book.openings.slice(0, 1) };
+  const profile = Object.freeze({
+    id: 'test-caller-logical-clock-v1',
+    source: 'normal-duel-strength-test',
+    deterministic: true,
+    tickMilliseconds: 2
+  });
+  let clocksCreated = 0;
+  const report = await runEvaluation({
+    contender: scriptedEngine('explicit-clock-candidate', goalAction),
+    baseline: scriptedEngine('explicit-clock-baseline', goalAction),
+    book: smokeBook,
+    mode: REGRESSION_MODE,
+    nodeBudget: 100,
+    minimumOpeningPairs: 1,
+    clockFactory() {
+      clocksCreated += 1;
+      return tickingClock(2);
+    },
+    clockProfile: profile
+  });
+  assert.equal(clocksCreated, 2);
+  assert.deepEqual(report.clockProfile, profile);
+  for (const result of report.results) {
+    assert.deepEqual(result.settings.clockProfile, profile);
+  }
+
+  const unprofiled = await runEvaluation({
+    contender: scriptedEngine('unprofiled-clock-candidate', goalAction),
+    baseline: scriptedEngine('unprofiled-clock-baseline', goalAction),
+    book: smokeBook,
+    mode: REGRESSION_MODE,
+    nodeBudget: 100,
+    minimumOpeningPairs: 1,
+    clockFactory: () => tickingClock(2)
+  });
+  assert.deepEqual(unprofiled.clockProfile, CALLER_SUPPLIED_CLOCK_PROFILE);
+});
+
+test('enforced canonical 9x9 evaluation rejects clock overrides before play', async () => {
+  const book = JSON.parse(readFileSync(BOOK_URL, 'utf8'));
+  const smokeBook = { ...book, openings: book.openings.slice(0, 1) };
+  let sessionsStarted = 0;
+  function neverStartedEngine(id) {
+    const engine = scriptedEngine(id, goalAction);
+    return Object.freeze({
+      ...engine,
+      createSession(context) {
+        sessionsStarted += 1;
+        return engine.createSession(context);
+      }
+    });
+  }
+  const common = {
+    contender: neverStartedEngine('enforced-clock-candidate'),
+    baseline: neverStartedEngine('enforced-clock-baseline'),
+    book: smokeBook,
+    mode: STRENGTH_MODE,
+    perMoveDeadlineMs: CANONICAL_STRENGTH_DEADLINE_MS,
+    enforceGate: true
+  };
+  await assert.rejects(runEvaluation({
+    ...common,
+    clockFactory: () => tickingClock()
+  }), /enforced gate requires the default real monotonic clock/);
+  await assert.rejects(runEvaluation({
+    ...common,
+    clockProfile: { id: 'forged-enforced-clock-profile' }
+  }), /enforced gate requires the default real monotonic clock/);
+  assert.equal(sessionsStarted, 0);
+});
+
+test('canonical 9x9 strength evaluations retain the real monotonic clock profile', async () => {
+  const book = JSON.parse(readFileSync(BOOK_URL, 'utf8'));
+  const smokeBook = { ...book, openings: book.openings.slice(0, 1) };
+  const report = await runEvaluation({
+    contender: scriptedEngine('strength-clock-candidate', goalAction),
+    baseline: scriptedEngine('strength-clock-baseline', goalAction),
+    book: smokeBook,
+    mode: STRENGTH_MODE,
+    perMoveDeadlineMs: CANONICAL_STRENGTH_DEADLINE_MS,
+    minimumOpeningPairs: 1
+  });
+  assert.deepEqual(report.clockProfile, REAL_MONOTONIC_CLOCK_PROFILE);
+  for (const result of report.results) {
+    assert.deepEqual(result.settings.clockProfile, REAL_MONOTONIC_CLOCK_PROFILE);
+  }
 });

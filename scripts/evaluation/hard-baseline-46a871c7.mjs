@@ -20,6 +20,10 @@ const REQUIRED_SOURCES = Object.freeze(['game-logic.js', 'ai.js']);
 const INVOKE_HARD = new vm.Script('aiDuelHard(...__hardArgs)', {
   filename: 'hard-product-46a871c7/invoke-aiDuelHard.js'
 });
+const REGRESSION_MODE = 'fixed-node-budget-v1';
+const DEFAULT_REGRESSION_REAL_SAFETY_CEILING_MS = 10_000;
+const MAX_REGRESSION_REAL_SAFETY_CEILING_MS = 60_000;
+const CLOCK_PROFILE_EXCEEDED_ERRORS = new WeakSet();
 
 export const HARD_BASELINE_ID = 'hard-product-46a871c7';
 export const HARD_BASELINE_TRUST_ROOT = Object.freeze({
@@ -41,8 +45,14 @@ export class HardBaselineError extends Error {
   }
 }
 
+export function isPinnedHardClockProfileExceededError(error) {
+  return error instanceof Error && CLOCK_PROFILE_EXCEEDED_ERRORS.has(error);
+}
+
 function fail(code, message, options) {
-  throw new HardBaselineError(code, message, options);
+  const error = new HardBaselineError(code, message, options);
+  if (code === 'clock_profile_exceeded') CLOCK_PROFILE_EXCEEDED_ERRORS.add(error);
+  throw error;
 }
 
 function sha256(source) {
@@ -265,13 +275,19 @@ function createRuntime(snapshots) {
     setClock(clock) {
       activeClock = clock;
     },
-    decide(args, timeoutMs) {
+    decide(args, timeoutMs, timeoutCode = 'deadline_exceeded') {
       sandbox.__hardArgs = args;
       try {
         return INVOKE_HARD.runInContext(context, { timeout: timeoutMs });
       } catch (error) {
         if (error?.code === 'ERR_SCRIPT_EXECUTION_TIMEOUT') {
-          fail('deadline_exceeded', 'pinned Hard decision exceeded the outer deadline', { cause: error });
+          fail(
+            timeoutCode,
+            timeoutCode === 'clock_profile_exceeded'
+              ? `pinned Hard exceeded the ${timeoutMs} ms regression clock-profile safety ceiling`
+              : 'pinned Hard decision exceeded the outer deadline',
+            { cause: error }
+          );
         }
         throw error;
       } finally {
@@ -314,8 +330,25 @@ export function createPinnedHardBaseline() {
       deadline: true,
       deterministicClock: true
     }),
-    createSession({ side, config, openingHistory = [] }) {
+    createSession({
+      side,
+      config,
+      mode = null,
+      clockProfile = null,
+      openingHistory = []
+    }) {
       assertSessionInput({ side, config, openingHistory });
+      const configuredSafetyCeiling = clockProfile?.realSafetyCeilingMilliseconds
+        ?? DEFAULT_REGRESSION_REAL_SAFETY_CEILING_MS;
+      if (mode === REGRESSION_MODE
+        && (!Number.isSafeInteger(configuredSafetyCeiling)
+          || configuredSafetyCeiling < 1
+          || configuredSafetyCeiling > MAX_REGRESSION_REAL_SAFETY_CEILING_MS)) {
+        fail(
+          'invalid_clock_profile',
+          `regression real safety ceiling must be an integer from 1 to ${MAX_REGRESSION_REAL_SAFETY_CEILING_MS} ms`
+        );
+      }
       const runtime = createRuntime(snapshots);
       runtime.setBoard(config);
       // Runtime is frozen, so keep goal rows beside it for the orchestration
@@ -346,9 +379,12 @@ export function createPinnedHardBaseline() {
           });
           runtime.setClock(monotonicClock);
           const startedAt = finiteMonotonic(monotonicClock);
-          const timeoutMs = Number.isFinite(deadlineAtMs)
-            ? Math.max(1, Math.ceil(deadlineAtMs - startedAt))
-            : 1_000;
+          const regressionClock = mode === REGRESSION_MODE;
+          const timeoutMs = regressionClock
+            ? configuredSafetyCeiling
+            : Number.isFinite(deadlineAtMs)
+              ? Math.max(1, Math.ceil(deadlineAtMs - startedAt))
+              : 1_000;
           const opponent = other(side);
           const position = state.position;
           const walls = new Set(position.walls);
@@ -371,7 +407,7 @@ export function createPinnedHardBaseline() {
             null,
             config.goalRows.B,
             config.goalRows.A
-          ], timeoutMs);
+          ], timeoutMs, regressionClock ? 'clock_profile_exceeded' : 'deadline_exceeded');
           const oracleState = useRotatedBOracle
             ? {
               position: {
