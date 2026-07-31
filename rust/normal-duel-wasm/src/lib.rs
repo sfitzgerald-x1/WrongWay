@@ -128,6 +128,10 @@ struct SearchDiagnosticsWire {
     immediate_goal_horizon_hits: u64,
     zero_wall_oracle_queries: u64,
     zero_wall_oracle_solutions: u64,
+    zero_wall_oracle_quota_backoffs: u64,
+    zero_wall_oracle_post_backoff_memo_hits: u64,
+    zero_wall_oracle_post_backoff_memo_misses: u64,
+    zero_wall_oracle_post_backoff_parent_exhaustions: u64,
     tt_probes: u64,
     tt_hits: u64,
     tt_bound_cutoffs: u64,
@@ -234,6 +238,18 @@ fn diagnostics_wire(diagnostics: &SearchDiagnostics) -> BoundaryResult<SearchDia
         immediate_goal_horizon_hits: js_safe_counter(diagnostics.immediate_goal_horizon_hits)?,
         zero_wall_oracle_queries: js_safe_counter(diagnostics.zero_wall_oracle_queries)?,
         zero_wall_oracle_solutions: js_safe_counter(diagnostics.zero_wall_oracle_solutions)?,
+        zero_wall_oracle_quota_backoffs: js_safe_counter(
+            diagnostics.zero_wall_oracle_quota_backoffs,
+        )?,
+        zero_wall_oracle_post_backoff_memo_hits: js_safe_counter(
+            diagnostics.zero_wall_oracle_post_backoff_memo_hits,
+        )?,
+        zero_wall_oracle_post_backoff_memo_misses: js_safe_counter(
+            diagnostics.zero_wall_oracle_post_backoff_memo_misses,
+        )?,
+        zero_wall_oracle_post_backoff_parent_exhaustions: js_safe_counter(
+            diagnostics.zero_wall_oracle_post_backoff_parent_exhaustions,
+        )?,
         tt_probes: js_safe_counter(diagnostics.tt_probes)?,
         tt_hits: js_safe_counter(diagnostics.tt_hits)?,
         tt_bound_cutoffs: js_safe_counter(diagnostics.tt_bound_cutoffs)?,
@@ -484,6 +500,10 @@ mod tests {
         assert!(report["diagnostics"]["immediateGoalHorizonHits"].is_u64());
         assert!(report["diagnostics"]["zeroWallOracleQueries"].is_u64());
         assert!(report["diagnostics"]["zeroWallOracleSolutions"].is_u64());
+        assert!(report["diagnostics"]["zeroWallOracleQuotaBackoffs"].is_u64());
+        assert!(report["diagnostics"]["zeroWallOraclePostBackoffMemoHits"].is_u64());
+        assert!(report["diagnostics"]["zeroWallOraclePostBackoffMemoMisses"].is_u64());
+        assert!(report["diagnostics"]["zeroWallOraclePostBackoffParentExhaustions"].is_u64());
         assert!(report["committedIterationNodes"].is_array());
         assert!(report["committedIterationScores"].is_array());
         let completed_depth = report["completedDepth"].as_u64().unwrap() as usize;
@@ -510,6 +530,42 @@ mod tests {
         let report: Value = serde_json::from_str(&first).unwrap();
         assert!(report["nodes"].as_u64().unwrap() <= 500);
         assert_legal_search_report(&report, &request["config"], &request["state"]);
+    }
+
+    #[test]
+    fn native_canonical_oracle_quota_diagnostics_are_serialized() {
+        let mut request = initial_search_request(5_000);
+        request["config"]["initialStock"] = json!({"A": 0, "B": 0});
+        request["state"] =
+            serde_json::from_str(&initial_state_impl(&request["config"].to_string()).unwrap())
+                .unwrap();
+        request["options"] = json!({
+            "maxDepth": 5,
+            "transpositionCapacity": 1024,
+            "aspirationWindow": 32
+        });
+
+        let first: Value =
+            serde_json::from_str(&search_nodes_impl(&request.to_string()).unwrap()).unwrap();
+        let second: Value =
+            serde_json::from_str(&search_nodes_impl(&request.to_string()).unwrap()).unwrap();
+        assert_eq!(first, second);
+        assert!(first["completedDepth"].as_u64().unwrap() > 0);
+        assert_eq!(first["diagnostics"]["zeroWallOracleQueries"], 1);
+        assert_eq!(first["diagnostics"]["zeroWallOracleSolutions"], 0);
+        assert_eq!(first["diagnostics"]["zeroWallOracleQuotaBackoffs"], 1);
+        assert!(
+            first["diagnostics"]["zeroWallOraclePostBackoffMemoMisses"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(first["diagnostics"]["zeroWallOraclePostBackoffMemoHits"], 0);
+        assert_eq!(
+            first["diagnostics"]["zeroWallOraclePostBackoffParentExhaustions"],
+            0
+        );
+        assert_legal_search_report(&first, &request["config"], &request["state"]);
     }
 
     #[test]

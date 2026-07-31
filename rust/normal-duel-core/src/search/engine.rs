@@ -5,10 +5,12 @@ use crate::{
     NormalDuelError, Outcome, PreparedGameState, Result,
 };
 
+#[cfg(test)]
+use super::budget::{CanonicalOracleLimits, FIXED_ORACLE_NODE_QUOTA};
 use super::budget::{DeadlineBudget, NodeBudget, SearchBudget};
 use super::eval::{evaluate, MATE_SCORE};
 use super::move_picker::{uses_profiled_ordering, Heuristics, OrderingHints};
-use super::oracle::ExactZeroWallOracle;
+use super::oracle::{ExactZeroWallOracle, PostBackoffMemoResult, QuotaOracleResult};
 use super::tt::{mirror_code, Bound, TranspositionTable};
 
 const NEG_INFINITY: i32 = -MATE_SCORE - 1;
@@ -65,6 +67,15 @@ pub struct SearchDiagnostics {
     pub zero_wall_oracle_queries: u64,
     /// Number of oracle calls that completed and supplied an exact result.
     pub zero_wall_oracle_solutions: u64,
+    /// Number of canonical 9x9 attempts stopped by an oracle-only node or
+    /// local wall-clock quota.
+    pub zero_wall_oracle_quota_backoffs: u64,
+    /// Number of exact memo values recovered without recursion after backoff.
+    pub zero_wall_oracle_post_backoff_memo_hits: u64,
+    /// Number of post-backoff memo misses that resumed ordinary negamax.
+    pub zero_wall_oracle_post_backoff_memo_misses: u64,
+    /// Number of post-backoff memo probes atomically stopped by the parent.
+    pub zero_wall_oracle_post_backoff_parent_exhaustions: u64,
     pub tt_probes: u64,
     pub tt_hits: u64,
     pub tt_bound_cutoffs: u64,
@@ -246,21 +257,72 @@ impl<B: SearchBudget> SearchContext<'_, B> {
         }
 
         if state.position.stock.a == 0 && state.position.stock.b == 0 {
-            self.diagnostics.zero_wall_oracle_queries += 1;
-            if let Some(hit) = self.oracle.solve(
-                self.config,
-                state,
-                &mut self.budget,
-                &mut self.nodes,
-                self.root_ply,
-            )? {
-                self.diagnostics.zero_wall_oracle_solutions += 1;
-                return Ok(Some(NodeValue {
-                    score: hit.score,
-                    best_action: hit.best_action,
-                }));
+            if self.config.rows == 9 && self.config.columns == 9 {
+                if self.oracle.quota_backoff_active() {
+                    match self.oracle.probe_memo_after_backoff(
+                        self.config,
+                        state,
+                        &mut self.budget,
+                        &mut self.nodes,
+                        self.root_ply,
+                    ) {
+                        PostBackoffMemoResult::Exact(hit) => {
+                            self.diagnostics.zero_wall_oracle_post_backoff_memo_hits += 1;
+                            return Ok(Some(NodeValue {
+                                score: hit.score,
+                                best_action: hit.best_action,
+                            }));
+                        }
+                        PostBackoffMemoResult::Miss => {
+                            self.diagnostics.zero_wall_oracle_post_backoff_memo_misses += 1;
+                        }
+                        PostBackoffMemoResult::ParentExhausted => {
+                            self.diagnostics
+                                .zero_wall_oracle_post_backoff_parent_exhaustions += 1;
+                            return Ok(None);
+                        }
+                    }
+                } else {
+                    self.diagnostics.zero_wall_oracle_queries += 1;
+                    let limits = self.budget.canonical_oracle_limits();
+                    match self.oracle.solve_with_canonical_limits(
+                        self.config,
+                        state,
+                        &mut self.budget,
+                        &mut self.nodes,
+                        self.root_ply,
+                        limits,
+                    )? {
+                        QuotaOracleResult::Exact(hit) => {
+                            self.diagnostics.zero_wall_oracle_solutions += 1;
+                            return Ok(Some(NodeValue {
+                                score: hit.score,
+                                best_action: hit.best_action,
+                            }));
+                        }
+                        QuotaOracleResult::QuotaBackoff => {
+                            self.diagnostics.zero_wall_oracle_quota_backoffs += 1;
+                        }
+                        QuotaOracleResult::ParentExhausted => return Ok(None),
+                    }
+                }
+            } else {
+                self.diagnostics.zero_wall_oracle_queries += 1;
+                if let Some(hit) = self.oracle.solve(
+                    self.config,
+                    state,
+                    &mut self.budget,
+                    &mut self.nodes,
+                    self.root_ply,
+                )? {
+                    self.diagnostics.zero_wall_oracle_solutions += 1;
+                    return Ok(Some(NodeValue {
+                        score: hit.score,
+                        best_action: hit.best_action,
+                    }));
+                }
+                return Ok(None);
             }
-            return Ok(None);
         }
 
         let identity = state.search_identity(self.config);
@@ -924,7 +986,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_node_runs_are_reproducible_and_return_legal_moves() {
+    fn canonical_oracle_quota_backoff_is_deterministic_and_commits() {
         let config = zero_wall_config();
         let state = create_initial_state(&config).unwrap();
         let options = SearchOptions {
@@ -935,14 +997,245 @@ mod tests {
         let first = search_nodes(&config, &state, 5_000, options).unwrap();
         let second = search_nodes(&config, &state, 5_000, options).unwrap();
         assert_eq!(first, second);
-        assert_eq!(first.nodes, 5_000);
-        assert_eq!(first.completed_depth, 0);
-        assert_eq!(first.score, None);
-        assert!(first.stopped);
+        assert!(first.nodes <= 5_000);
+        assert!(first.completed_depth > 0);
+        assert!(first.score.is_some());
+        assert!(!first.committed_iteration_nodes.is_empty());
+        assert_eq!(first.diagnostics.zero_wall_oracle_queries, 1);
+        assert_eq!(first.diagnostics.zero_wall_oracle_solutions, 0);
+        assert_eq!(first.diagnostics.zero_wall_oracle_quota_backoffs, 1);
+        assert!(
+            first.diagnostics.zero_wall_oracle_post_backoff_memo_misses > 0,
+            "later positive-depth zero-stock nodes use ordinary negamax"
+        );
+        assert_eq!(
+            first
+                .diagnostics
+                .zero_wall_oracle_post_backoff_parent_exhaustions,
+            0
+        );
+        assert_eq!(first.diagnostics.immediate_goal_horizon_hits, 0);
+        let mut reference = PreparedGameState::from_game_state(&config, &state).unwrap();
+        let expected =
+            plain_minimax(&config, &mut reference, first.completed_depth, state.ply).unwrap();
+        assert_eq!(first.action_code, expected.best_action);
+        assert_eq!(first.score, Some(expected.score));
         assert!(state.clone().position.turn.eq(&Player::A));
         assert!(crate::legal_action_codes(&config, &state)
             .unwrap()
             .contains(&first.action_code.unwrap()));
+    }
+
+    #[test]
+    fn captured_canonical_starvation_state_commits_after_oracle_backoff() {
+        let config = Config {
+            initial_stock: Players { a: 10, b: 10 },
+            ply_cap: 200,
+            ..zero_wall_config()
+        };
+        let mut state = create_initial_state(&config).unwrap();
+        for code in [
+            67, 3, 66, 89, 57, 12, 48, 21, 39, 91, 40, 30, 31, 39, 32, 48, 23, 57, 14, 85, 132,
+            158, 187, 148, 23, 174, 32, 117, 113, 172, 134, 107, 124, 58, 136, 59, 126, 60, 183,
+            102, 122, 61, 129, 52,
+        ] {
+            state = apply_legal_action(&config, &state, &decode_action(&config, code).unwrap())
+                .unwrap();
+        }
+        assert_eq!(state.ply, 44);
+        assert_eq!(state.position.turn, Player::A);
+        assert_eq!(state.position.stock, Players { a: 0, b: 0 });
+        assert!(state.outcome.is_ongoing());
+
+        let first = search_nodes(&config, &state, 50_000, SearchOptions::default()).unwrap();
+        let second = search_nodes(&config, &state, 50_000, SearchOptions::default()).unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.action_code, Some(31));
+        assert_eq!(first.score, Some(-6));
+        assert_eq!(first.completed_depth, 15);
+        assert_eq!(first.nodes, 50_000);
+        assert!(first.stopped);
+        assert_eq!(first.committed_iteration_nodes.first(), Some(&4_099));
+        assert_eq!(first.diagnostics.zero_wall_oracle_queries, 1);
+        assert_eq!(first.diagnostics.zero_wall_oracle_solutions, 0);
+        assert_eq!(first.diagnostics.zero_wall_oracle_quota_backoffs, 1);
+        assert_eq!(first.diagnostics.zero_wall_oracle_post_backoff_memo_hits, 0);
+        assert!(first.diagnostics.zero_wall_oracle_post_backoff_memo_misses > 0);
+    }
+
+    #[test]
+    fn post_backoff_memo_hit_and_miss_are_charged_and_diagnostic() {
+        let config = Config {
+            ply_cap: 18,
+            ..zero_wall_config()
+        };
+        let mut cached = create_initial_state(&config).unwrap();
+        for code in [67, 3, 58, 4, 49, 3, 40, 4, 31, 3, 22, 4, 13, 3] {
+            cached = apply_legal_action(&config, &cached, &decode_action(&config, code).unwrap())
+                .unwrap();
+        }
+        let uncached = create_initial_state(&config).unwrap();
+        let backed_off_oracle = || {
+            let mut oracle = ExactZeroWallOracle::new();
+            let mut cached_prepared = PreparedGameState::from_game_state(&config, &cached).unwrap();
+            let mut exact_budget = NodeBudget::new(100_000);
+            let mut exact_nodes = 0;
+            let exact = oracle
+                .solve(
+                    &config,
+                    &mut cached_prepared,
+                    &mut exact_budget,
+                    &mut exact_nodes,
+                    cached.ply,
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(exact.best_action, Some(4));
+            assert_eq!(exact.score, MATE_SCORE - 1);
+
+            let mut backoff_state = PreparedGameState::from_game_state(&config, &uncached).unwrap();
+            let backoff_before = backoff_state.clone();
+            let mut parent = NodeBudget::new(100);
+            let mut nodes = 0;
+            assert_eq!(
+                oracle
+                    .solve_with_canonical_limits(
+                        &config,
+                        &mut backoff_state,
+                        &mut parent,
+                        &mut nodes,
+                        uncached.ply,
+                        CanonicalOracleLimits {
+                            node_quota: 3,
+                            wall_clock_slice: None,
+                        },
+                    )
+                    .unwrap(),
+                QuotaOracleResult::QuotaBackoff
+            );
+            assert_eq!(backoff_state, backoff_before);
+            oracle
+        };
+
+        let mut cached_prepared = PreparedGameState::from_game_state(&config, &cached).unwrap();
+        let cached_before = cached_prepared.clone();
+        let mut hit_context = SearchContext {
+            config: &config,
+            budget: NodeBudget::new(100),
+            tt: TranspositionTable::new(64),
+            heuristics: Heuristics::new(2, config.policy_size()),
+            oracle: backed_off_oracle(),
+            root_ply: cached.ply,
+            nodes: 0,
+            diagnostics: SearchDiagnostics::default(),
+        };
+        let hit = hit_context
+            .negamax(&mut cached_prepared, 1, 0, NEG_INFINITY, POS_INFINITY, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(hit.best_action, Some(4));
+        assert_eq!(hit.score, MATE_SCORE - 1);
+        assert_eq!(hit_context.nodes, 2);
+        assert_eq!(
+            hit_context
+                .diagnostics
+                .zero_wall_oracle_post_backoff_memo_hits,
+            1
+        );
+        assert_eq!(
+            hit_context
+                .diagnostics
+                .zero_wall_oracle_post_backoff_memo_misses,
+            0
+        );
+        assert_eq!(cached_prepared, cached_before);
+
+        let mut exhausted_prepared = PreparedGameState::from_game_state(&config, &cached).unwrap();
+        let exhausted_before = exhausted_prepared.clone();
+        let mut exhausted_context = SearchContext {
+            config: &config,
+            budget: NodeBudget::new(2),
+            tt: TranspositionTable::new(64),
+            heuristics: Heuristics::new(2, config.policy_size()),
+            oracle: backed_off_oracle(),
+            root_ply: cached.ply,
+            nodes: 0,
+            diagnostics: SearchDiagnostics::default(),
+        };
+        assert!(exhausted_context
+            .negamax(
+                &mut exhausted_prepared,
+                1,
+                0,
+                NEG_INFINITY,
+                POS_INFINITY,
+                None,
+            )
+            .unwrap()
+            .is_none());
+        assert_eq!(exhausted_context.nodes, 2);
+        assert_eq!(
+            exhausted_context
+                .diagnostics
+                .zero_wall_oracle_post_backoff_memo_hits,
+            0
+        );
+        assert_eq!(
+            exhausted_context
+                .diagnostics
+                .zero_wall_oracle_post_backoff_memo_misses,
+            0
+        );
+        assert_eq!(
+            exhausted_context
+                .diagnostics
+                .zero_wall_oracle_post_backoff_parent_exhaustions,
+            1
+        );
+        assert_eq!(exhausted_prepared, exhausted_before);
+
+        let mut uncached_prepared = PreparedGameState::from_game_state(&config, &uncached).unwrap();
+        let uncached_before = uncached_prepared.clone();
+        let mut miss_context = SearchContext {
+            config: &config,
+            budget: NodeBudget::new(100),
+            tt: TranspositionTable::new(64),
+            heuristics: Heuristics::new(2, config.policy_size()),
+            oracle: backed_off_oracle(),
+            root_ply: uncached.ply,
+            nodes: 0,
+            diagnostics: SearchDiagnostics::default(),
+        };
+        assert!(miss_context
+            .negamax(
+                &mut uncached_prepared,
+                1,
+                0,
+                NEG_INFINITY,
+                POS_INFINITY,
+                None,
+            )
+            .unwrap()
+            .is_some());
+        assert_eq!(
+            miss_context
+                .diagnostics
+                .zero_wall_oracle_post_backoff_memo_hits,
+            0
+        );
+        assert_eq!(
+            miss_context
+                .diagnostics
+                .zero_wall_oracle_post_backoff_memo_misses,
+            1
+        );
+        assert_eq!(
+            miss_context
+                .diagnostics
+                .zero_wall_oracle_post_backoff_parent_exhaustions,
+            0
+        );
+        assert_eq!(uncached_prepared, uncached_before);
     }
 
     fn nonterminal_9x9_pawn_fallback_state(config: &Config) -> GameState {
@@ -1413,6 +1706,60 @@ mod tests {
         assert_eq!(report.score, Some(MATE_SCORE - 1));
         assert_eq!(report.diagnostics.zero_wall_oracle_queries, 1);
         assert_eq!(report.diagnostics.zero_wall_oracle_solutions, 1);
+        assert_eq!(report.diagnostics.zero_wall_oracle_quota_backoffs, 0);
+        assert_eq!(
+            report.diagnostics.zero_wall_oracle_post_backoff_memo_hits,
+            0
+        );
+        assert_eq!(
+            report.diagnostics.zero_wall_oracle_post_backoff_memo_misses,
+            0
+        );
+        assert_eq!(
+            report
+                .diagnostics
+                .zero_wall_oracle_post_backoff_parent_exhaustions,
+            0
+        );
+    }
+
+    #[test]
+    fn canonical_oracle_parent_budget_exhaustion_preserves_atomic_stop() {
+        let config = zero_wall_config();
+        let state = create_initial_state(&config).unwrap();
+        let report = search_nodes(
+            &config,
+            &state,
+            FIXED_ORACLE_NODE_QUOTA,
+            SearchOptions {
+                max_depth: 5,
+                transposition_capacity: 1 << 10,
+                aspiration_window: 32,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.nodes, FIXED_ORACLE_NODE_QUOTA);
+        assert_eq!(report.completed_depth, 0);
+        assert_eq!(report.score, None);
+        assert!(report.stopped);
+        assert_eq!(report.diagnostics.zero_wall_oracle_queries, 1);
+        assert_eq!(report.diagnostics.zero_wall_oracle_solutions, 0);
+        assert_eq!(report.diagnostics.zero_wall_oracle_quota_backoffs, 0);
+        assert_eq!(
+            report.diagnostics.zero_wall_oracle_post_backoff_memo_hits,
+            0
+        );
+        assert_eq!(
+            report.diagnostics.zero_wall_oracle_post_backoff_memo_misses,
+            0
+        );
+        assert_eq!(
+            report
+                .diagnostics
+                .zero_wall_oracle_post_backoff_parent_exhaustions,
+            0
+        );
     }
 
     #[test]
