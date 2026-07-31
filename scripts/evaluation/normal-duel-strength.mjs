@@ -50,6 +50,9 @@ import {
   takeTrustedSubprocessFailureTiming,
   takeTrustedSubprocessPendingTiming
 } from './worker-engine-proxy.mjs';
+import {
+  isPinnedHardClockProfileExceededError
+} from './hard-baseline-46a871c7.mjs';
 
 export {
   CANONICAL_STRENGTH_CONFIG,
@@ -67,11 +70,44 @@ export {
 export const STRENGTH_PROTOCOL = 'normal-duel-strength-protocol-v1';
 export const REGRESSION_MODE = 'fixed-node-budget-v1';
 export const STRENGTH_MODE = 'monotonic-deadline-v1';
+export const DETERMINISTIC_REGRESSION_CLOCK_PROFILE = Object.freeze({
+  id: 'normal-duel-regression-logical-clock-v1',
+  source: 'fixed-logical-tick',
+  deterministic: true,
+  tickMilliseconds: 4,
+  startsAtMilliseconds: 0,
+  calibration: '12-canonical-9x9-pinned-hard-roots-v1',
+  realSafetyCeilingMilliseconds: 10_000,
+  productEquivalent: false
+});
+export const REAL_MONOTONIC_CLOCK_PROFILE = Object.freeze({
+  id: 'real-monotonic-performance-now-v1',
+  source: 'performance.now',
+  deterministic: false,
+  tickMilliseconds: null,
+  startsAtMilliseconds: null,
+  calibration: null,
+  realSafetyCeilingMilliseconds: null,
+  productEquivalent: true
+});
+export const CALLER_SUPPLIED_CLOCK_PROFILE = Object.freeze({
+  id: 'caller-supplied-clock-unprofiled-v1',
+  source: 'caller-supplied',
+  deterministic: null,
+  tickMilliseconds: null,
+  startsAtMilliseconds: null,
+  calibration: null,
+  realSafetyCeilingMilliseconds: null,
+  productEquivalent: false
+});
 const ENFORCEMENT_TOKENS = new WeakSet();
 const ENFORCEMENT_RESULT_SETS = new WeakMap();
+const PROTOCOL_ERRORS = new WeakSet();
 
 function fail(message) {
-  throw new TypeError(`${STRENGTH_PROTOCOL}: ${message}`);
+  const error = new TypeError(`${STRENGTH_PROTOCOL}: ${message}`);
+  PROTOCOL_ERRORS.add(error);
+  throw error;
 }
 
 function other(player) {
@@ -87,6 +123,58 @@ function deepFreeze(value, seen = new Set()) {
 
 function immutableSnapshot(value) {
   return deepFreeze(structuredClone(value));
+}
+
+export function deterministicRegressionClockFactory() {
+  let now = DETERMINISTIC_REGRESSION_CLOCK_PROFILE.startsAtMilliseconds;
+  return Object.freeze({
+    now() {
+      const current = now;
+      now += DETERMINISTIC_REGRESSION_CLOCK_PROFILE.tickMilliseconds;
+      return current;
+    }
+  });
+}
+
+function realMonotonicClockFactory() {
+  return Object.freeze({ now: () => performance.now() });
+}
+
+function checkedClockProfile(profile, name = 'clockProfile') {
+  try {
+    if (!profile || typeof profile !== 'object' || Array.isArray(profile)
+      || typeof profile.id !== 'string' || profile.id.length === 0) {
+      fail(`${name} must be an object with a non-empty id`);
+    }
+    return immutableSnapshot(profile);
+  } catch (error) {
+    if (error && typeof error === 'object' && PROTOCOL_ERRORS.has(error)) throw error;
+    fail(`${name} must be a structured-cloneable object with a non-empty id`);
+  }
+}
+
+function timingSourceForClockProfile(profile) {
+  if (profile.deterministic === true) return 'deterministic-logical-clock-time';
+  if (profile.id === REAL_MONOTONIC_CLOCK_PROFILE.id) {
+    return 'trusted-harness-active-time';
+  }
+  return 'caller-supplied-clock-time';
+}
+
+function failureReason(error) {
+  if (isPinnedHardClockProfileExceededError(error)) return 'clock_profile_exceeded';
+  if (isTrustedSubprocessDeadlineError(error)) return 'deadline';
+  if (isTrustedSubprocessMemoryError(error)) return 'memory_limit';
+  return 'crash';
+}
+
+function assertRegressionEnginesAreInProcess(mode, engines) {
+  if (mode !== REGRESSION_MODE) return;
+  for (const engine of engines) {
+    if (getWorkerEngineIsolationProvenance(engine) !== null) {
+      fail('fixed-node regression mode requires in-process engine adapters');
+    }
+  }
 }
 
 function cloneAction(action) {
@@ -337,9 +425,11 @@ function failureResult({ state, opening, assignments, failedPlayer, reason, erro
   });
 }
 
-function newTelemetry(engine) {
+function newTelemetry(engine, clockProfile) {
   return {
     engineId: engine.id,
+    clockProfileId: clockProfile.id,
+    timingSource: timingSourceForClockProfile(clockProfile),
     decisionMilliseconds: [],
     chargedSetupMilliseconds: [],
     chargedObserverMilliseconds: [],
@@ -413,19 +503,21 @@ function frozenTelemetry(raw, sessions = {}) {
  * action, deadline miss, or node-budget protocol violation is an immediate
  * loss for the offending engine.
  */
-export async function runMatch({
-  config,
-  opening,
-  engines,
-  contenderSide,
-  gameInPair,
-  seed,
-  mode = STRENGTH_MODE,
-  perMoveDeadlineMs = CANONICAL_STRENGTH_DEADLINE_MS,
-  nodeBudget = null,
-  clock = { now: () => performance.now() },
-  wallTimeoutGraceMs = 100
-}) {
+export async function runMatch(options) {
+  const {
+    config,
+    opening,
+    engines,
+    contenderSide,
+    gameInPair,
+    seed,
+    mode = STRENGTH_MODE,
+    perMoveDeadlineMs = CANONICAL_STRENGTH_DEADLINE_MS,
+    nodeBudget = null,
+    clock = null,
+    clockProfile = null,
+    wallTimeoutGraceMs = 100
+  } = options;
   const checkedConfig = validateConfig(config);
   if (!engines || !engines.A || !engines.B) fail('engines must assign A and B');
   assertEngineDescriptor(engines.A, 'engines.A');
@@ -436,11 +528,27 @@ export async function runMatch({
   if (mode !== STRENGTH_MODE && mode !== REGRESSION_MODE) fail(`unsupported mode ${mode}`);
   if (mode === STRENGTH_MODE) finite(perMoveDeadlineMs, 'perMoveDeadlineMs', 1);
   if (mode === REGRESSION_MODE) integer(nodeBudget, 'nodeBudget', 1);
+  assertRegressionEnginesAreInProcess(mode, [engines.A, engines.B]);
   finite(wallTimeoutGraceMs, 'wallTimeoutGraceMs');
+  if (clock === null && clockProfile !== null) {
+    fail('clockProfile requires an explicit clock');
+  }
+  const selectedClock = clock
+    ?? (mode === REGRESSION_MODE
+      ? deterministicRegressionClockFactory()
+      : realMonotonicClockFactory());
+  const selectedClockProfile = checkedClockProfile(
+    clockProfile
+      ?? (clock !== null
+        ? CALLER_SUPPLIED_CLOCK_PROFILE
+        : mode === REGRESSION_MODE
+          ? DETERMINISTIC_REGRESSION_CLOCK_PROFILE
+          : REAL_MONOTONIC_CLOCK_PROFILE)
+  );
 
   const replayed = replayOpening(checkedConfig, opening);
   let state = replayed.state;
-  const guardedClock = guardMonotonicClock(clock);
+  const guardedClock = guardMonotonicClock(selectedClock);
   const assignments = Object.freeze({
     A: engines.A,
     B: engines.B,
@@ -450,14 +558,15 @@ export async function runMatch({
       mode,
       seed,
       nodeBudget: mode === REGRESSION_MODE ? nodeBudget : null,
-      perMoveDeadlineMs: mode === STRENGTH_MODE ? perMoveDeadlineMs : null
+      perMoveDeadlineMs: mode === STRENGTH_MODE ? perMoveDeadlineMs : null,
+      clockProfile: selectedClockProfile
     })
   });
   const sessionSeed = createLcg32(seed);
   const sessions = {};
   const telemetry = {
-    A: newTelemetry(engines.A),
-    B: newTelemetry(engines.B)
+    A: newTelemetry(engines.A, selectedClockProfile),
+    B: newTelemetry(engines.B, selectedClockProfile)
   };
   const engineConfig = immutableSnapshot(checkedConfig);
 
@@ -472,6 +581,7 @@ export async function runMatch({
           config: checkedConfig,
           seed: sessionSeed(),
           nodeBudget: mode === REGRESSION_MODE ? nodeBudget : null,
+          clockProfile: selectedClockProfile,
           openingHistory: replayed.history
         }));
         assertSession(sessions[side], engines[side].id);
@@ -484,9 +594,7 @@ export async function runMatch({
           opening,
           assignments,
           failedPlayer: side,
-          reason: isTrustedSubprocessDeadlineError(error)
-            ? 'deadline'
-            : isTrustedSubprocessMemoryError(error) ? 'memory_limit' : 'crash',
+          reason: failureReason(error),
           error,
           telemetry: frozenTelemetry(telemetry, sessions)
         });
@@ -530,9 +638,7 @@ export async function runMatch({
           trustedTiming,
           Math.max(0, endedAt - startedAt)
         );
-        const reason = isTrustedSubprocessDeadlineError(settled.error)
-          ? 'deadline'
-          : isTrustedSubprocessMemoryError(settled.error) ? 'memory_limit' : 'crash';
+        const reason = failureReason(settled.error);
         return failureResult({
           state, opening, assignments, failedPlayer: player,
           reason, error: settled.error, telemetry: frozenTelemetry(telemetry, sessions)
@@ -617,9 +723,7 @@ export async function runMatch({
             opening,
             assignments,
             failedPlayer: side,
-            reason: isTrustedSubprocessDeadlineError(error)
-              ? 'deadline'
-              : isTrustedSubprocessMemoryError(error) ? 'memory_limit' : 'crash',
+            reason: failureReason(error),
             error,
             telemetry: frozenTelemetry(telemetry, sessions)
           });
@@ -721,11 +825,15 @@ function summarizeEngineTelemetry(results, engineId) {
   const nodes = [];
   const depths = [];
   const actionMix = { pawn: 0, wall: 0 };
+  const clockProfileIds = new Set();
+  const timingSources = new Set();
   let antiStallReplacements = 0;
   for (const result of results) {
     for (const side of ['A', 'B']) {
       const telemetry = result.telemetry[side];
       if (telemetry.engineId !== engineId) continue;
+      clockProfileIds.add(telemetry.clockProfileId);
+      timingSources.add(telemetry.timingSource);
       elapsed.push(...telemetry.decisionMilliseconds);
       setupElapsed.push(...(telemetry.chargedSetupMilliseconds ?? []));
       observerElapsed.push(...(telemetry.chargedObserverMilliseconds ?? []));
@@ -743,10 +851,17 @@ function summarizeEngineTelemetry(results, engineId) {
   const totalMs = elapsed.reduce((sum, value) => sum + value, 0);
   const reportedTotalMs = reportedElapsed.reduce((sum, value) => sum + value, 0);
   const totalNodes = nodes.reduce((sum, value) => sum + value, 0);
+  const clockProfileId = clockProfileIds.size === 1
+    ? [...clockProfileIds][0]
+    : 'mixed';
+  const timingSource = timingSources.size === 1
+    ? [...timingSources][0]
+    : 'mixed-clock-time';
   return Object.freeze({
     decisions: elapsed.length,
     timing: Object.freeze({
-      source: 'trusted-harness-active-time',
+      source: timingSource,
+      clockProfileId,
       totalMs,
       meanMs: elapsed.length ? totalMs / elapsed.length : null,
       p50Ms: percentile(sortedElapsed, 0.5),
@@ -892,19 +1007,43 @@ export async function runEvaluation({
   perMoveDeadlineMs = CANONICAL_STRENGTH_DEADLINE_MS,
   nodeBudget = null,
   minimumOpeningPairs = MINIMUM_STRENGTH_OPENING_PAIRS,
-  clockFactory = () => ({ now: () => performance.now() }),
+  clockFactory = null,
+  clockProfile = null,
   enforceGate = false,
   corpusProvenance = null
 }) {
   assertEngineDescriptor(contender, 'contender');
   assertEngineDescriptor(baseline, 'baseline');
   if (contender.id === baseline.id) fail('contender and baseline ids must differ');
+  if (mode !== STRENGTH_MODE && mode !== REGRESSION_MODE) fail(`unsupported mode ${mode}`);
+  assertRegressionEnginesAreInProcess(mode, [contender, baseline]);
   const validatedBook = validateOpeningBook(book);
   const checkedConfig = validateConfig(config ?? validatedBook.config);
   if (JSON.stringify(checkedConfig) !== JSON.stringify(validatedBook.config)) {
     fail('evaluation config must exactly match the opening-book config');
   }
   integer(seed, 'seed');
+  if (enforceGate && (clockFactory !== null || clockProfile !== null)) {
+    fail('enforced gate requires the default real monotonic clock');
+  }
+  if (clockFactory !== null && typeof clockFactory !== 'function') {
+    fail('clockFactory must be a function or null');
+  }
+  if (clockFactory === null && clockProfile !== null) {
+    fail('clockProfile requires an explicit clockFactory');
+  }
+  const selectedClockFactory = clockFactory
+    ?? (mode === REGRESSION_MODE
+      ? deterministicRegressionClockFactory
+      : realMonotonicClockFactory);
+  const selectedClockProfile = checkedClockProfile(
+    clockProfile
+      ?? (clockFactory !== null
+        ? CALLER_SUPPLIED_CLOCK_PROFILE
+        : mode === REGRESSION_MODE
+          ? DETERMINISTIC_REGRESSION_CLOCK_PROFILE
+          : REAL_MONOTONIC_CLOCK_PROFILE)
+  );
   const enforcement = enforceGate
     ? validateEnforcedStrengthOptions({
       mode,
@@ -938,7 +1077,8 @@ export async function runEvaluation({
         mode,
         perMoveDeadlineMs,
         nodeBudget,
-        clock: clockFactory({ opening, contenderSide })
+        clock: selectedClockFactory({ opening, contenderSide }),
+        clockProfile: selectedClockProfile
       }));
     }
   }
@@ -957,6 +1097,7 @@ export async function runEvaluation({
     mode,
     seed,
     perMoveDeadlineMs: mode === STRENGTH_MODE ? perMoveDeadlineMs : null,
+    clockProfile: selectedClockProfile,
     book: Object.freeze({
       format: book.bookFormat,
       generatorVersion: book.generator.version,
