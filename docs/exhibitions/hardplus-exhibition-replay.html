@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Load Hard+ exhibition into the app replay</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --ink: #e8ecf3;
+    --muted: #93a0b4;
+    --panel: #161b24;
+    --line: #2a3341;
+    --accent: #7fd18c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0 auto;
+    padding: 24px;
+    max-width: 720px;
+    background: #0d1117;
+    color: var(--ink);
+    font: 14px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-top: 16px;
+  }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  button {
+    font: inherit;
+    color: var(--ink);
+    background: #232b37;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 8px 14px;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: #2c3543; }
+  button:disabled { opacity: .45; cursor: default; }
+  a { color: var(--accent); }
+  ol, ul { margin: 8px 0 0; padding-left: 20px; }
+  li + li { margin-top: 4px; }
+  .status { color: var(--muted); }
+  .error { color: #ff8f8f; white-space: pre-wrap; }
+  .ok { color: var(--accent); }
+</style>
+</head>
+<body>
+<h1>Load the Hard+ exhibition into the app replay</h1>
+<p class="status">
+  This page only converts the recorded exhibition artifact into one archived replay
+  entry for the app. It changes nothing else, and it never plays a move itself.
+  For the standalone board viewer with its own controls, use
+  <a href="./replay.html">replay.html</a>.
+</p>
+
+<div class="panel">
+  <h2>Artifact</h2>
+  <p id="status" class="status">Loading <code>./hardplus-exhibition-balanced-9x9-007.json</code>…</p>
+  <p id="error" class="error" hidden></p>
+  <dl id="detail"></dl>
+  <p><button id="load" disabled>Load into existing replay</button></p>
+  <p id="result" class="status" hidden></p>
+</div>
+
+<div class="panel">
+  <h2>How to watch it</h2>
+  <ol>
+    <li>
+      Serve the repository root over http so this page and the app share one origin
+      (localStorage is per-origin), e.g. <code>python3 -m http.server 8081</code>
+      from the repository root, or <code>npm run exhibition:replay</code>.
+    </li>
+    <li>
+      Open this page at
+      <code>http://localhost:8081/docs/exhibitions/hardplus-exhibition-replay.html</code>
+      and press <strong>Load into existing replay</strong>.
+    </li>
+    <li>
+      Open the app at <a href="../../index.html">../../index.html</a>, then go to
+      <strong>Replays</strong> and pick the <strong>Hard+ vs Pinned Hard</strong>
+      entry. The app's own replay screen supplies the back/forward controls, the
+      step slider and the board rendering — this page adds no playback UI of its
+      own.
+    </li>
+  </ol>
+  <p class="status">
+    The entry is written to the app's normal replay archive
+    (<code>ww_replay_hist</code>) as a local 9x9 duel. Existing entries are kept;
+    only a previously loaded copy of this exhibition is replaced, and the archive
+    stays capped at the app's ten most recent entries.
+  </p>
+</div>
+
+<script type="module">
+/**
+ * Convert the recorded exhibition artifact into one native `moveHist` replay and
+ * store it in the app's replay archive. The app owns playback; this page owns
+ * nothing but the conversion, so it must not import or mutate app code.
+ */
+const ARTIFACT_URL = './hardplus-exhibition-balanced-9x9-007.json';
+const ARTIFACT_FORMAT = 'normal-duel-hardplus-exhibition-replay-v1';
+/** Mirrors the app: `REPLAY_HIST_KEY` and its ten-entry cap in index.html. */
+const REPLAY_HIST_KEY = 'ww_replay_hist';
+const HISTORY_LIMIT = 10;
+/** The app renders side A red and side B blue; A is the Hard+ candidate. */
+const NAME_A = 'Hard+';
+const NAME_B = 'Pinned Hard';
+/** Extra marker so a re-load replaces its own entry instead of stacking copies. */
+const EXHIBITION_ID = 'hardplus-exhibition';
+
+const element = (id) => document.getElementById(id);
+
+function showError(message) {
+  const out = element('error');
+  // Append rather than replace: a forfeit notice and a protocol warning can
+  // both apply, and silently dropping either one is how this page misled before.
+  out.textContent = out.hidden ? message : `${out.textContent}\n\n${message}`;
+  out.hidden = false;
+}
+
+function describeList(rows) {
+  const target = element('detail');
+  target.replaceChildren();
+  for (const [label, value] of rows) {
+    if (value === null || value === undefined || value === '') continue;
+    const term = document.createElement('dt');
+    term.textContent = label;
+    const detail = document.createElement('dd');
+    detail.textContent = String(value);
+    target.append(term, detail);
+  }
+}
+
+/**
+ * Native entries are `{type:'move',p,r,c}` for a pawn step and
+ * `{type:'wall',p,k}` for a barricade, where `k` is the app's
+ * `orientation-row-column` wall key — the same text the engine emits.
+ */
+function toMoveHist(plies) {
+  return plies.map((ply, index) => {
+    const action = ply.action;
+    if (action?.kind === 'pawn') {
+      return { type: 'move', p: ply.actor, r: action.to.r, c: action.to.c };
+    }
+    if (action?.kind === 'wall') {
+      return { type: 'wall', p: ply.actor, k: action.wall };
+    }
+    throw new Error(`ply ${index} has an unsupported action kind ${action?.kind}`);
+  });
+}
+
+/**
+ * True only when the game actually ended on the board.
+ *
+ * `outcome.winner` is populated for a forfeit too, where it names whoever
+ * benefited from the other side failing rather than anyone who reached a goal.
+ * The rules verdict is the authority, so both it and the exhibition result kind
+ * must agree before this counts as a board win.
+ */
+function isBoardWin(outcome) {
+  return outcome.resultKind === 'win'
+    && outcome.failedPlayer == null
+    && outcome.finalOutcome?.kind === 'win'
+    && outcome.finalOutcome.winner === outcome.winner;
+}
+
+/**
+ * Same record shape the app writes when a local game ends.
+ *
+ * The app's replay record cannot express "won because the opponent failed": its
+ * renderer treats any non-null `winner` as a victory on the board. Copying a
+ * forfeit beneficiary into that field is what made a `memory_limit` failure at
+ * ply 74 present as an ordinary win, so a non-board result stores `winner: null`
+ * and the forfeit is carried in exhibition-only fields the app ignores.
+ */
+function buildRecord(artifact, moveHist) {
+  const outcome = artifact.outcome;
+  const boardWin = isBoardWin(outcome);
+  return {
+    ts: Date.now(),
+    winner: boardWin ? outcome.winner : null,
+    moveHist,
+    map: 'duel',
+    duelSize: 'standard',
+    nameA: NAME_A,
+    nameB: NAME_B,
+    gameMode: 'local',
+    myRole: null,
+    exhibitionId: EXHIBITION_ID,
+    exhibitionResultKind: outcome.resultKind,
+    exhibitionReason: outcome.reason ?? null,
+    exhibitionFailedPlayer: outcome.failedPlayer ?? null,
+    exhibitionBoardOutcome: outcome.finalOutcome?.kind ?? null
+  };
+}
+
+function isExhibitionEntry(entry) {
+  if (entry === null || typeof entry !== 'object') return false;
+  return entry.exhibitionId === EXHIBITION_ID
+    || (entry.nameA === NAME_A && entry.nameB === NAME_B && entry.gameMode === 'local');
+}
+
+function readHistory() {
+  const raw = localStorage.getItem(REPLAY_HIST_KEY);
+  if (!raw) return [];
+  const parsed = JSON.parse(raw);
+  if (!Array.isArray(parsed)) throw new Error(`${REPLAY_HIST_KEY} is not an array`);
+  return parsed;
+}
+
+function store(record) {
+  const existing = readHistory();
+  const kept = existing.filter((entry) => !isExhibitionEntry(entry));
+  const next = [record, ...kept].slice(0, HISTORY_LIMIT);
+  localStorage.setItem(REPLAY_HIST_KEY, JSON.stringify(next));
+  return { replaced: existing.length - kept.length, preserved: kept.length, dropped: Math.max(0, kept.length + 1 - HISTORY_LIMIT) };
+}
+
+function main(artifact) {
+  const moveHist = toMoveHist(artifact.plies);
+  const outcome = artifact.outcome;
+  const boardWin = isBoardWin(outcome);
+  const winnerName = outcome.winner === 'A' ? NAME_A : outcome.winner === 'B' ? NAME_B : null;
+  const resultText = boardWin
+    ? `win — ${winnerName} (${outcome.winner}) by ${outcome.reason}`
+    : `${outcome.resultKind} — no board winner`
+      + `${outcome.failedPlayer ? `; ${outcome.failedPlayer} failed` : ''}`
+      + `${outcome.reason ? ` (${outcome.reason})` : ''}`
+      + `${winnerName ? `; ${winnerName} (${outcome.winner}) benefited` : ''}`
+      + `; board state at final ply: ${outcome.finalOutcome?.kind ?? 'unknown'}`;
+
+  element('status').textContent = 'Artifact loaded.';
+  describeList([
+    ['Opening', artifact.exhibition.openingId],
+    ['Board', `${artifact.config.rows}x${artifact.config.columns} duel (standard)`],
+    ['Side A', `${NAME_A} — ${artifact.exhibition.sides.A.engineId}@${artifact.exhibition.sides.A.version}`],
+    ['Side B', `${NAME_B} — ${artifact.exhibition.sides.B.engineId}@${artifact.exhibition.sides.B.version}`],
+    ['Enforced', artifact.exhibition.enforced ? 'yes' : 'no (exhibition)'],
+    ['Result', resultText],
+    ['Recorded plies', artifact.plies.length],
+    ['Converted moves', moveHist.length]
+  ]);
+
+  if (!boardWin) {
+    showError(`This artifact did not end on the board: the exhibition result is`
+      + ` "${outcome.resultKind}"${outcome.reason ? ` (${outcome.reason})` : ''}`
+      + `${outcome.failedPlayer ? ` after ${outcome.failedPlayer} failed` : ''},`
+      + ` while the rules verdict at the final recorded ply is`
+      + ` "${outcome.finalOutcome?.kind ?? 'unknown'}".`
+      + ' It will be stored with no winner so the app does not present it as a'
+      + ' victory on the board.');
+  }
+
+  if (location.protocol !== 'http:' && location.protocol !== 'https:') {
+    showError(`This page is open over ${location.protocol} — the app at ../../index.html is a`
+      + ' different origin there, so it will not see the stored replay.'
+      + ' Serve the repository root over http (python3 -m http.server 8081) and reopen this page.');
+  }
+
+  const button = element('load');
+  button.disabled = false;
+  button.addEventListener('click', () => {
+    const out = element('result');
+    out.hidden = false;
+    try {
+      const counts = store(buildRecord(artifact, moveHist));
+      out.className = 'ok';
+      out.textContent = `Stored ${moveHist.length} moves in ${REPLAY_HIST_KEY}`
+        + ` (${counts.replaced > 0 ? 'replaced the previous exhibition entry, ' : ''}`
+        + `kept ${counts.preserved} other entr${counts.preserved === 1 ? 'y' : 'ies'}`
+        + `${counts.dropped > 0 ? `, dropped ${counts.dropped} beyond the app's ${HISTORY_LIMIT}-entry cap` : ''}).`
+        + ' Open the app and go to Replays.';
+    } catch (cause) {
+      out.className = 'error';
+      out.textContent = `Could not write ${REPLAY_HIST_KEY}: ${cause.message}`;
+    }
+  });
+}
+
+try {
+  const url = new URL(ARTIFACT_URL, location.href);
+  const response = await fetch(url, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  const artifact = await response.json();
+  if (artifact.format !== ARTIFACT_FORMAT) {
+    throw new Error(`unsupported artifact format ${artifact.format}`);
+  }
+  main(artifact);
+} catch (cause) {
+  element('status').textContent = 'No artifact loaded.';
+  showError(`Could not load ${ARTIFACT_URL}: ${cause.message}\n`
+    + 'Record it first with `npm run exhibition:hardplus`, then serve the repository'
+    + ' root over http (python3 -m http.server 8081) and reload this page.');
+}
+</script>
+</body>
+</html>

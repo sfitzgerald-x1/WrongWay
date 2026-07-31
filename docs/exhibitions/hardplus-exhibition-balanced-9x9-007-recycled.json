@@ -1,0 +1,5246 @@
+{
+  "format": "normal-duel-hardplus-exhibition-replay-v1",
+  "exhibition": {
+    "kind": "non-enforced-canonical-9x9-exhibition-v1",
+    "enforced": false,
+    "mode": "monotonic-deadline-v1",
+    "perTurnDeadlineMs": 15000,
+    "outerPerTurnDeadlineMs": 15000,
+    "candidateRequestedBudgetMs": 14000,
+    "candidateAdapterOverheadMarginMs": 100,
+    "candidateEffectiveRustBudgetMs": 13900,
+    "budgetNote": "The harness enforced outerPerTurnDeadlineMs per turn for both sides. Only the Hard+ candidate (A) received a cloned request with limits.wallClockBudgetMs lowered to candidateRequestedBudgetMs; its outer deadlineAtMs and clock were unchanged, and the pinned Hard baseline (B) kept the harness limits verbatim. The candidate adapter reserves candidateAdapterOverheadMarginMs from the requested budget, so Rust searched for candidateEffectiveRustBudgetMs (= requested - margin) nominally; per-decision setup/observer active-time debt and the deadline clamp can lower the actual search budget further.",
+    "seed": 1831565813,
+    "clockProfile": {
+      "id": "real-monotonic-performance-now-v1",
+      "source": "performance.now",
+      "deterministic": false,
+      "tickMilliseconds": null,
+      "startsAtMilliseconds": null,
+      "calibration": null,
+      "realSafetyCeilingMilliseconds": null,
+      "productEquivalent": true
+    },
+    "openingId": "balanced-9x9-007",
+    "openingTargetPlies": 4,
+    "roles": {
+      "A": "candidate-hard-plus",
+      "B": "pinned-hard-baseline"
+    },
+    "sides": {
+      "A": {
+        "role": "candidate-hard-plus",
+        "engineId": "wrongway-normal-duel-wasm-search",
+        "version": "0.1.0"
+      },
+      "B": {
+        "role": "pinned-hard-baseline",
+        "engineId": "hard-product-46a871c7",
+        "version": "wrongway-hard-product-baseline-v1",
+        "sourceCommit": "46a871c7b061a33922bdb9c6d78355e2e9b6b607"
+      }
+    }
+  },
+  "repository": {
+    "headCommit": "a05a87c1fe7119bb825bf6083e31f9897d557834",
+    "pinnedRepositoryCommit": "bb35d8c",
+    "headMatchesPinnedCommit": false,
+    "worktreeDirty": true
+  },
+  "config": {
+    "ruleset": "normal-duel-v1",
+    "rows": 9,
+    "columns": 9,
+    "start": {
+      "A": {
+        "r": 8,
+        "c": 4
+      },
+      "B": {
+        "r": 0,
+        "c": 4
+      }
+    },
+    "goalRows": {
+      "A": 0,
+      "B": 8
+    },
+    "initialStock": {
+      "A": 10,
+      "B": 10
+    },
+    "jumpRule": "permissive-adjacent-exit-v1",
+    "repetitionThreshold": 3,
+    "plyCap": 200,
+    "firstPlayer": "A"
+  },
+  "book": {
+    "format": "normal-duel-balanced-opening-book-v1",
+    "generator": {
+      "version": "normal-duel-balanced-opening-generator-1.0.0",
+      "algorithm": "lcg32-v1",
+      "seed": 1831565813,
+      "openingCount": 12,
+      "targetPlies": [
+        4,
+        5,
+        6
+      ],
+      "selection": "advance lcg32; seeded canonical start; prefer wall iff high-byte modulo 4 is zero, otherwise pawn; cyclic first balanced ongoing candidate",
+      "balance": "absolute wall-only shortest-path distance delta <= 1 after every selected ply",
+      "moduloBias": "intentional"
+    },
+    "configurationSha256": "1869dc2a71b4043aebee681e64283f42b93d13665f7ead9f1eca9ccb1a0b1da0",
+    "openingCount": 12
+  },
+  "corpusProvenance": {
+    "verification": "exact-seeded-regeneration-v1",
+    "verified": true,
+    "bookSha256": "e98e4865534bc197e213e6a6838a03f2df351038c6f6248025ccfd2eebd79f85",
+    "manifestSha256": "a48028a514f17a561002ad18e1f081d0134bb934cb638bc8c4e356c29021e7b3",
+    "manifestFormat": "normal-duel-balanced-opening-manifest-v1",
+    "bookFormat": "normal-duel-balanced-opening-book-v1",
+    "generatorVersion": "normal-duel-balanced-opening-generator-1.0.0",
+    "generatorAlgorithm": "lcg32-v1",
+    "generatorSeed": 1831565813,
+    "generatorOpeningCount": 12,
+    "configurationSha256": "1869dc2a71b4043aebee681e64283f42b93d13665f7ead9f1eca9ccb1a0b1da0"
+  },
+  "candidate": {
+    "id": "wrongway-normal-duel-wasm-search",
+    "version": "0.1.0",
+    "authenticated": true,
+    "artifactProvenance": {
+      "verification": "content-addressed-manifest-v1",
+      "rootPolicy": "hermetic-release-directory-v1",
+      "format": "wrongway-candidate-artifact-manifest-v1",
+      "manifestSha256": "d71d18fa6c2ef0ebd0ac238cd70434f0ce425313da980ae732f753fa1387bd65",
+      "entry": "adapter.mjs",
+      "files": [
+        {
+          "path": "adapter.mjs",
+          "sha256": "b1d3be09a71f2e4fbc378b5b3501c3744ca10857730417440f037f7dfedca467"
+        },
+        {
+          "path": "normal-duel-wasm.mjs",
+          "sha256": "1d2c4cf709b4cdceb348b02aa0fade546817dea45c5fef237004923f8e61a5b5"
+        },
+        {
+          "path": "normal-duel-wasm_bg.wasm",
+          "sha256": "3fdc92a7b08dc17f6a3a33103265ec180fd1f3ac8cd6d2a48eecac0e496830af"
+        }
+      ]
+    },
+    "isolationProvenance": {
+      "permissionProfile": "node22-permission-readonly-subprocess-v1",
+      "stdioIsolation": "null-device-v1",
+      "memoryIsolation": "darwin-taskpolicy-rss-limit-v1",
+      "memoryLimitMiB": 512,
+      "v8OldSpaceMiB": 128,
+      "memoryPreflight": "darwin-taskpolicy-preflight-96-112-v1",
+      "artifactIntegrity": "content-addressed-hermetic-release-v1",
+      "moduleLoadIsolation": "manifest-files-safe-builtins-v1",
+      "filesystemContentIsolation": "manifest-files-only-v1",
+      "environmentIsolation": "spawn-minimal-lang-c-utc-v1",
+      "networkIsolation": "safe-builtins-no-network-db-v1",
+      "subprocessIsolation": "node-subprocess-per-decision-v1",
+      "sessionLifecycle": "stateless-wasm-per-decision-v1"
+    },
+    "capabilities": {
+      "nodeBudget": true,
+      "deadline": true,
+      "hardDeadlineIsolation": true,
+      "isolation": "node-subprocess-per-decision-v1",
+      "sessionLifecycle": "stateless-wasm-per-decision-v1",
+      "integrityIsolation": "node22-permission-readonly-subprocess-v1",
+      "stdioIsolation": "null-device-v1",
+      "memoryIsolation": "darwin-taskpolicy-rss-limit-v1",
+      "memoryLimitMiB": 512,
+      "v8OldSpaceMiB": 128,
+      "memoryPreflight": "darwin-taskpolicy-preflight-96-112-v1",
+      "artifactIntegrity": "content-addressed-hermetic-release-v1",
+      "moduleLoadIsolation": "manifest-files-safe-builtins-v1",
+      "filesystemContentIsolation": "manifest-files-only-v1",
+      "environmentIsolation": "spawn-minimal-lang-c-utc-v1",
+      "networkIsolation": "safe-builtins-no-network-db-v1",
+      "activeTimeCharging": "setup-observe-select-next-move-v1",
+      "initializationCapMs": 900,
+      "observerCapMs": 900,
+      "filesystemRead": true,
+      "filesystemWrite": false,
+      "childProcess": false,
+      "nestedWorker": false,
+      "nativeAddons": false
+    }
+  },
+  "baseline": {
+    "id": "hard-product-46a871c7",
+    "version": "wrongway-hard-product-baseline-v1",
+    "sourceCommit": "46a871c7b061a33922bdb9c6d78355e2e9b6b607",
+    "trustRoot": {
+      "baselineId": "hard-product-46a871c7",
+      "baselineVersion": "wrongway-hard-product-baseline-v1",
+      "sourceCommit": "46a871c7b061a33922bdb9c6d78355e2e9b6b607",
+      "manifestSha256": "55591ccaeb32cdfff4c30f23723b5e98d13ef304b5fd6eaa1d7ca761148f0df6",
+      "gameLogicSha256": "db8dc06882f015d78460882e0ab629f660d0a4c1c7600d986a0e0a979139e75a",
+      "aiSha256": "07ec05bb99602e36a879095ec159728bbf0ba520338d0a20a904888f2b57a777",
+      "orchestrationSha256": "8dd628e49934e3bb401833d6b69a8854ed6f1dffaee945fbc399bc2a4d2e72bc",
+      "originalIndexSha256": "87468038df741428fe25f8532f8871459f181554a6dbadf4e151b6bf44621f4c"
+    },
+    "pinnedWorkerVerified": true,
+    "isolationProvenance": {
+      "permissionProfile": "node22-permission-readonly-subprocess-v1",
+      "stdioIsolation": "null-device-v1",
+      "memoryIsolation": "darwin-taskpolicy-rss-limit-v1",
+      "memoryLimitMiB": 512,
+      "v8OldSpaceMiB": 128,
+      "memoryPreflight": "darwin-taskpolicy-preflight-96-112-v1",
+      "artifactIntegrity": null,
+      "moduleLoadIsolation": null,
+      "filesystemContentIsolation": null,
+      "environmentIsolation": "spawn-minimal-lang-c-utc-v1",
+      "networkIsolation": null,
+      "subprocessIsolation": "node-subprocess-per-game-v1",
+      "sessionLifecycle": "stateful-session-per-game-v1"
+    }
+  },
+  "outcome": {
+    "resultKind": "win",
+    "winner": "A",
+    "winnerRole": "candidate-hard-plus",
+    "reason": "goal",
+    "failedPlayer": null,
+    "error": null,
+    "startingPly": 4,
+    "finalPly": 75,
+    "finalOutcome": {
+      "kind": "win",
+      "winner": "A",
+      "reason": "goal"
+    }
+  },
+  "initialPosition": {
+    "pawns": {
+      "A": {
+        "r": 8,
+        "c": 4
+      },
+      "B": {
+        "r": 0,
+        "c": 4
+      }
+    },
+    "walls": [],
+    "stock": {
+      "A": 10,
+      "B": 10
+    },
+    "turn": "A"
+  },
+  "plies": [
+    {
+      "phase": "opening",
+      "ply": 1,
+      "actor": "A",
+      "actionCode": 89,
+      "action": {
+        "kind": "wall",
+        "wall": "H-1-0"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 8,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 4
+          }
+        },
+        "walls": [
+          "H-1-0"
+        ],
+        "stock": {
+          "A": 9,
+          "B": 10
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": null
+    },
+    {
+      "phase": "opening",
+      "ply": 2,
+      "actor": "B",
+      "actionCode": 3,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 0,
+          "c": 3
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 8,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 3
+          }
+        },
+        "walls": [
+          "H-1-0"
+        ],
+        "stock": {
+          "A": 9,
+          "B": 10
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": null
+    },
+    {
+      "phase": "opening",
+      "ply": 3,
+      "actor": "A",
+      "actionCode": 200,
+      "action": {
+        "kind": "wall",
+        "wall": "V-6-7"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 8,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 3
+          }
+        },
+        "walls": [
+          "H-1-0",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 8,
+          "B": 10
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": null
+    },
+    {
+      "phase": "opening",
+      "ply": 4,
+      "actor": "B",
+      "actionCode": 2,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 0,
+          "c": 2
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 8,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 2
+          }
+        },
+        "walls": [
+          "H-1-0",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 8,
+          "B": 10
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": null
+    },
+    {
+      "phase": "game",
+      "ply": 5,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 7,
+          "c": 4
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 2
+          }
+        },
+        "walls": [
+          "H-1-0",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 8,
+          "B": 10
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 0,
+        "nodes": 8561972,
+        "depth": 5,
+        "chargedActiveMs": 13907.642666999998,
+        "chargedSetupMs": 77.21016700000007,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13830.432499999999,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 6,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "wall",
+        "wall": "H-4-4"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 2
+          }
+        },
+        "walls": [
+          "H-1-0",
+          "H-4-4",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 8,
+          "B": 9
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 0,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 800.210375000001,
+        "chargedSetupMs": 78.728791,
+        "chargedObserverMs": 0.5057500000002619,
+        "chargedSelectMs": 720.9758340000008,
+        "reportedElapsedMs": 720.4050000000007,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 7,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "wall",
+        "wall": "H-0-1"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 2
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-1-0",
+          "H-4-4",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 7,
+          "B": 9
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 1,
+        "nodes": 8076657,
+        "depth": 5,
+        "chargedActiveMs": 13907.112208999999,
+        "chargedSetupMs": 82.6560419999987,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13824.456167,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 8,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 0,
+          "c": 3
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 3
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-1-0",
+          "H-4-4",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 7,
+          "B": 9
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 1,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 173.24045899999874,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.7652089999992313,
+        "chargedSelectMs": 172.4752499999995,
+        "reportedElapsedMs": 172.19154200000048,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 9,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "wall",
+        "wall": "H-0-3"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 3
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-4",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 6,
+          "B": 9
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 2,
+        "nodes": 4978604,
+        "depth": 5,
+        "chargedActiveMs": 13908.352208,
+        "chargedSetupMs": 88.57374999999956,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13819.778458,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 10,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 0,
+          "c": 4
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 4
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-4",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 6,
+          "B": 9
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 2,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 189.68437599999015,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.4734589999934542,
+        "chargedSelectMs": 189.2109169999967,
+        "reportedElapsedMs": 188.9857919999995,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 11,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "wall",
+        "wall": "V-0-4"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 4
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-4",
+          "V-0-4",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 5,
+          "B": 9
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 3,
+        "nodes": 7318976,
+        "depth": 5,
+        "chargedActiveMs": 13908.436374999997,
+        "chargedSetupMs": 76.93479200000002,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13831.501582999997,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 12,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "wall",
+        "wall": "H-4-6"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 4
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-4",
+          "H-4-6",
+          "V-0-4",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 5,
+          "B": 8
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 3,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 94.16362500000105,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.507499999999709,
+        "chargedSelectMs": 93.65612500000134,
+        "reportedElapsedMs": 93.34237500000017,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 13,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "wall",
+        "wall": "H-7-2"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 4
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-4",
+          "H-4-6",
+          "H-7-2",
+          "V-0-4",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 4,
+          "B": 8
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 4,
+        "nodes": 6497262,
+        "depth": 5,
+        "chargedActiveMs": 13908.96079099999,
+        "chargedSetupMs": 100.91387499999837,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13808.046915999992,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 14,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "wall",
+        "wall": "H-4-2"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 4
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-7-2",
+          "V-0-4",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 4,
+          "B": 7
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 4,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 93.95166600000084,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.58824900000036,
+        "chargedSelectMs": 93.36341700000048,
+        "reportedElapsedMs": 93.14462500000081,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 15,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "wall",
+        "wall": "H-7-0"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 4
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 3,
+          "B": 7
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 5,
+        "nodes": 6185820,
+        "depth": 5,
+        "chargedActiveMs": 13908.862668000002,
+        "chargedSetupMs": 76.91658400000597,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13831.946083999996,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 16,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "wall",
+        "wall": "V-4-7"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 4
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-4-7",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 3,
+          "B": 6
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 5,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 43.807958999997936,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.3694180000020424,
+        "chargedSelectMs": 43.438540999995894,
+        "reportedElapsedMs": 43.227249999996275,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 17,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "wall",
+        "wall": "V-2-4"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 4
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 2,
+          "B": 6
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 6,
+        "nodes": 6753198,
+        "depth": 5,
+        "chargedActiveMs": 13908.184875000006,
+        "chargedSetupMs": 74.54845900001237,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13833.636415999994,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 18,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 0,
+          "c": 3
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 3
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 2,
+          "B": 6
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 6,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 26.666918000017176,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.4807510000100592,
+        "chargedSelectMs": 26.186167000007117,
+        "reportedElapsedMs": 25.954209000003175,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 19,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 6,
+          "c": 4
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 6,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 3
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 2,
+          "B": 6
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 7,
+        "nodes": 7569323,
+        "depth": 5,
+        "chargedActiveMs": 13909.243208999993,
+        "chargedSetupMs": 96.08966699999291,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13813.153542,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 20,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "wall",
+        "wall": "V-5-3"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 6,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 3
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-3",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 2,
+          "B": 5
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 7,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 119.0655839999963,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.3543340000032913,
+        "chargedSelectMs": 118.71124999999302,
+        "reportedElapsedMs": 118.47370799999044,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 21,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 7,
+          "c": 4
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 3
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-3",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 2,
+          "B": 5
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 8,
+        "nodes": 6807291,
+        "depth": 5,
+        "chargedActiveMs": 13909.440000000002,
+        "chargedSetupMs": 93.16358300000138,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13816.276417000001,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 22,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 0,
+          "c": 2
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 4
+          },
+          "B": {
+            "r": 0,
+            "c": 2
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-3",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 2,
+          "B": 5
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 8,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 39.34016499998688,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.3947069999849191,
+        "chargedSelectMs": 38.94545800000196,
+        "reportedElapsedMs": 38.644333000003826,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 23,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 7,
+          "c": 3
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 3
+          },
+          "B": {
+            "r": 0,
+            "c": 2
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-3",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 2,
+          "B": 5
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 9,
+        "nodes": 7575517,
+        "depth": 5,
+        "chargedActiveMs": 13907.803082000028,
+        "chargedSetupMs": 79.3315830000065,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13828.471499000021,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 24,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 0,
+          "c": 1
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 3
+          },
+          "B": {
+            "r": 0,
+            "c": 1
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-3",
+          "V-6-7"
+        ],
+        "stock": {
+          "A": 2,
+          "B": 5
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 9,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 54.891875000001164,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.37429199999314733,
+        "chargedSelectMs": 54.51758300000802,
+        "reportedElapsedMs": 54.288082999992184,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 25,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "wall",
+        "wall": "V-7-3"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 3
+          },
+          "B": {
+            "r": 0,
+            "c": 1
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 5
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 10,
+        "nodes": 9192734,
+        "depth": 5,
+        "chargedActiveMs": 13907.915749999986,
+        "chargedSetupMs": 75.90562499998487,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13832.010125,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 26,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 0,
+          "c": 0
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 3
+          },
+          "B": {
+            "r": 0,
+            "c": 0
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 5
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 10,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 67.86945900000865,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.31325000000651926,
+        "chargedSelectMs": 67.55620900000213,
+        "reportedElapsedMs": 67.33679199998733,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 27,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 7,
+          "c": 2
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 2
+          },
+          "B": {
+            "r": 0,
+            "c": 0
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 5
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 11,
+        "nodes": 10325763,
+        "depth": 7,
+        "chargedActiveMs": 13907.728457999998,
+        "chargedSetupMs": 84.71825000000536,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13823.010207999992,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 28,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 1,
+          "c": 0
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 2
+          },
+          "B": {
+            "r": 1,
+            "c": 0
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 5
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 11,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 164.80716599998414,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.5014159999846015,
+        "chargedSelectMs": 164.30574999999953,
+        "reportedElapsedMs": 164.09299999999348,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 29,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 6,
+          "c": 2
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 6,
+            "c": 2
+          },
+          "B": {
+            "r": 1,
+            "c": 0
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 5
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 12,
+        "nodes": 9787346,
+        "depth": 7,
+        "chargedActiveMs": 13907.307708999957,
+        "chargedSetupMs": 87.08908399997745,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13820.21862499998,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 30,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "wall",
+        "wall": "H-5-1"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 6,
+            "c": 2
+          },
+          "B": {
+            "r": 1,
+            "c": 0
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 4
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 12,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 335.4810839999991,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.44129200000315905,
+        "chargedSelectMs": 335.03979199999594,
+        "reportedElapsedMs": 334.7315419999941,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 31,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 6,
+          "c": 1
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 6,
+            "c": 1
+          },
+          "B": {
+            "r": 1,
+            "c": 0
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 4
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 13,
+        "nodes": 9596172,
+        "depth": 7,
+        "chargedActiveMs": 13908.609208999987,
+        "chargedSetupMs": 129.82445899999584,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13778.784749999992,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 32,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "wall",
+        "wall": "V-5-0"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 6,
+            "c": 1
+          },
+          "B": {
+            "r": 1,
+            "c": 0
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 3
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 13,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 96.55970800001523,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.5302500000107102,
+        "chargedSelectMs": 96.02945800000452,
+        "reportedElapsedMs": 95.56870799997705,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 33,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 7,
+          "c": 1
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 1
+          },
+          "B": {
+            "r": 1,
+            "c": 0
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 3
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 14,
+        "nodes": 10681041,
+        "depth": 7,
+        "chargedActiveMs": 13920.90849999999,
+        "chargedSetupMs": 144.5752499999944,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13776.333249999996,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 34,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 1,
+          "c": 1
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 1
+          },
+          "B": {
+            "r": 1,
+            "c": 1
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 3
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 14,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 62.40716599998996,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.621874000004027,
+        "chargedSelectMs": 61.78529199998593,
+        "reportedElapsedMs": 61.37062499998137,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 35,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 7,
+          "c": 0
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 0
+          },
+          "B": {
+            "r": 1,
+            "c": 1
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 3
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 15,
+        "nodes": 11036672,
+        "depth": 7,
+        "chargedActiveMs": 13916.921333000035,
+        "chargedSetupMs": 107.44295799999963,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13809.478375000035,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 36,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "wall",
+        "wall": "H-6-0"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 0
+          },
+          "B": {
+            "r": 1,
+            "c": 1
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 2
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 15,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 73.55474899997353,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.5249579999945126,
+        "chargedSelectMs": 73.02979099997901,
+        "reportedElapsedMs": 72.62091699999291,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 37,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 7,
+          "c": 1
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 1
+          },
+          "B": {
+            "r": 1,
+            "c": 1
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 2
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 16,
+        "nodes": 14665487,
+        "depth": 11,
+        "chargedActiveMs": 13914.201792000007,
+        "chargedSetupMs": 285.47354200002155,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13628.728249999986,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 38,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 1,
+          "c": 2
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 1
+          },
+          "B": {
+            "r": 1,
+            "c": 2
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 2
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 16,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 34.84945800001151,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.5477500000270084,
+        "chargedSelectMs": 34.3017079999845,
+        "reportedElapsedMs": 33.976874999993015,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 39,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 7,
+          "c": 2
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 2
+          },
+          "B": {
+            "r": 1,
+            "c": 2
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 2
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 17,
+        "nodes": 17851007,
+        "depth": 10,
+        "chargedActiveMs": 13913.560542999941,
+        "chargedSetupMs": 88.33441699997638,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13825.226125999965,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 40,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 2,
+          "c": 2
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 7,
+            "c": 2
+          },
+          "B": {
+            "r": 2,
+            "c": 2
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 2
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 17,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 91.61516700001084,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.4358340000035241,
+        "chargedSelectMs": 91.17933300000732,
+        "reportedElapsedMs": 90.9395829999994,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 41,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 6,
+          "c": 2
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 6,
+            "c": 2
+          },
+          "B": {
+            "r": 2,
+            "c": 2
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 2
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 18,
+        "nodes": 14344857,
+        "depth": 9,
+        "chargedActiveMs": 13915.246959000011,
+        "chargedSetupMs": 93.61229099999764,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13821.634668000013,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 42,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 3,
+          "c": 2
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 6,
+            "c": 2
+          },
+          "B": {
+            "r": 3,
+            "c": 2
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 2
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 18,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 187.84049999999115,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.42391700000735,
+        "chargedSelectMs": 187.4165829999838,
+        "reportedElapsedMs": 187.18141700001433,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 43,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 6,
+          "c": 3
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 6,
+            "c": 3
+          },
+          "B": {
+            "r": 3,
+            "c": 2
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 2
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 19,
+        "nodes": 15274627,
+        "depth": 10,
+        "chargedActiveMs": 13916.788708999986,
+        "chargedSetupMs": 88.7200840000296,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13828.068624999956,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 44,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 3,
+          "c": 3
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 6,
+            "c": 3
+          },
+          "B": {
+            "r": 3,
+            "c": 3
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 2
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 19,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 249.30858199996874,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.48716600000625476,
+        "chargedSelectMs": 248.82141599996248,
+        "reportedElapsedMs": 248.58145800000057,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 45,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 5,
+          "c": 3
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 5,
+            "c": 3
+          },
+          "B": {
+            "r": 3,
+            "c": 3
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-2-4",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 2
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 20,
+        "nodes": 19434876,
+        "depth": 11,
+        "chargedActiveMs": 13940.707416999969,
+        "chargedSetupMs": 94.8568329999689,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13845.850584,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 46,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "wall",
+        "wall": "V-1-1"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 5,
+            "c": 3
+          },
+          "B": {
+            "r": 3,
+            "c": 3
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 1
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 20,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 242.8312090000254,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.41983400005847216,
+        "chargedSelectMs": 242.41137499996694,
+        "reportedElapsedMs": 242.204665999976,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 47,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 5,
+          "c": 2
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 5,
+            "c": 2
+          },
+          "B": {
+            "r": 3,
+            "c": 3
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 1
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 21,
+        "nodes": 19944776,
+        "depth": 13,
+        "chargedActiveMs": 13922.216125000035,
+        "chargedSetupMs": 86.44095800002106,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13835.775167000014,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 48,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "wall",
+        "wall": "V-3-3"
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 5,
+            "c": 2
+          },
+          "B": {
+            "r": 3,
+            "c": 3
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 21,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 161.2978749999893,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.4209580000024289,
+        "chargedSelectMs": 160.87691699998686,
+        "reportedElapsedMs": 160.50879200000782,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 49,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 5,
+          "c": 1
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 5,
+            "c": 1
+          },
+          "B": {
+            "r": 3,
+            "c": 3
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 22,
+        "nodes": 26734816,
+        "depth": 19,
+        "chargedActiveMs": 13917.639956999978,
+        "chargedSetupMs": 117.6861660000286,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13799.953790999949,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 50,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 2,
+          "c": 3
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 5,
+            "c": 1
+          },
+          "B": {
+            "r": 2,
+            "c": 3
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 22,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 1.0974580000038259,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.5739579999935813,
+        "chargedSelectMs": 0.5235000000102445,
+        "reportedElapsedMs": 0.38945900002727285,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 51,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 4,
+          "c": 1
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 4,
+            "c": 1
+          },
+          "B": {
+            "r": 2,
+            "c": 3
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 23,
+        "nodes": 25417591,
+        "depth": 18,
+        "chargedActiveMs": 13916.78479200002,
+        "chargedSetupMs": 82.33525000000373,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13834.449542000017,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 52,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 2,
+          "c": 4
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 4,
+            "c": 1
+          },
+          "B": {
+            "r": 2,
+            "c": 4
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 23,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 0.6937500000349246,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.28775000001769513,
+        "chargedSelectMs": 0.40600000001722947,
+        "reportedElapsedMs": 0.2992089999606833,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 53,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 3,
+          "c": 1
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 3,
+            "c": 1
+          },
+          "B": {
+            "r": 2,
+            "c": 4
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 24,
+        "nodes": 25724686,
+        "depth": 16,
+        "chargedActiveMs": 13917.58345799998,
+        "chargedSetupMs": 82.1629580000299,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13835.42049999995,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 54,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 3,
+          "c": 4
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 3,
+            "c": 1
+          },
+          "B": {
+            "r": 3,
+            "c": 4
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 24,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 0.6768339999835007,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.25116699998034164,
+        "chargedSelectMs": 0.42566700000315905,
+        "reportedElapsedMs": 0.3142080000252463,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 55,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 3,
+          "c": 2
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 3,
+            "c": 2
+          },
+          "B": {
+            "r": 3,
+            "c": 4
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 25,
+        "nodes": 24916589,
+        "depth": 17,
+        "chargedActiveMs": 13917.633125000051,
+        "chargedSetupMs": 80.7518750000163,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13836.881250000035,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 56,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 4,
+          "c": 4
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 3,
+            "c": 2
+          },
+          "B": {
+            "r": 4,
+            "c": 4
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 25,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 0.649208000046201,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.2914990000426769,
+        "chargedSelectMs": 0.3577090000035241,
+        "reportedElapsedMs": 0.26245900004869327,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 57,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 2,
+          "c": 2
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 2,
+            "c": 2
+          },
+          "B": {
+            "r": 4,
+            "c": 4
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 26,
+        "nodes": 24803757,
+        "depth": 16,
+        "chargedActiveMs": 13918.29787400004,
+        "chargedSetupMs": 84.72166600002674,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13833.576208000013,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 58,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 4,
+          "c": 5
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 2,
+            "c": 2
+          },
+          "B": {
+            "r": 4,
+            "c": 5
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 26,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 0.607625000004191,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.25650000001769513,
+        "chargedSelectMs": 0.3511249999864958,
+        "reportedElapsedMs": 0.26666699995985255,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 59,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 2,
+          "c": 3
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 2,
+            "c": 3
+          },
+          "B": {
+            "r": 4,
+            "c": 5
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 27,
+        "nodes": 27324553,
+        "depth": 15,
+        "chargedActiveMs": 13916.78224999999,
+        "chargedSetupMs": 77.6157499999972,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13839.166499999992,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 60,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 3,
+          "c": 5
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 2,
+            "c": 3
+          },
+          "B": {
+            "r": 3,
+            "c": 5
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 27,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 0.8906659999629483,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.2896249999757856,
+        "chargedSelectMs": 0.6010409999871626,
+        "reportedElapsedMs": 0.4274999999906868,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 61,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 2,
+          "c": 4
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 2,
+            "c": 4
+          },
+          "B": {
+            "r": 3,
+            "c": 5
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 28,
+        "nodes": 21633398,
+        "depth": 14,
+        "chargedActiveMs": 13923.798707000038,
+        "chargedSetupMs": 77.01354100002209,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13846.785166000016,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 62,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 3,
+          "c": 6
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 2,
+            "c": 4
+          },
+          "B": {
+            "r": 3,
+            "c": 6
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 28,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 1.1240819999948144,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.5892909999820404,
+        "chargedSelectMs": 0.534791000012774,
+        "reportedElapsedMs": 0.3384999999543652,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 63,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 3,
+          "c": 4
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 3,
+            "c": 4
+          },
+          "B": {
+            "r": 3,
+            "c": 6
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 29,
+        "nodes": 24584095,
+        "depth": 14,
+        "chargedActiveMs": 13918.570542000001,
+        "chargedSetupMs": 76.18729199998779,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13842.383250000014,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 64,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 3,
+          "c": 7
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 3,
+            "c": 4
+          },
+          "B": {
+            "r": 3,
+            "c": 7
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 29,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 0.8756660000071861,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.48749999998835847,
+        "chargedSelectMs": 0.3881660000188276,
+        "reportedElapsedMs": 0.25300000002607703,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 65,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 4,
+          "c": 4
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 4,
+            "c": 4
+          },
+          "B": {
+            "r": 3,
+            "c": 7
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 30,
+        "nodes": 25558019,
+        "depth": 14,
+        "chargedActiveMs": 13917.763083000027,
+        "chargedSetupMs": 80.193459000031,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13837.569623999996,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 66,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 3,
+          "c": 8
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 4,
+            "c": 4
+          },
+          "B": {
+            "r": 3,
+            "c": 8
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 30,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 0.7454170000273734,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.35275000002002344,
+        "chargedSelectMs": 0.39266700000735,
+        "reportedElapsedMs": 0.2434159999829717,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 67,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 4,
+          "c": 5
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 4,
+            "c": 5
+          },
+          "B": {
+            "r": 3,
+            "c": 8
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 31,
+        "nodes": 28033171,
+        "depth": 15,
+        "chargedActiveMs": 13933.12770900008,
+        "chargedSetupMs": 81.41387500002747,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13851.713834000053,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 68,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 4,
+          "c": 8
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 4,
+            "c": 5
+          },
+          "B": {
+            "r": 4,
+            "c": 8
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 31,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 0.6439579999423586,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.3211669999291189,
+        "chargedSelectMs": 0.3227910000132397,
+        "reportedElapsedMs": 0.2170419999747537,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 69,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 3,
+          "c": 5
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 3,
+            "c": 5
+          },
+          "B": {
+            "r": 4,
+            "c": 8
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 32,
+        "nodes": 28174802,
+        "depth": 16,
+        "chargedActiveMs": 13974.003501,
+        "chargedSetupMs": 92.99366700003156,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13881.009833999968,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 70,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 5,
+          "c": 8
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 3,
+            "c": 5
+          },
+          "B": {
+            "r": 5,
+            "c": 8
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 32,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 1.1357910000369884,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.572708000021521,
+        "chargedSelectMs": 0.5630830000154674,
+        "reportedElapsedMs": 0.31358300003921613,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 71,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 2,
+          "c": 5
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 2,
+            "c": 5
+          },
+          "B": {
+            "r": 5,
+            "c": 8
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 33,
+        "nodes": 34462957,
+        "depth": 17,
+        "chargedActiveMs": 13920.869998999988,
+        "chargedSetupMs": 109.93762500002049,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13810.932373999967,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 72,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 6,
+          "c": 8
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 2,
+            "c": 5
+          },
+          "B": {
+            "r": 6,
+            "c": 8
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 33,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 0.7935409999336116,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.5327079999260604,
+        "chargedSelectMs": 0.26083300000755116,
+        "reportedElapsedMs": 0.1438749999506399,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 73,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 1,
+          "c": 5
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 1,
+            "c": 5
+          },
+          "B": {
+            "r": 6,
+            "c": 8
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 34,
+        "nodes": 39182639,
+        "depth": 19,
+        "chargedActiveMs": 13922.103541000048,
+        "chargedSetupMs": 97.92141700000502,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 13824.182124000043,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 74,
+      "actor": "B",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 7,
+          "c": 8
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 1,
+            "c": 5
+          },
+          "B": {
+            "r": 7,
+            "c": 8
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "A"
+      },
+      "outcome": {
+        "kind": "ongoing"
+      },
+      "telemetry": {
+        "decisionIndex": 34,
+        "nodes": null,
+        "depth": 3,
+        "chargedActiveMs": 0.926333999959752,
+        "chargedSetupMs": 0,
+        "chargedObserverMs": 0.42091699998127297,
+        "chargedSelectMs": 0.505416999978479,
+        "reportedElapsedMs": 0.13558299996657297,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    },
+    {
+      "phase": "game",
+      "ply": 75,
+      "actor": "A",
+      "actionCode": null,
+      "action": {
+        "kind": "pawn",
+        "to": {
+          "r": 0,
+          "c": 5
+        }
+      },
+      "position": {
+        "pawns": {
+          "A": {
+            "r": 0,
+            "c": 5
+          },
+          "B": {
+            "r": 7,
+            "c": 8
+          }
+        },
+        "walls": [
+          "H-0-1",
+          "H-0-3",
+          "H-1-0",
+          "H-4-2",
+          "H-4-4",
+          "H-4-6",
+          "H-5-1",
+          "H-6-0",
+          "H-7-0",
+          "H-7-2",
+          "V-0-4",
+          "V-1-1",
+          "V-2-4",
+          "V-3-3",
+          "V-4-7",
+          "V-5-0",
+          "V-5-3",
+          "V-6-7",
+          "V-7-3"
+        ],
+        "stock": {
+          "A": 1,
+          "B": 0
+        },
+        "turn": "B"
+      },
+      "outcome": {
+        "kind": "win",
+        "winner": "A",
+        "reason": "goal"
+      },
+      "telemetry": {
+        "decisionIndex": 35,
+        "nodes": 51462,
+        "depth": 64,
+        "chargedActiveMs": 1495.7778749999707,
+        "chargedSetupMs": 88.40883299999405,
+        "chargedObserverMs": 0,
+        "chargedSelectMs": 1407.3690419999766,
+        "reportedElapsedMs": null,
+        "timingSource": "trusted-harness-active-time",
+        "clockProfileId": "real-monotonic-performance-now-v1"
+      }
+    }
+  ],
+  "telemetry": {
+    "A": {
+      "engineId": "wrongway-normal-duel-wasm-search",
+      "clockProfileId": "real-monotonic-performance-now-v1",
+      "timingSource": "trusted-harness-active-time",
+      "decisionMilliseconds": [
+        13907.642666999998,
+        13907.112208999999,
+        13908.352208,
+        13908.436374999997,
+        13908.96079099999,
+        13908.862668000002,
+        13908.184875000006,
+        13909.243208999993,
+        13909.440000000002,
+        13907.803082000028,
+        13907.915749999986,
+        13907.728457999998,
+        13907.307708999957,
+        13908.609208999987,
+        13920.90849999999,
+        13916.921333000035,
+        13914.201792000007,
+        13913.560542999941,
+        13915.246959000011,
+        13916.788708999986,
+        13940.707416999969,
+        13922.216125000035,
+        13917.639956999978,
+        13916.78479200002,
+        13917.58345799998,
+        13917.633125000051,
+        13918.29787400004,
+        13916.78224999999,
+        13923.798707000038,
+        13918.570542000001,
+        13917.763083000027,
+        13933.12770900008,
+        13974.003501,
+        13920.869998999988,
+        13922.103541000048,
+        1495.7778749999707
+      ],
+      "chargedSetupMilliseconds": [
+        77.21016700000007,
+        82.6560419999987,
+        88.57374999999956,
+        76.93479200000002,
+        100.91387499999837,
+        76.91658400000597,
+        74.54845900001237,
+        96.08966699999291,
+        93.16358300000138,
+        79.3315830000065,
+        75.90562499998487,
+        84.71825000000536,
+        87.08908399997745,
+        129.82445899999584,
+        144.5752499999944,
+        107.44295799999963,
+        285.47354200002155,
+        88.33441699997638,
+        93.61229099999764,
+        88.7200840000296,
+        94.8568329999689,
+        86.44095800002106,
+        117.6861660000286,
+        82.33525000000373,
+        82.1629580000299,
+        80.7518750000163,
+        84.72166600002674,
+        77.6157499999972,
+        77.01354100002209,
+        76.18729199998779,
+        80.193459000031,
+        81.41387500002747,
+        92.99366700003156,
+        109.93762500002049,
+        97.92141700000502,
+        88.40883299999405
+      ],
+      "chargedObserverMilliseconds": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "chargedSelectMilliseconds": [
+        13830.432499999999,
+        13824.456167,
+        13819.778458,
+        13831.501582999997,
+        13808.046915999992,
+        13831.946083999996,
+        13833.636415999994,
+        13813.153542,
+        13816.276417000001,
+        13828.471499000021,
+        13832.010125,
+        13823.010207999992,
+        13820.21862499998,
+        13778.784749999992,
+        13776.333249999996,
+        13809.478375000035,
+        13628.728249999986,
+        13825.226125999965,
+        13821.634668000013,
+        13828.068624999956,
+        13845.850584,
+        13835.775167000014,
+        13799.953790999949,
+        13834.449542000017,
+        13835.42049999995,
+        13836.881250000035,
+        13833.576208000013,
+        13839.166499999992,
+        13846.785166000016,
+        13842.383250000014,
+        13837.569623999996,
+        13851.713834000053,
+        13881.009833999968,
+        13810.932373999967,
+        13824.182124000043,
+        1407.3690419999766
+      ],
+      "reportedDecisionMilliseconds": [],
+      "nodes": [
+        8561972,
+        8076657,
+        4978604,
+        7318976,
+        6497262,
+        6185820,
+        6753198,
+        7569323,
+        6807291,
+        7575517,
+        9192734,
+        10325763,
+        9787346,
+        9596172,
+        10681041,
+        11036672,
+        14665487,
+        17851007,
+        14344857,
+        15274627,
+        19434876,
+        19944776,
+        26734816,
+        25417591,
+        25724686,
+        24916589,
+        24803757,
+        27324553,
+        21633398,
+        24584095,
+        25558019,
+        28033171,
+        28174802,
+        34462957,
+        39182639,
+        51462
+      ],
+      "depths": [
+        5,
+        5,
+        5,
+        5,
+        5,
+        5,
+        5,
+        5,
+        5,
+        5,
+        5,
+        7,
+        7,
+        7,
+        7,
+        7,
+        11,
+        10,
+        9,
+        10,
+        11,
+        13,
+        19,
+        18,
+        16,
+        17,
+        16,
+        15,
+        14,
+        14,
+        14,
+        15,
+        16,
+        17,
+        19,
+        64
+      ],
+      "actionMix": {
+        "pawn": 29,
+        "wall": 7
+      },
+      "antiStallReplacements": 0
+    },
+    "B": {
+      "engineId": "hard-product-46a871c7",
+      "clockProfileId": "real-monotonic-performance-now-v1",
+      "timingSource": "trusted-harness-active-time",
+      "decisionMilliseconds": [
+        800.210375000001,
+        173.24045899999874,
+        189.68437599999015,
+        94.16362500000105,
+        93.95166600000084,
+        43.807958999997936,
+        26.666918000017176,
+        119.0655839999963,
+        39.34016499998688,
+        54.891875000001164,
+        67.86945900000865,
+        164.80716599998414,
+        335.4810839999991,
+        96.55970800001523,
+        62.40716599998996,
+        73.55474899997353,
+        34.84945800001151,
+        91.61516700001084,
+        187.84049999999115,
+        249.30858199996874,
+        242.8312090000254,
+        161.2978749999893,
+        1.0974580000038259,
+        0.6937500000349246,
+        0.6768339999835007,
+        0.649208000046201,
+        0.607625000004191,
+        0.8906659999629483,
+        1.1240819999948144,
+        0.8756660000071861,
+        0.7454170000273734,
+        0.6439579999423586,
+        1.1357910000369884,
+        0.7935409999336116,
+        0.926333999959752
+      ],
+      "chargedSetupMilliseconds": [
+        78.728791,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "chargedObserverMilliseconds": [
+        0.5057500000002619,
+        0.7652089999992313,
+        0.4734589999934542,
+        0.507499999999709,
+        0.58824900000036,
+        0.3694180000020424,
+        0.4807510000100592,
+        0.3543340000032913,
+        0.3947069999849191,
+        0.37429199999314733,
+        0.31325000000651926,
+        0.5014159999846015,
+        0.44129200000315905,
+        0.5302500000107102,
+        0.621874000004027,
+        0.5249579999945126,
+        0.5477500000270084,
+        0.4358340000035241,
+        0.42391700000735,
+        0.48716600000625476,
+        0.41983400005847216,
+        0.4209580000024289,
+        0.5739579999935813,
+        0.28775000001769513,
+        0.25116699998034164,
+        0.2914990000426769,
+        0.25650000001769513,
+        0.2896249999757856,
+        0.5892909999820404,
+        0.48749999998835847,
+        0.35275000002002344,
+        0.3211669999291189,
+        0.572708000021521,
+        0.5327079999260604,
+        0.42091699998127297
+      ],
+      "chargedSelectMilliseconds": [
+        720.9758340000008,
+        172.4752499999995,
+        189.2109169999967,
+        93.65612500000134,
+        93.36341700000048,
+        43.438540999995894,
+        26.186167000007117,
+        118.71124999999302,
+        38.94545800000196,
+        54.51758300000802,
+        67.55620900000213,
+        164.30574999999953,
+        335.03979199999594,
+        96.02945800000452,
+        61.78529199998593,
+        73.02979099997901,
+        34.3017079999845,
+        91.17933300000732,
+        187.4165829999838,
+        248.82141599996248,
+        242.41137499996694,
+        160.87691699998686,
+        0.5235000000102445,
+        0.40600000001722947,
+        0.42566700000315905,
+        0.3577090000035241,
+        0.3511249999864958,
+        0.6010409999871626,
+        0.534791000012774,
+        0.3881660000188276,
+        0.39266700000735,
+        0.3227910000132397,
+        0.5630830000154674,
+        0.26083300000755116,
+        0.505416999978479
+      ],
+      "reportedDecisionMilliseconds": [
+        720.4050000000007,
+        172.19154200000048,
+        188.9857919999995,
+        93.34237500000017,
+        93.14462500000081,
+        43.227249999996275,
+        25.954209000003175,
+        118.47370799999044,
+        38.644333000003826,
+        54.288082999992184,
+        67.33679199998733,
+        164.09299999999348,
+        334.7315419999941,
+        95.56870799997705,
+        61.37062499998137,
+        72.62091699999291,
+        33.976874999993015,
+        90.9395829999994,
+        187.18141700001433,
+        248.58145800000057,
+        242.204665999976,
+        160.50879200000782,
+        0.38945900002727285,
+        0.2992089999606833,
+        0.3142080000252463,
+        0.26245900004869327,
+        0.26666699995985255,
+        0.4274999999906868,
+        0.3384999999543652,
+        0.25300000002607703,
+        0.2434159999829717,
+        0.2170419999747537,
+        0.31358300003921613,
+        0.1438749999506399,
+        0.13558299996657297
+      ],
+      "nodes": [],
+      "depths": [
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3
+      ],
+      "actionMix": {
+        "pawn": 25,
+        "wall": 10
+      },
+      "antiStallReplacements": 0
+    },
+    "alignment": {
+      "note": "Per-ply telemetry is index-aligned per side in decision order; a sample count below the played-ply count leaves that field null.",
+      "A": {
+        "plies": 36,
+        "decisionSamples": 36,
+        "nodeSamples": 36,
+        "depthSamples": 36,
+        "reportedSamples": 0
+      },
+      "B": {
+        "plies": 35,
+        "decisionSamples": 35,
+        "nodeSamples": 0,
+        "depthSamples": 35,
+        "reportedSamples": 35
+      }
+    },
+    "caveats": [
+      "The pinned Hard baseline descriptor is wrapped to record transitions, so its trailing setup/observer active-time flush is not charged; candidate (A) telemetry uses the unwrapped trusted subprocess path.",
+      "The pinned Hard baseline reports depth but not node counts."
+    ]
+  }
+}
