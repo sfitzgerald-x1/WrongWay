@@ -53,8 +53,8 @@ import { createLcg32 } from './lcg32.mjs';
 import {
   REGRESSION_MODE,
   STRENGTH_MODE,
-  pairedClusterConfidenceIntervals,
   runMatch,
+  summarizeEvaluation,
   validateOpeningBook
 } from '../scripts/evaluation/normal-duel-strength.mjs';
 
@@ -170,15 +170,17 @@ function cloneAction(action) {
  * -------------------------------------------------------------
  * The harness's regression mode speaks in *nodes per move*; this agent spends
  * exactly one root-child expansion-and-evaluation per simulation and never more
- * than `simulations` of them per move, so one simulation is charged as one node
- * and `evaluateCheckpoint` passes `nodeBudget = max(candidate, baseline)`
- * simulations. `capabilities.simulationsPerMove` publishes the agent's own count.
+ * than `simulations` of them per move, so one simulation is charged as one node.
+ * `capabilities.simulationsPerMove` publishes the agent's own count.
  * `capabilities.nodeBudget` is `false`: the harness only enforces a reported
  * `stats.nodes` for engines that advertise `true`, and this adapter returns a
  * bare `Action` (which the harness supports) rather than a stats envelope. The
  * budget is therefore enforced here instead — `selectAction` throws if a search
  * ever spends more simulations than `request.limits.nodeBudget` allows, which
  * the harness scores as a forfeit exactly as it would a node-budget violation.
+ * That check is live, not decorative: `evaluateCheckpoint` takes the shared
+ * budget as an explicit argument and never widens it to fit this agent, so a
+ * budget below this agent's own `simulations` forfeits its games here.
  */
 export function createGumbelAgent({ checkpoint, evaluate, simulations, maxConsidered, seed }) {
   const digest = checkpointId(checkpoint);
@@ -265,8 +267,28 @@ function assertDescriptor(engine, name) {
   return engine;
 }
 
-function sideTally() {
-  return { games: 0, wins: 0, losses: 0, draws: 0 };
+/**
+ * The shared per-move node budget for a regression-mode evaluation.
+ *
+ * There is no default. A budget that is not published is not guessed: a missing
+ * count used to collapse to `1`, which handed the *baseline* (the side that
+ * advertises `capabilities.nodeBudget: true` and is therefore policed by
+ * `runMatch`) an unmeetable budget while the candidate, which polices itself
+ * against the same number, was left with its own full simulation count. Every
+ * baseline move became a `node_budget` forfeit and every checkpoint promoted.
+ *
+ * So: an explicit `nodeBudget` wins, otherwise the baseline must publish a
+ * usable `capabilities.simulationsPerMove` and the budget is the larger of the
+ * two published counts. Anything else throws `baseline_node_budget_unknown` —
+ * the candidate's own number is never adopted as the shared budget.
+ */
+function resolveNodeBudget({ candidate, baseline, nodeBudget }) {
+  if (nodeBudget !== undefined) return positiveInteger(nodeBudget, 'invalid_node_budget');
+  const published = baseline.capabilities?.simulationsPerMove;
+  if (!Number.isSafeInteger(published) || published < 1) fail('baseline_node_budget_unknown');
+  const own = candidate.capabilities?.simulationsPerMove;
+  if (!Number.isSafeInteger(own) || own < 1) fail('candidate_node_budget_unknown');
+  return Math.max(own, published);
 }
 
 /**
@@ -282,10 +304,18 @@ function sideTally() {
  * method — no new statistical method is invented here.
  *
  * A forfeit is counted as an ordinary loss for the forfeiting side, which is the
- * harness's own semantics.
+ * harness's own semantics — but it is also *reported*: `failures` (from the
+ * harness's own `summarizeEvaluation`) counts every forfeit by reason and
+ * `opponentFailures` counts the ones the baseline committed, so a record built
+ * out of the opponent's forfeits cannot read as a record built out of play.
+ * `promoteCheckpoint` refuses such a record.
+ *
+ * `nodeBudget` is the shared per-move budget in regression mode; see
+ * `resolveNodeBudget`. Strength mode is deadline-scored and passes no node
+ * budget to the harness, so none is resolved there.
  */
 export async function evaluateCheckpoint({
-  config, book, candidate, baseline, openingLimit, seed, mode = REGRESSION_MODE
+  config, book, candidate, baseline, openingLimit, seed, nodeBudget, mode = REGRESSION_MODE
 }) {
   const checkedConfig = canonical9x9(config);
   assertDescriptor(candidate, 'candidate');
@@ -309,20 +339,13 @@ export async function evaluateCheckpoint({
   const openings = available.slice(0, Math.min(limit, available.length));
   if (openings.length === 0) fail('empty_opening_book');
 
-  // One simulation = one node, so the shared per-move budget is the larger of
-  // the two agents' published per-move simulation counts (see `createGumbelAgent`).
-  const nodeBudget = Math.max(
-    Number.isSafeInteger(candidate.capabilities?.simulationsPerMove)
-      ? candidate.capabilities.simulationsPerMove : 1,
-    Number.isSafeInteger(baseline.capabilities?.simulationsPerMove)
-      ? baseline.capabilities.simulationsPerMove : 1
-  );
+  // One simulation = one node. The budget is explicit or derived from published
+  // counts only — never defaulted (see `resolveNodeBudget`).
+  const resolvedNodeBudget = mode === REGRESSION_MODE
+    ? resolveNodeBudget({ candidate, baseline, nodeBudget })
+    : undefined;
 
   const results = [];
-  const sideSplits = { A: sideTally(), B: sideTally() };
-  let wins = 0;
-  let losses = 0;
-  let draws = 0;
 
   for (const opening of openings) {
     for (const contenderSide of ['A', 'B']) {
@@ -344,34 +367,40 @@ export async function evaluateCheckpoint({
         gameInPair,
         seed: matchSeed,
         mode,
-        ...(mode === REGRESSION_MODE ? { nodeBudget } : {})
+        ...(mode === REGRESSION_MODE ? { nodeBudget: resolvedNodeBudget } : {})
       });
       results.push(result);
-
-      const tally = sideSplits[contenderSide];
-      tally.games += 1;
-      if (result.winner === contenderSide) { wins += 1; tally.wins += 1; }
-      else if (result.winner === null) { draws += 1; tally.draws += 1; }
-      else { losses += 1; tally.losses += 1; }
     }
   }
 
-  const games = results.length;
+  // Wins, losses, draws, side splits, the paired-cluster interval and the
+  // per-reason forfeit map all come from the harness's own `summarizeEvaluation`
+  // — the module counts nothing itself.
+  const harness = summarizeEvaluation(results, {
+    contender: candidate, baseline, minimumOpeningPairs: openings.length
+  });
+
+  // Which side forfeited is on the harness result (`failedPlayer` plus the
+  // engine ids it assigned); `failures` alone does not say. A win handed over by
+  // the opponent is not a win, so it has to be countable at promotion time.
+  const opponentFailures = results.filter((result) =>
+    result.resultKind === 'forfeit'
+    && result.engines[result.failedPlayer] !== candidate.id).length;
+
   return Object.freeze({
     format: CHECKPOINT_FORMAT,
     checkpointId: candidate.checkpointId ?? candidate.id,
-    games,
-    openingPairs: openings.length,
-    wins,
-    losses,
-    draws,
-    winRate: wins / games,
-    sideSplits: Object.freeze({
-      A: Object.freeze({ ...sideSplits.A }),
-      B: Object.freeze({ ...sideSplits.B })
-    }),
-    // Reused from the strength module rather than re-derived here.
-    confidence: pairedClusterConfidenceIntervals(results, candidate.id)
+    nodeBudget: resolvedNodeBudget ?? null,
+    games: harness.games,
+    openingPairs: harness.openingPairs,
+    wins: harness.wins,
+    losses: harness.losses,
+    draws: harness.draws,
+    winRate: harness.winRate,
+    sideSplits: harness.sideSplits,
+    failures: harness.failures,
+    opponentFailures,
+    confidence: harness.confidenceIntervals
   });
 }
 
@@ -395,6 +424,10 @@ function summaryIsWellFormed(summary) {
     && Number.isSafeInteger(summary.losses) && summary.losses >= 0
     && Number.isSafeInteger(summary.draws) && summary.draws >= 0
     && Number.isFinite(summary.winRate)
+    // A summary that does not say how many games the opponent forfeited cannot
+    // be checked for forfeit-dependence, so it is malformed, not merely clean.
+    && Number.isSafeInteger(summary.opponentFailures) && summary.opponentFailures >= 0
+    && summary.opponentFailures <= summary.games
     && summary.wins + summary.losses + summary.draws === summary.games
     && summary.openingPairs * 2 === summary.games
     && tallyIsWellFormed(summary.sideSplits?.A)
@@ -405,9 +438,21 @@ function summaryIsWellFormed(summary) {
  * The promotion rule. Every criterion must hold; `reasons` lists *all* failures,
  * not the first, so one run tells the whole story.
  *
- * Criteria: enough opening pairs evaluated, `winRate >= minimumWinRate`, and at
+ * Criteria: enough opening pairs evaluated, `winRate >= minimumWinRate`, at
  * least one win on each side — a checkpoint that only ever wins as A has shown a
- * side artefact, not strength.
+ * side artefact, not strength — and *no opponent forfeit at all*.
+ *
+ * Forfeit threshold
+ * -----------------
+ * Zero. Not "wins minus forfeits still clears the bar": any opponent forfeit
+ * (`summary.opponentFailures > 0`) refuses the checkpoint outright, with reason
+ * `wins_depend_on_opponent_failures`. A baseline that crashed, ran out of node
+ * budget, returned a null action or played an illegal one was not measured
+ * against, and the run cannot say which of the *remaining* games were affected
+ * by whatever made it fail. Zero is also the threshold that would have caught
+ * the budget-collapse bug this rule exists for: there, every win was a
+ * `node_budget` forfeit. A run with a genuinely flaky baseline is re-run with a
+ * fixed baseline, not promoted on the difference.
  *
  * Fails closed: a missing, malformed or self-inconsistent summary, a bad
  * threshold, or a malformed incumbent is not promoted, with a reason. `incumbent`
@@ -435,6 +480,9 @@ export function promoteCheckpoint({ summary, incumbent, minimumWinRate, minimumO
   }
   if (validSummary && validRate && !(summary.winRate >= minimumWinRate)) {
     reasons.push('win_rate_below_minimum');
+  }
+  if (validSummary && summary.opponentFailures > 0) {
+    reasons.push('wins_depend_on_opponent_failures');
   }
   if (validSummary && summary.sideSplits.A.wins < 1) reasons.push('no_win_as_a');
   if (validSummary && summary.sideSplits.B.wins < 1) reasons.push('no_win_as_b');
