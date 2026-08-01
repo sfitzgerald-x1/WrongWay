@@ -1,0 +1,168 @@
+{
+  "format": "normal-duel-recycled-lategame-replay-v1",
+  "description": "Canonical 9x9 late-game plies that exhausted the 512 MiB memory profile of one per-game candidate subprocess. Replaying them through the per-decision recycler is the cumulative late-game WASM memory regression.",
+  "source": {
+    "format": "normal-duel-hardplus-exhibition-replay-v1",
+    "repository": "hardplus-exhibition-replay",
+    "path": "docs/exhibitions/hardplus-exhibition-balanced-9x9-007.json",
+    "sha256": "1906c7587d117ff88fcd18ead35b82219723e2d95e74dc9f7f1d197ded4ad47b",
+    "openingId": "balanced-9x9-007",
+    "actionDerivation": "canonical-legal-action-code-match-v1",
+    "failure": {
+      "resultKind": "forfeit",
+      "reason": "memory_limit",
+      "failedPlayer": "A",
+      "finalPly": 74
+    }
+  },
+  "config": {
+    "ruleset": "normal-duel-v1",
+    "rows": 9,
+    "columns": 9,
+    "start": {
+      "A": {
+        "r": 8,
+        "c": 4
+      },
+      "B": {
+        "r": 0,
+        "c": 4
+      }
+    },
+    "goalRows": {
+      "A": 0,
+      "B": 8
+    },
+    "initialStock": {
+      "A": 10,
+      "B": 10
+    },
+    "jumpRule": "permissive-adjacent-exit-v1",
+    "repetitionThreshold": 3,
+    "plyCap": 200,
+    "firstPlayer": "A"
+  },
+  "actionCount": 74,
+  "actionCodesSha256": "2623de1808d6edd89188e372ffed8d68465216201189f69c59dd0700ddf1f9b1",
+  "actionCodes": [
+    89,
+    3,
+    200,
+    2,
+    91,
+    101,
+    67,
+    11,
+    58,
+    12,
+    156,
+    3,
+    144,
+    4,
+    142,
+    5,
+    140,
+    14,
+    158,
+    5,
+    87,
+    6,
+    138,
+    7,
+    49,
+    8,
+    50,
+    17,
+    51,
+    26,
+    42,
+    35,
+    33,
+    44,
+    34,
+    96,
+    35,
+    167,
+    43,
+    183,
+    52,
+    126,
+    61,
+    124,
+    60,
+    122,
+    59,
+    187,
+    58,
+    132,
+    59,
+    134,
+    60,
+    53,
+    59,
+    52,
+    60,
+    61,
+    52,
+    70,
+    43,
+    69,
+    34,
+    68,
+    25,
+    67,
+    26,
+    66,
+    25,
+    65,
+    26,
+    64,
+    25,
+    63
+  ],
+  "checkpointInvariants": {
+    "turn": "A",
+    "outcome": {
+      "kind": "ongoing"
+    },
+    "wallCount": 20,
+    "stock": {
+      "A": 0,
+      "B": 0
+    },
+    "historyStartPly": 52,
+    "maximumRepetitionCount": 1
+  },
+  "checkpoints": [
+    {
+      "ply": 58,
+      "repetitionEntryCount": 7,
+      "repetitionCountsSha256": "9d353b8dec074af12769ead6e1fd15474b7977a8bd9474556baafa7e81aefb5c",
+      "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",60,61,[6,8,10,15,20,41,43,45,51,53,57,59,61,63],[11,13,22,38,42,55],0,0,\"A\"]"
+    },
+    {
+      "ply": 62,
+      "repetitionEntryCount": 11,
+      "repetitionCountsSha256": "270eb57a598f3bfae7ae1008feb0886fbf34afa3d5899723e28ecfe52277f19f",
+      "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",43,69,[6,8,10,15,20,41,43,45,51,53,57,59,61,63],[11,13,22,38,42,55],0,0,\"A\"]"
+    },
+    {
+      "ply": 66,
+      "repetitionEntryCount": 15,
+      "repetitionCountsSha256": "7a8f32a693ee4e369b592f6ac0fb3794615383256d74c9453ac6c1b85266b8dd",
+      "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",25,67,[6,8,10,15,20,41,43,45,51,53,57,59,61,63],[11,13,22,38,42,55],0,0,\"A\"]"
+    },
+    {
+      "ply": 70,
+      "repetitionEntryCount": 19,
+      "repetitionCountsSha256": "940f6963b323eccd47d4e9aed40c5bf0e7a4c67035d5ef11e9ba94ca782972a6",
+      "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",25,65,[6,8,10,15,20,41,43,45,51,53,57,59,61,63],[11,13,22,38,42,55],0,0,\"A\"]"
+    },
+    {
+      "ply": 74,
+      "repetitionEntryCount": 23,
+      "repetitionCountsSha256": "c19f387a93407d4597841964f3df787e5dcb9de91edf911f8ab32c9f8cd0b40d",
+      "positionKey": "[\"normal-duel-v1\",9,9,76,4,0,8,10,10,\"permissive-adjacent-exit-v1\",3,200,\"A\",25,63,[6,8,10,15,20,41,43,45,51,53,57,59,61,63],[11,13,22,38,42,55],0,0,\"A\"]"
+    }
+  ]
+}

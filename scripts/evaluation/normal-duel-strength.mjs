@@ -46,6 +46,7 @@ import {
   isTrustedSubprocessMemoryError,
   isPinnedHardWorkerAdapter,
   isWorkerEngineAdapter,
+  SUPPORTED_WORKER_SESSION_BOUNDARIES,
   takeTrustedSubprocessDecision,
   takeTrustedSubprocessFailureTiming,
   takeTrustedSubprocessPendingTiming
@@ -168,6 +169,26 @@ function failureReason(error) {
   return 'crash';
 }
 
+/**
+ * Bind the candidate's actual subprocess isolation and session lifecycle.
+ *
+ * The pair is read from the proxy's private adapter metadata, never from public
+ * capability labels an impostor could publish, and it must be one of the exact
+ * pairs the proxy itself produces. Both supported pairs stay eligible for the
+ * canonical 900 ms gate, so this neither requires nor forbids per-decision
+ * recycling; it only makes an enforced report state unambiguously which
+ * lifecycle produced it. Returns null when the engine is not a proxy adapter or
+ * carries a pair that is not one of ours.
+ */
+function supportedCandidateSessionBoundary(engine) {
+  const provenance = getWorkerEngineIsolationProvenance(engine);
+  if (provenance === null) return null;
+  const supported = SUPPORTED_WORKER_SESSION_BOUNDARIES.some((boundary) =>
+    boundary.subprocessIsolation === provenance.subprocessIsolation
+    && boundary.sessionLifecycle === provenance.sessionLifecycle);
+  return supported ? provenance : null;
+}
+
 function assertRegressionEnginesAreInProcess(mode, engines) {
   if (mode !== REGRESSION_MODE) return;
   for (const engine of engines) {
@@ -231,6 +252,13 @@ export function validateEnforcedStrengthOptions({
       'enforced gate requires a content-addressed candidate with canonical subprocess isolation'
     );
   }
+  const candidateBoundary = supportedCandidateSessionBoundary(contender);
+  if (candidateBoundary === null) {
+    fail(
+      'enforced gate requires an internally supported candidate subprocess isolation and'
+      + ' session lifecycle pair'
+    );
+  }
   assertEngineDescriptor(baseline, 'baseline');
   if (!isPinnedHardWorkerAdapter(baseline)) {
     fail('enforced gate requires the privately branded pinned Hard subprocess baseline');
@@ -272,6 +300,8 @@ export function validateEnforcedStrengthOptions({
     baselineSourceCommit: baseline.sourceCommit,
     baselineTrustRoot: baseline.baselineTrustRoot,
     candidateArtifactProvenance: getCandidateArtifactProvenance(contender),
+    candidateIsolation: candidateBoundary.subprocessIsolation,
+    candidateSessionLifecycle: candidateBoundary.sessionLifecycle,
     artifactIntegrity: 'content-addressed-hermetic-release-v1',
     moduleLoadIsolation: 'manifest-files-safe-builtins-v1',
     filesystemContentIsolation: 'manifest-files-only-v1',

@@ -177,7 +177,10 @@ deep-frozen. Returned actions are cloned before validation and application, so
 an engine cannot retain a reference that changes turn order or outcomes.
 
 Every strength-mode CLI run hosts each engine/game in a fresh Node subprocess;
-enforced validation also requires the proxy's private canonical brand. A
+enforced validation also requires the proxy's private canonical brand. The
+official WASM candidate can opt into one subprocess per candidate decision
+instead — see [Per-decision WASM candidate recycling](#per-decision-wasm-candidate-recycling)
+— but per game remains the default for every engine. A
 host-side timer sends `SIGKILL` to a process that exceeds its allowance,
 including code blocked synchronously, and waits for process exit before cleanup
 completes. IPC uses a random private channel. Candidate attempts to use
@@ -381,6 +384,64 @@ The logical regression result is suitable for paired candidate A/B comparisons
 only. The official 900 ms gate remains the real-monotonic, subprocess-isolated
 strength protocol and is unchanged by the regression clock profile.
 
+### Per-decision WASM candidate recycling
+
+`--recycle-normal-duel-wasm-per-decision` gives the official normal-duel WASM
+candidate a fresh subprocess for every one of its own moves instead of one child
+per game. It is off by default: without the flag every engine keeps the existing
+per-game lifecycle. The flag is valid only in strength mode and requires
+`--candidate-manifest`; regression mode and a missing manifest are rejected while
+arguments are parsed, before any engine is loaded.
+
+```sh
+node scripts/run-normal-duel-strength.mjs \
+  --candidate ./path/to/release/adapter.mjs \
+  --candidate-manifest ./path/to/release/manifest.json \
+  --mode strength \
+  --deadline-ms 15000 \
+  --recycle-normal-duel-wasm-per-decision
+```
+
+The CLI always loads the ordinary subprocess-isolated candidate first and then
+wraps only that candidate. Wrapping is admitted only for the authenticated
+official release: the content-addressed manifest must verify, the entry must be
+`adapter.mjs`, and its bytes must hash equal to the checked-in
+`scripts/evaluation/normal-duel-wasm-candidate-adapter.mjs`. The pinned Hard
+baseline is never recycled and keeps its per-game subprocess in every run, as
+does any other engine.
+
+What this costs and guarantees:
+
+- every candidate move pays a cold child: process spawn, module load, manifest
+  and file re-verification, WASM instantiation, and `createSession`, all charged
+  as setup debt against that move's active-time allowance;
+- every candidate move also pays teardown, charged into the same move's
+  selection time;
+- teardown completes before the move is accepted. A decision whose child cannot
+  be reaped is not played at all: it becomes an engine crash carrying
+  `code: "subprocess_recycle_failed"`, and any earlier deadline or memory verdict
+  survives only as context, because an unreaped child may still be running. No
+  move is ever accepted from a possibly live child;
+- `observe` is an exact no-op. The official WASM adapter derives each decision
+  from the full request state and is stateless per request, so there is no
+  per-game observer state to carry and no child to feed between decisions;
+- the candidate's WASM linear-memory high water cannot accumulate across a game,
+  which is the containment this flag exists for.
+
+This is intended for 15,000 ms human-strength and exhibition runs, where a
+per-move cold start is a small fraction of the budget. The 900 ms canonical gate
+may use either lifecycle: both are explicitly reported and enforced-eligible, so
+recycling is neither required nor silently assumed. At 900 ms the per-move setup
+and teardown are subtracted from the same 900 ms allowance, so a recycled gate
+run gives the candidate materially less search time than a per-game run.
+
+Recycled and non-recycled reports are provenance-distinct. The candidate's
+isolation provenance names both its exact subprocess isolation
+(`node-subprocess-per-game-v1` or `node-subprocess-per-decision-v1`) and its
+exact session lifecycle (`stateful-session-per-game-v1` or
+`stateless-wasm-per-decision-v1`), and an enforced token binds the same two
+values, so no report is ambiguous about which lifecycle produced it.
+
 The candidate manifest is canonical JSON with keys in this exact order,
 strictly path-sorted file records, and a trailing newline:
 
@@ -421,7 +482,11 @@ evaluated opening IDs and their count, the canonical configuration/seed/900 ms
 deadline, candidate artifact manifest and file hashes, the exact isolation
 profiles (including 512 MiB process and 128 MiB old-space limits), and the
 pinned baseline ID/version/source commit. Candidate and baseline isolation
-provenance are also reported from private adapter metadata. Gate eligibility
+provenance are also reported from private adapter metadata, including each
+engine's exact subprocess isolation and session lifecycle. Enforced validation
+reads that private pair rather than public capability labels and fails closed
+unless it is one of the two supported pairs, per-game/stateful or
+per-decision/stateless. Gate eligibility
 is controlled by a private enforcement token associated with the actual result
 array; fabricated public `{ enforced: true, eligible: true }` objects cannot
 mark a report as passing. Candidate-thrown `code: "deadline_exceeded"` values
