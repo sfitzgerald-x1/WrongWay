@@ -85,6 +85,51 @@ function totalVisits(visitCounts) {
   return total;
 }
 
+/**
+ * Uniform priors and a value of exactly 0 everywhere, so no value signal can
+ * account for the shape of the tree the search builds.
+ */
+function flatZeroEvaluator(config, state) {
+  const policy = new Float32Array(SIZE);
+  for (const code of legalActionCodes(config, state)) policy[code] = 1;
+  return { policy, value: 0 };
+}
+
+/**
+ * Run a search behind an evaluator that records, per distinct position, how far
+ * below the root that position sits.
+ *
+ * This is the structural witness for "there is a tree here". It reads nothing
+ * the module reports about itself — not `maxDepthReached`, not
+ * `simulationsUsed` — only the positions the module actually handed to the
+ * evaluator. A leaf two plies below the root can only be reached by descending
+ * through a child that a *previous* simulation already expanded, so
+ * `maxRelativePly >= 2` is observable proof that the tree survives between
+ * simulations. Clear `edge.child` after each visit and this collapses to 1.
+ */
+function probeTree({
+  state = MID_GAME, simulations = 64, cPuct = DEFAULT_C_PUCT,
+  maxConsidered = 8, seed = 7, evaluate = uniformStubEvaluator
+} = {}) {
+  const relativePly = new Map();
+  const probe = (config, probed) => {
+    relativePly.set(probed.positionKey, probed.ply - state.ply);
+    return evaluate(config, probed);
+  };
+  const result = puctSearch({
+    config: CONFIG_9X9, state, evaluate: probe, simulations, cPuct, maxConsidered,
+    random: createLcg32(seed)
+  });
+  const depths = [...relativePly.values()];
+  return {
+    result,
+    distinctPositions: relativePly.size,
+    maxRelativePly: Math.max(...depths),
+    below: (ply) => depths.filter((depth) => depth >= ply).length,
+    atPly: (ply) => depths.filter((depth) => depth === ply).length
+  };
+}
+
 /* ------------------------------------------------------------------ */
 
 test('version id and FPU constants are frozen', () => {
@@ -109,6 +154,93 @@ test('maxDepthReached >= 3 at simulations = 32 on a mid-game position', () => {
   assert.ok(
     result.maxDepthReached >= 3,
     `expected a real tree, got maxDepthReached=${result.maxDepthReached}`
+  );
+});
+
+/**
+ * `maxDepthReached` is self-reported: the module increments its own counter. If
+ * the tree were silently cleared between simulations the counter could still be
+ * anything at all, so the two tests around this one prove nothing on their own.
+ * This one only believes the evaluator.
+ */
+test('the tree persists between simulations: leaves below the root children are expanded', () => {
+  const probed = probeTree({ simulations: 64, maxConsidered: 8 });
+
+  // A grandchild of the root was evaluated. Reaching one requires descending
+  // through an already-expanded child, i.e. a tree that outlived a simulation.
+  assert.ok(
+    probed.maxRelativePly >= 2,
+    `no position below the root children was ever evaluated (maxRelativePly=${probed.maxRelativePly}); `
+    + 'the tree is being cleared between simulations'
+  );
+  assert.ok(probed.below(2) >= 8, `only ${probed.below(2)} positions below the root children`);
+
+  // A depth-1 scan can only ever evaluate the root plus its considered
+  // children. Exceeding that count is the same fact counted a second way.
+  assert.ok(
+    probed.distinctPositions > 1 + probed.result.considered.length,
+    `evaluated ${probed.distinctPositions} positions for ${probed.result.considered.length} root children: depth-1 scan`
+  );
+
+  // Expansion is cached, so a simulation never re-evaluates a node it already
+  // expanded: distinct positions is exactly the root plus one new leaf per
+  // simulation. Fewer would mean an expanded node was evaluated twice.
+  assert.equal(probed.distinctPositions, 1 + probed.result.simulationsUsed);
+});
+
+/**
+ * The FPU term is what makes the search commit to a line instead of fanning out
+ * over the ~130 siblings at every ply. Under `flatZeroEvaluator` every value is
+ * exactly 0 and every prior is uniform, so a node's visited and unvisited edges
+ * would tie exactly — *only* the FPU reduction breaks that tie, by making each
+ * unvisited sibling less attractive as its visited siblings' prior accumulates.
+ *
+ * `maxConsidered: 1` puts the whole budget into one subtree, so the shape below
+ * that root child is a direct read on the term. With the reduction the search
+ * drives 8+ plies deep off 10-ish expanded siblings; drop it and 64 simulations
+ * fan out over 60+ siblings and the tree never gets past two plies. Only the
+ * frozen-constants test notices otherwise, and that one cannot see the term
+ * being computed and then ignored.
+ */
+test('FPU drives depth: the search commits to a line instead of fanning out', () => {
+  const probed = probeTree({ simulations: 64, maxConsidered: 1, evaluate: flatZeroEvaluator });
+
+  assert.ok(
+    probed.maxRelativePly >= 5,
+    `deepest evaluated leaf is ${probed.maxRelativePly} plies below the root; `
+    + 'without the FPU reduction the search fans out instead of going deep'
+  );
+  assert.ok(
+    probed.atPly(2) <= 20,
+    `${probed.atPly(2)} siblings expanded two plies below the root out of ${probed.result.simulationsUsed} `
+    + 'simulations; the search is fanning out, so the FPU reduction is not reaching selection'
+  );
+});
+
+/**
+ * Nothing else notices whether the prior/exploration term reaches `selectEdge`:
+ * an implementation that dropped `cPuct * P * sqrt(N) / (1 + N)` entirely would
+ * pass every other test in this file. A large exploration constant must produce
+ * a visibly broader, shallower tree than a near-zero one over the same seed,
+ * budget and evaluator; if the term is ignored the two searches are identical.
+ */
+test('cPuct reaches selection: exploration trades depth for breadth', () => {
+  const deep = probeTree({ simulations: 96, cPuct: 0.01 });
+  const broad = probeTree({ simulations: 96, cPuct: 5 });
+
+  assert.ok(
+    deep.maxRelativePly !== broad.maxRelativePly || deep.distinctPositions !== broad.distinctPositions,
+    'cPuct = 0.01 and cPuct = 5 searched identically; the exploration term is not reaching selection'
+  );
+  assert.ok(
+    deep.maxRelativePly > broad.maxRelativePly,
+    `low exploration reached ${deep.maxRelativePly} plies, high exploration ${broad.maxRelativePly}`
+  );
+  // Breadth is the other half of the trade: the same budget goes across the
+  // root children instead of down one line, so far fewer leaves sit deep.
+  assert.ok(
+    deep.below(4) > 2 * broad.below(4),
+    `deep leaves: ${deep.below(4)} at cPuct=0.01 vs ${broad.below(4)} at cPuct=5`
   );
 });
 

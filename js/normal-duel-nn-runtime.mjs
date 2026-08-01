@@ -27,12 +27,19 @@
  * caller supplies the manifest text and the blob bytes. Identical input gives
  * byte-identical output.
  *
- * Allocation: `createNetworkEvaluator` allocates its scratch buffers exactly
- * once and reuses them across calls. Roughly 20 evaluations happen inside the
- * canonical 900 ms turn, and the deployed candidate runs in WASM linear memory
- * that never shrinks, so per-call churn is a containment problem (PRs #16/#17)
- * and not merely a speed one. Only the small returned arrays are fresh per
- * call, because the caller owns those.
+ * Allocation: `createNetworkEvaluator` allocates *this module's own* scratch
+ * buffers exactly once and reuses them across calls. Roughly 20 evaluations
+ * happen inside the canonical 900 ms turn, and the deployed candidate runs in
+ * WASM linear memory that never shrinks, so per-call churn is a containment
+ * problem (PRs #16/#17) and not merely a speed one.
+ *
+ * The once-only guarantee covers this module's scratch and nothing else. It is
+ * NOT a statement about the whole evaluate path: `encodeState`,
+ * `legalMaskFloat` and the `validateState` inside them each allocate per call,
+ * on the order of 36 KB in total, which dwarfs the 836 B policy array this
+ * module returns. That policy array is deliberately fresh per call because the
+ * caller owns it; the encode-path churn is `normal-duel-nn-encoding.mjs`'s to
+ * fix, not something the scratch reuse here removes.
  */
 
 import { policySize, validateConfig } from './normal-duel-engine.mjs';

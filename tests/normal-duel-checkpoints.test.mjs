@@ -410,6 +410,63 @@ test('a budget below the candidate\'s own simulation count forfeits its games', 
   );
 });
 
+/**
+ * The counterpart to every `opponentFailures === 0` assertion above: a real
+ * evaluation in which the *baseline* forfeits, asserting a NONZERO count.
+ *
+ * Without this, hardcoding `opponentFailures` to `0` passes the whole file, and
+ * the promotion gate that PR #20's review exists for — a checkpoint promoted on
+ * wins its own opponent handed it — is unguarded. The baseline here returns a
+ * null action on its first move of every game, which the harness scores as a
+ * `null_action` forfeit attributed to the baseline.
+ */
+test('a baseline that forfeits produces a nonzero opponentFailures and blocks promotion', async () => {
+  const workingBaseline = agent(22);
+  const brokenBaseline = {
+    ...workingBaseline,
+    id: 'broken-baseline',
+    createSession(context) {
+      workingBaseline.createSession(context); // same validation as a real session
+      return Object.freeze({ selectAction() { return null; }, observe() {}, close() {} });
+    }
+  };
+
+  const summary = await evaluateCheckpoint({
+    config: CONFIG, book: BOOK, candidate: agent(11), baseline: brokenBaseline,
+    openingLimit: 3, seed: 4242
+  });
+
+  // Every game reached the baseline's first move, so every game is a forfeit it
+  // committed: six games, six null actions, six wins the candidate did not earn.
+  assert.equal(summary.games, 6);
+  assert.deepEqual(summary.failures, { null_action: 6 });
+  assert.equal(summary.opponentFailures, 6);
+  assert.ok(summary.opponentFailures > 0);
+  assert.equal(summary.wins, 6);
+  assert.equal(summary.winRate, 1);
+
+  // A clean sweep on both seats at a 100% win rate clears every other criterion,
+  // so the forfeit rule is the only thing that can refuse this — which is
+  // exactly the promotion the gate exists to stop.
+  assert.deepEqual(
+    promoteCheckpoint({ summary, minimumWinRate: 1, minimumOpeningPairs: 3 }),
+    { promoted: false, reasons: ['wins_depend_on_opponent_failures'] }
+  );
+
+  // Same pairing with a baseline that plays: the count is zero and the reason
+  // is gone, so the assertion above is measuring the forfeits and not a
+  // constant.
+  const played = await evaluateCheckpoint({
+    config: CONFIG, book: BOOK, candidate: agent(11), baseline: workingBaseline,
+    openingLimit: 3, seed: 4242
+  });
+  assert.equal(played.opponentFailures, 0);
+  assert.ok(
+    !promoteCheckpoint({ summary: played, minimumWinRate: 0, minimumOpeningPairs: 3 })
+      .reasons.includes('wins_depend_on_opponent_failures')
+  );
+});
+
 function summaryOf({ aWins = 1, bWins = 1, pairs = 4, opponentFailures = 0 } = {}) {
   const games = pairs * 2;
   const wins = aWins + bWins;
