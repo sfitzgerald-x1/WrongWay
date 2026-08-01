@@ -109,6 +109,76 @@ function syntheticWeightSet() {
 const SYNTHETIC = syntheticWeightSet();
 const cloneManifest = () => JSON.parse(JSON.stringify(SYNTHETIC.manifest));
 
+/** FNV-1a over a byte range: pins the fixture to the exact blob it was made from. */
+function fnv1a32(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < bytes.length; i += 1) {
+    hash ^= bytes[i];
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, '0');
+}
+
+const GOLDEN = JSON.parse(fs.readFileSync(
+  new URL('./fixtures/nn-runtime-golden-forward-v1.json', import.meta.url), 'utf8'
+));
+
+/* ------------------------------------------------------------------ *
+ * Hermetic graph parity — no Python, no exported artifacts
+ * ------------------------------------------------------------------ */
+
+/**
+ * The full-net parity test below is skippable: it needs a training checkout
+ * that a clean machine does not have, and when it skips the entire forward
+ * graph goes unverified while 17 other tests still pass. Dropping a residual
+ * skip connection or transposing the flatten order moves a logit by ~1e0 and
+ * nothing else in this file notices.
+ *
+ * So the graph is pinned here instead. The goldens in
+ * `tests/fixtures/nn-runtime-golden-forward-v1.json` were produced by
+ * `export_weights.reference_forward` (PyTorch) over exactly the blob
+ * `syntheticWeightSet()` builds, then committed — they are genuinely
+ * cross-checked against the reference, and reproducing them needs neither
+ * Python nor `weights.bin`. This test can never skip.
+ */
+test('forwardRaw reproduces the committed PyTorch goldens (hermetic, never skips)', () => {
+  assert.equal(GOLDEN.format, 'nn-runtime-golden-forward-v1');
+
+  // The goldens are only meaningful for the blob they were computed from.
+  assert.equal(SYNTHETIC.buffer.byteLength, GOLDEN.blob.byteLength);
+  assert.equal(
+    fnv1a32(SYNTHETIC.buffer), GOLDEN.blob.fnv1a32,
+    'the synthetic weight blob has changed; regenerate the golden fixture against the Python reference'
+  );
+
+  // The golden input is a real encoded position, not noise: the fixture carries
+  // the feature vector explicitly so this test measures the graph and not the
+  // encoder, and the equality below ties the two together.
+  assert.equal(GOLDEN.features.length, FEATURE_LEN);
+  assert.deepEqual(Array.from(encodeState(CONFIG_9X9, fixedState())), GOLDEN.features);
+
+  const weights = loadWeights(SYNTHETIC.manifest, SYNTHETIC.buffer);
+  const actual = forwardRaw(weights, Float32Array.from(GOLDEN.features));
+
+  assert.equal(actual.policyLogits.length, POLICY_SIZE);
+  assert.equal(GOLDEN.policyLogits.length, POLICY_SIZE);
+
+  let maxLogitDelta = 0;
+  for (let code = 0; code < POLICY_SIZE; code += 1) {
+    maxLogitDelta = Math.max(maxLogitDelta, Math.abs(actual.policyLogits[code] - GOLDEN.policyLogits[code]));
+  }
+  const valueDelta = Math.abs(actual.value - GOLDEN.value);
+
+  assert.ok(maxLogitDelta < 1e-4, `policy logits differ from the golden by ${maxLogitDelta}`);
+  assert.ok(valueDelta < 1e-4, `value differs from the golden by ${valueDelta}`);
+
+  // The goldens must actually exercise the graph: an all-zero logit vector
+  // would satisfy the deltas above against an all-zero golden.
+  assert.ok(GOLDEN.policyLogits.some((logit) => Math.abs(logit) > 1e-6));
+  assert.ok(Math.abs(GOLDEN.value) > 1e-6);
+});
+
 /* ------------------------------------------------------------------ *
  * Parity with the Python reference — the key test
  * ------------------------------------------------------------------ */
