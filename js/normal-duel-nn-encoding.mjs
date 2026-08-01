@@ -5,21 +5,33 @@
  * always come from the authoritative engine (`js/normal-duel-engine.mjs`);
  * nothing here reimplements a rule.
  *
- * Canonical orientation
- * ---------------------
- * Every plane is written from the SIDE-TO-MOVE's point of view, in a frame
- * where the mover always advances toward row 0 (the top of the encoded plane)
- * and the mover's own pawn starts on the bottom row. Player A's goal row is 0,
- * so an A-to-move state is encoded with the identity row map; player B's goal
- * row is rows-1, so a B-to-move state is encoded with the row mirror
- * `R = rows - 1 - r`. Columns are never mirrored. One set of weights therefore
- * serves both sides, and two mover-relative-identical positions encode to
- * byte-identical tensors regardless of whose turn it is.
+ * Absolute orientation
+ * --------------------
+ * Every plane is indexed by the engine's own row `r`. There is no mirroring of
+ * any kind. The reason is coherence with the action space: the 209-way policy
+ * head speaks the engine's action codes, which are absolute (a pawn move is
+ * `to.r * columns + to.c`, a wall is an offset off the absolute anchor index).
+ * Nothing maps those codes into a mover-canonical frame, so an input frame that
+ * mirrored rows would present features in one frame and labels in another —
+ * "advance one step toward my goal" would be code 22 from an A-to-move state
+ * and code 58 from the row-mirrored B-to-move state while the two encodings
+ * were byte-identical. What matters is that the input frame and the policy
+ * frame agree; the policy frame is absolute, so the input frame is absolute.
  *
- * There is deliberately NO side-to-move plane: the perspective transform above
- * makes it redundant, and the Stage 4 architecture (6 blocks x 64 channels,
- * Gumbel n~16, ~20 evaluations inside a 900 ms turn budget) pays first-layer
- * FLOPs for every input plane, so the layout is kept minimal.
+ * Planes 0/1 (pawns) and 4/5 (stock) remain semantically mover-relative: plane
+ * 0 always holds the side-to-move's pawn and plane 1 the opponent's. That is a
+ * channel SELECTION, not a coordinate transform — it permutes which plane a
+ * value is written into and never moves a value to a different (r, c). Cell
+ * (r, c) of every plane still denotes engine square (r, c), so the mapping
+ * between board squares and action codes is untouched and the action space
+ * stays synchronised with the input.
+ *
+ * Because the frame is absolute, the network cannot infer whose turn it is from
+ * geometry alone, so plane 7 `side_to_move` carries it explicitly (1.0 for A,
+ * 0.0 for B), as specified in `docs/ai-engine-plan.md`. The eighth plane costs
+ * `2 * 81 * 8 * 64 * 9 = 746,496` stem FLOPs versus `653,184` at seven planes,
+ * i.e. +93,312 FLOPs — about 0.13% of a ~71.7 MFLOP forward pass at 6 blocks x
+ * 64 channels. Coherence is worth an eighth of a percent per evaluation.
  */
 
 import {
@@ -35,15 +47,17 @@ function fail(reason) { throw new NormalDuelEncodingError(reason); }
 /**
  * Plane layout — the single source of truth shared by training code, the
  * inference wrapper and debugging tools. Index order is tensor plane order.
+ * All planes are indexed by absolute engine (r, c).
  */
 export const NN_PLANE_LAYOUT = Object.freeze([
-  Object.freeze({ name: 'mover_pawn', description: 'one-hot mover pawn, canonical orientation' }),
-  Object.freeze({ name: 'opponent_pawn', description: 'one-hot opponent pawn, canonical orientation' }),
-  Object.freeze({ name: 'wall_horizontal', description: '1 where the edge between (R,C) and (R+1,C) is wall-blocked' }),
-  Object.freeze({ name: 'wall_vertical', description: '1 where the edge between (R,C) and (R,C+1) is wall-blocked' }),
+  Object.freeze({ name: 'mover_pawn', description: 'one-hot side-to-move pawn at absolute (r,c)' }),
+  Object.freeze({ name: 'opponent_pawn', description: 'one-hot opponent pawn at absolute (r,c)' }),
+  Object.freeze({ name: 'wall_horizontal', description: '1 where the edge between (r,c) and (r+1,c) is wall-blocked' }),
+  Object.freeze({ name: 'wall_vertical', description: '1 where the edge between (r,c) and (r,c+1) is wall-blocked' }),
   Object.freeze({ name: 'mover_stock', description: 'constant plane: mover walls remaining / initialStock[mover]' }),
   Object.freeze({ name: 'opponent_stock', description: 'constant plane: opponent walls remaining / initialStock[opponent]' }),
-  Object.freeze({ name: 'goal_proximity', description: 'static row gradient (rows-1-R)/(rows-1): 1 on the mover goal row' })
+  Object.freeze({ name: 'goal_proximity', description: 'row gradient toward config.goalRows[mover]: 1 on the mover goal row, 0 on the far row' }),
+  Object.freeze({ name: 'side_to_move', description: 'constant plane: 1 when A is to move, 0 when B is to move' })
 ]);
 
 export const NN_INPUT_PLANES = Object.freeze(NN_PLANE_LAYOUT.length);
@@ -66,29 +80,22 @@ function canonical9x9(config) {
 
 function other(player) { return player === 'A' ? 'B' : 'A'; }
 
-/** Canonical row for an engine row: identity when the mover's goal is row 0. */
-function canonicalRow(config, mover, r) {
-  return config.goalRows[mover] === 0 ? r : config.rows - 1 - r;
-}
-
 /**
  * Wall geometry is read back out of the engine: for every orthogonal edge we
  * ask `edgeBlocked` whether a wall segment sits on it. No wall text is parsed
- * here, so the H/V anchor convention stays owned by the engine and the mirror
- * below is a pure coordinate transform on edges rather than on wall strings.
+ * here, so the H/V anchor convention stays owned by the engine. Plane cells use
+ * absolute engine coordinates, with the horizontal plane anchored on the upper
+ * of the two rows an edge separates.
  */
-function writeWallPlanes(config, mover, walls, out, offsetH, offsetV) {
+function writeWallPlanes(config, walls, out, offsetH, offsetV) {
   const { rows, columns } = config;
   for (let r = 0; r < rows; r += 1) {
     for (let c = 0; c < columns; c += 1) {
       if (r + 1 < rows && edgeBlocked(config, { r, c }, { r: r + 1, c }, walls)) {
-        // Engine edge (r,c)-(r+1,c) maps to the canonical edge between the two
-        // canonical rows; the plane cell is the upper of the two.
-        const canonicalUpper = Math.min(canonicalRow(config, mover, r), canonicalRow(config, mover, r + 1));
-        out[offsetH + canonicalUpper * columns + c] = 1;
+        out[offsetH + r * columns + c] = 1;
       }
       if (c + 1 < columns && edgeBlocked(config, { r, c }, { r, c: c + 1 }, walls)) {
-        out[offsetV + canonicalRow(config, mover, r) * columns + c] = 1;
+        out[offsetV + r * columns + c] = 1;
       }
     }
   }
@@ -96,8 +103,8 @@ function writeWallPlanes(config, mover, walls, out, offsetH, offsetV) {
 
 /**
  * Encode a validated game state as `NN_INPUT_PLANES * rows * columns` floats,
- * planes in `NN_PLANE_LAYOUT` order, each plane row-major, all values in [0, 1].
- * Neither `config` nor `state` is mutated.
+ * planes in `NN_PLANE_LAYOUT` order, each plane row-major over absolute engine
+ * coordinates, all values in [0, 1]. Neither `config` nor `state` is mutated.
  */
 export function encodeState(config, state) {
   const checked = canonical9x9(config);
@@ -108,12 +115,12 @@ export function encodeState(config, state) {
 
   const mover = validated.position.turn;
   const opponent = other(mover);
-  const cell = (coord) => canonicalRow(checked, mover, coord.r) * columns + coord.c;
+  const cell = (coord) => coord.r * columns + coord.c;
 
   out[PLANE_INDEX.mover_pawn * cells + cell(validated.position.pawns[mover])] = 1;
   out[PLANE_INDEX.opponent_pawn * cells + cell(validated.position.pawns[opponent])] = 1;
 
-  writeWallPlanes(checked, mover, validated.position.walls, out,
+  writeWallPlanes(checked, validated.position.walls, out,
     PLANE_INDEX.wall_horizontal * cells, PLANE_INDEX.wall_vertical * cells);
 
   const stockScale = (player) => (checked.initialStock[player] > 0
@@ -122,13 +129,19 @@ export function encodeState(config, state) {
   out.fill(stockScale(mover), PLANE_INDEX.mover_stock * cells, (PLANE_INDEX.mover_stock + 1) * cells);
   out.fill(stockScale(opponent), PLANE_INDEX.opponent_stock * cells, (PLANE_INDEX.opponent_stock + 1) * cells);
 
-  // Static orientation cue: 1 on the mover's goal row (canonical row 0),
-  // falling linearly to 0 on the mover's own back rank.
+  // Mover-relative gradient in absolute coordinates: 1 on the mover's own goal
+  // row, falling linearly to 0 on the opposite edge. Derived from
+  // `config.goalRows[mover]`, so the same board yields a different plane for
+  // A-to-move and B-to-move. No coordinate is mirrored to achieve this.
+  const goalRow = checked.goalRows[mover];
   const proximityBase = PLANE_INDEX.goal_proximity * cells;
   for (let r = 0; r < rows; r += 1) {
-    const value = (rows - 1 - r) / (rows - 1);
+    const value = (rows - 1 - Math.abs(r - goalRow)) / (rows - 1);
     out.fill(value, proximityBase + r * columns, proximityBase + (r + 1) * columns);
   }
+
+  // Whose turn it is is not recoverable from an absolute frame, so state it.
+  out.fill(mover === 'A' ? 1 : 0, PLANE_INDEX.side_to_move * cells, (PLANE_INDEX.side_to_move + 1) * cells);
   return out;
 }
 
@@ -139,6 +152,20 @@ export function legalMaskFloat(config, state) {
   const out = new Float32Array(policySize(checked));
   for (let code = 0; code < mask.length; code += 1) out[code] = mask[code] ? 1 : 0;
   return out;
+}
+
+/** Canonical decimal integer strings only — no whitespace, sign, hex or ''. */
+const DECIMAL_CODE = /^(?:0|[1-9][0-9]*)$/;
+
+/**
+ * Object keys arrive as strings. Validate rather than coerce: `Number('')` is
+ * 0, `Number(' 3 ')` is 3 and `Number('0x10')` is 16, all of which would
+ * silently write a visit count to the wrong policy index.
+ */
+function parseActionCode(rawCode) {
+  if (typeof rawCode === 'number') return rawCode;
+  if (typeof rawCode === 'string' && DECIMAL_CODE.test(rawCode)) return Number(rawCode);
+  return fail('invalid_action_code');
 }
 
 /**
@@ -162,9 +189,10 @@ export function encodePolicyTarget(config, visitCounts) {
   const seen = new Set();
   const parsed = [];
   for (const [rawCode, rawCount] of entries) {
-    const code = typeof rawCode === 'string' ? Number(rawCode) : rawCode;
+    const code = parseActionCode(rawCode);
     if (!Number.isSafeInteger(code) || code < 0 || code >= size) fail('invalid_action_code');
     if (typeof rawCount !== 'number' || !Number.isFinite(rawCount) || rawCount < 0) fail('invalid_visit_count');
+    // A Map may hold both `63` and `'63'`; they name the same policy index.
     if (seen.has(code)) fail('duplicate_action_code');
     seen.add(code);
     parsed.push([code, rawCount]);
@@ -180,7 +208,8 @@ export function encodePolicyTarget(config, visitCounts) {
 
 /**
  * Legality-checked variant used by the self-play writer: every supplied code
- * must be legal in `state`.
+ * must be legal in `state`. Both the mask and the target live in the engine's
+ * absolute action frame, which is the same frame `encodeState` is indexed in.
  */
 export function encodeLegalPolicyTarget(config, state, visitCounts) {
   const checked = canonical9x9(config);
