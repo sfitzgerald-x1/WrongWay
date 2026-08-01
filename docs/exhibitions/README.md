@@ -92,13 +92,26 @@ Serve the repository root over http first (the app is a different origin over
 <http://localhost:8080/docs/exhibitions/hardplus-exhibition-replay.html>.
 
 **Forfeits are not board wins.** The app's replay record has no field for "won
-because the opponent failed", and its renderer treats any non-null `winner` as a
-victory on the board. A non-board result is therefore stored with `winner: null`
-and the real result is carried in exhibition-only fields the app ignores
-(`exhibitionResultKind`, `exhibitionReason`, `exhibitionFailedPlayer`,
-`exhibitionBoardOutcome`), and the page warns before storing. A result counts as a
-board win only when the exhibition result kind is `win`, no side failed, and the
-rules verdict at the final recorded ply independently agrees.
+because the opponent failed". A result counts as a board win only when the
+exhibition result kind is `win`, no side failed, and the rules verdict at the
+final recorded ply independently names the same winner.
+
+A non-board result is stored with `winner: null`, with the side names annotated
+(`Hard+ (forfeited: memory_limit)` and `NO BOARD WIN — Pinned Hard`), and with
+machine-readable detail in
+exhibition-only fields the app ignores (`exhibitionResultKind`,
+`exhibitionReason`, `exhibitionFailedPlayer`, `exhibitionBoardOutcome`). The page
+also warns before storing.
+
+The name annotation is not cosmetic. Two app screens read the record differently:
+the playback screen keys off `winner` and correctly presents no victory for
+`null`, but the replay **list** renders `entry.winner === 'A' ? nameA : nameB`,
+so a null winner falls through to side B and would still read as "Pinned Hard
+wins". The app never writes a null winner itself, so that screen was never built
+for this state, and this tooling cannot change `index.html`. The names are the
+only channel that reaches the list, and the disclaimer leads because the list
+appends its own "wins" — the entry reads
+`NO BOARD WIN — Pinned Hard wins`.
 
 ## Artifact shape
 

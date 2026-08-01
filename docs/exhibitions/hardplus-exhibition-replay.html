@@ -78,12 +78,12 @@
   <ol>
     <li>
       Serve the repository root over http so this page and the app share one origin
-      (localStorage is per-origin), e.g. <code>python3 -m http.server 8081</code>
-      from the repository root, or <code>npm run exhibition:replay</code>.
+      (localStorage is per-origin), e.g. <code>python3 -m http.server 8080</code>
+      from the repository root, or <code>npm run serve:exhibitions</code>.
     </li>
     <li>
       Open this page at
-      <code>http://localhost:8081/docs/exhibitions/hardplus-exhibition-replay.html</code>
+      <code>http://localhost:8080/docs/exhibitions/hardplus-exhibition-replay.html</code>
       and press <strong>Load into existing replay</strong>.
     </li>
     <li>
@@ -178,23 +178,45 @@ function isBoardWin(outcome) {
 /**
  * Same record shape the app writes when a local game ends.
  *
- * The app's replay record cannot express "won because the opponent failed": its
- * renderer treats any non-null `winner` as a victory on the board. Copying a
- * forfeit beneficiary into that field is what made a `memory_limit` failure at
- * ply 74 present as an ordinary win, so a non-board result stores `winner: null`
- * and the forfeit is carried in exhibition-only fields the app ignores.
+ * The app's replay record cannot express "won because the opponent failed".
+ * Copying a forfeit beneficiary into `winner` is what made a `memory_limit`
+ * failure at ply 74 present as an ordinary win, so a non-board result stores
+ * `winner: null`, annotates the side names, and carries the machine-readable
+ * detail in exhibition-only fields the app ignores.
+ *
+ * Two app screens read this record differently, and both had to be handled:
+ * playback keys off `winner` and correctly shows nothing for null, while the
+ * replay list renders `entry.winner === 'A' ? nameA : nameB` and so treats a
+ * null winner as side B. Only the names reach that second screen.
  */
 function buildRecord(artifact, moveHist) {
   const outcome = artifact.outcome;
   const boardWin = isBoardWin(outcome);
+  // `winner: null` is not enough on its own. The playback screen honours it and
+  // suppresses the win presentation, but the replay *list* renders
+  // `entry.winner === 'A' ? nameA : nameB`, so a null winner falls through to the
+  // B branch and would still read as a win for side B. The app itself never
+  // writes a null winner, so that screen was never built for this state and this
+  // page cannot change it. Carry the truth in the names the list actually draws.
+  // The list appends its own "wins" after the name, so the disclaimer leads: it
+  // then reads "NO BOARD WIN — Pinned Hard wins", which cannot be misread and
+  // survives truncation. A null winner always falls to the B name on that screen,
+  // so B is the one that must carry it.
+  const annotate = (side, base) => {
+    if (boardWin) return base;
+    const marked = side === outcome.failedPlayer
+      ? `${base} (forfeited: ${outcome.reason})`
+      : base;
+    return side === 'B' ? `NO BOARD WIN — ${marked}` : marked;
+  };
   return {
     ts: Date.now(),
     winner: boardWin ? outcome.winner : null,
     moveHist,
     map: 'duel',
     duelSize: 'standard',
-    nameA: NAME_A,
-    nameB: NAME_B,
+    nameA: annotate('A', NAME_A),
+    nameB: annotate('B', NAME_B),
     gameMode: 'local',
     myRole: null,
     exhibitionId: EXHIBITION_ID,
@@ -258,14 +280,16 @@ function main(artifact) {
       + `${outcome.failedPlayer ? ` after ${outcome.failedPlayer} failed` : ''},`
       + ` while the rules verdict at the final recorded ply is`
       + ` "${outcome.finalOutcome?.kind ?? 'unknown'}".`
-      + ' It will be stored with no winner so the app does not present it as a'
-      + ' victory on the board.');
+      + ' It is stored with no winner, and the side names carry the forfeit so the'
+      + ' replay list cannot read as a board victory. Note the playback screen'
+      + ' honours the null winner, but the list screen renders a null winner as'
+      + " side B's name, which is why the names are annotated.");
   }
 
   if (location.protocol !== 'http:' && location.protocol !== 'https:') {
     showError(`This page is open over ${location.protocol} — the app at ../../index.html is a`
       + ' different origin there, so it will not see the stored replay.'
-      + ' Serve the repository root over http (python3 -m http.server 8081) and reopen this page.');
+      + ' Serve the repository root over http (python3 -m http.server 8080) and reopen this page.');
   }
 
   const button = element('load');
@@ -300,8 +324,8 @@ try {
 } catch (cause) {
   element('status').textContent = 'No artifact loaded.';
   showError(`Could not load ${ARTIFACT_URL}: ${cause.message}\n`
-    + 'Record it first with `npm run exhibition:hardplus`, then serve the repository'
-    + ' root over http (python3 -m http.server 8081) and reload this page.');
+    + 'Record it first with `npm run exhibition:hardplus-9x9`, then serve the repository'
+    + ' root over http (python3 -m http.server 8080) and reload this page.');
 }
 </script>
 </body>
