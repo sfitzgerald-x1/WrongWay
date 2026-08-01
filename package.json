@@ -12,7 +12,9 @@
     "check:normal-duel-wasm": "npm run build:normal-duel-wasm && node scripts/check-normal-duel-wasm.mjs",
     "build:normal-duel-wasm-candidate": "node scripts/build-normal-duel-wasm-candidate.mjs",
     "check:normal-duel-wasm-candidate": "npm run build:normal-duel-wasm-candidate && node scripts/check-normal-duel-wasm-candidate.mjs",
-    "benchmark:normal-duel-throughput": "node scripts/run-normal-duel-throughput-benchmark.mjs"
+    "benchmark:normal-duel-throughput": "node scripts/run-normal-duel-throughput-benchmark.mjs",
+    "exhibition:hardplus-9x9": "npm run build:normal-duel-wasm-candidate && node scripts/run-hardplus-exhibition.mjs",
+    "serve:exhibitions": "python3 -m http.server 8080"
   },
   "devDependencies": {
     "ajv": "8.20.0"
