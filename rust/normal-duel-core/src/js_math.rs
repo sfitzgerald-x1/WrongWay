@@ -29,6 +29,42 @@
 //! A 1-ULP disagreement would not obviously matter — the logarithm only ever
 //! reaches a comparison, never a visit count or a value — but "obviously" is
 //! how sign errors survive. Matching bit patterns removes the argument.
+//!
+//! What is portable and what is not
+//! --------------------------------
+//! These two are easy to conflate, and the distinction decides how the parity
+//! test has to be written:
+//!
+//!   * **[`js_log`] is bit-portable.** Every step is an IEEE-754 operation with
+//!     one correctly rounded result, including the tail, because [`f64::mul_add`]
+//!     is a *specified* fused multiply-add — one rounding, by definition — not a
+//!     request that the optimiser might decline. x86-64 without FMA3 lowers it to
+//!     a libm `fma` call and wasm32 to a runtime call; both return the same bits
+//!     an arm64 `fmadd` does. Same input, same output, every target.
+//!   * **V8's `Math.log` is not.** It is C++ — `src/base/ieee754.cc`, the same
+//!     FDLIBM algorithm — compiled by whatever toolchain built that node binary.
+//!     Under clang's default `-ffp-contract=on`, `a*b+c` in the tail contracts to
+//!     an FMA when the target has the instruction and stays as two rounded
+//!     operations when it does not. arm64 always has it; baseline x86-64 does
+//!     not. So `Math.log` returns different bits on the two architectures, 1 ULP
+//!     apart, on roughly 1% of search-representative inputs — 0.6819084220333025
+//!     is the smallest one the sweep finds: `0xbfd880c6d8b3c8d6` on arm64,
+//!     `...d5` on x86-64.
+//!
+//! The consequence is not academic. `js_log` feeds the Gumbel draw and the PUCT
+//! exploration term, so a 1-ULP difference in a logit can reorder two nearly
+//! tied actions and select a different move — from there the games diverge
+//! completely. **A mixed JS/Rust deployment is only bit-identical when the
+//! JavaScript side runs on arm64.** The same JS on x86-64 is a different
+//! searcher. Production self-play runs on arm64 (GB200) and emits byte-identical
+//! shards there, which is why the shipped code is correct and why the fixture in
+//! `tests/fixtures/js_log_reference.txt` records arm64 values.
+//!
+//! Hence the shape of the test. The exact assertion is against that committed
+//! fixture, so it holds on every target with no engine in the loop; a separate
+//! check runs the host's live `Math.log` against the same fixture and *reports*
+//! any divergence instead of failing, so the architecture dependence stays
+//! visible rather than latent.
 // The fdlibm constants below are transcribed verbatim from `e_log.c`, including
 // digits beyond what f64 can represent. Trimming them to fit would change no
 // value -- the compiler rounds either way -- but it would break the property

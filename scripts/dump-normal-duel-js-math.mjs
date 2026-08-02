@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Reference side of the `js_math` parity harness.
+ * Generator for the checked-in `js_math` reference fixture.
  *
  * `crate::js_math::js_log` claims to be `Math.log` bit-for-bit. That claim is
  * worth exactly as much as the evidence behind it, so this dumps real V8
@@ -9,56 +9,118 @@
  * produces, renormalised priors, a wide exponent sweep, and the near-1 region
  * where the algorithm switches to its short polynomial.
  *
- *   <logs.bin>    interleaved (x, Math.log(x)) as little-endian f64
- *   <stream.bin>  the first N outputs of `createLcg32(seed)` as u32 LE
+ * The output is *committed*, not regenerated per test run, because V8's
+ * `Math.log` is not bit-portable across architectures: it is C++ compiled by the
+ * host toolchain, and whether `a*b+c` contracts to an FMA depends on the target
+ * (arm64 clang contracts; baseline x86-64 has no FMA instruction and does not).
+ * A test that shells out to the local node therefore compares against a
+ * different oracle on every machine. See the module comment of
+ * `rust/normal-duel-core/src/js_math.rs`.
  *
- * Raw bytes, not decimal: the comparison is on bit patterns.
+ * Usage:
+ *   node scripts/dump-normal-duel-js-math.mjs           # rewrite the fixtures
+ *   node scripts/dump-normal-duel-js-math.mjs <dir>     # write them elsewhere
+ *
+ * Both files are text so a regeneration shows up as a reviewable diff, and both
+ * carry a header recording the node version and architecture that produced them.
  */
 
 import { writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { createLcg32 } from '../js/lcg32.mjs';
 
-const [logsPath, streamPath] = process.argv.slice(2);
-if (!logsPath || !streamPath) {
-  console.error('usage: dump-normal-duel-js-math.mjs <logs.bin> <stream.bin>');
-  process.exit(2);
+const HERE = dirname(fileURLToPath(import.meta.url));
+const outputDirectory =
+  process.argv[2] ?? join(HERE, '../rust/normal-duel-core/tests/fixtures');
+
+const scratch = new DataView(new ArrayBuffer(8));
+/** The IEEE-754 bit pattern of `value`, as 16 lowercase hex digits. */
+function bits(value) {
+  scratch.setFloat64(0, value);
+  return scratch.getBigUint64(0).toString(16).padStart(16, '0');
 }
 
 const inputs = [];
 const random = createLcg32(99991);
 
 // The exact grid `gumbel()` draws from, and the `-log(u)` values it then logs.
-for (let index = 0; index < 120000; index += 1) {
+for (let index = 0; index < 1200; index += 1) {
   const u = (random() + 0.5) / 4294967296;
   inputs.push(u, -Math.log(u));
 }
 // Renormalised priors: a policy entry over a mass of up to ~200 entries.
-for (let index = 0; index < 60000; index += 1) {
+for (let index = 0; index < 600; index += 1) {
   inputs.push((random() / 4294967296) / (1 + (random() / 4294967296) * 200));
 }
 // Wide exponent sweep, including subnormal-adjacent scales.
-for (let index = 0; index < 60000; index += 1) {
+for (let index = 0; index < 600; index += 1) {
   inputs.push((1 + random() / 4294967296) * 2 ** ((random() % 80) - 40));
 }
 // The |f| < 2^-20 branch, where the algorithm drops to two polynomial terms.
-for (let index = 0; index < 20000; index += 1) {
+for (let index = 0; index < 400; index += 1) {
   inputs.push(1 + (random() / 4294967296 - 0.5) * 1e-6);
 }
-// The floor the search clamps a zero prior to, and the exact powers of two.
-inputs.push(1e-9, 1, 0.5, 2, 0.25, 4, Number.MIN_VALUE, Number.EPSILON);
-
-const usable = inputs.filter((x) => Number.isFinite(x) && x > 0);
-const logs = new Float64Array(usable.length * 2);
-for (let index = 0; index < usable.length; index += 1) {
-  logs[index * 2] = usable[index];
-  logs[index * 2 + 1] = Math.log(usable[index]);
+// Both sides of the sqrt(2)/2 .. sqrt(2) binade selector, and both sides of the
+// `i |= j` branch inside the long polynomial, at k == 0 and k != 0.
+for (let index = 0; index < 400; index += 1) {
+  const t = random() / 4294967296;
+  inputs.push(0.70710678118654752 + t * (1.41421356237309505 - 0.70710678118654752));
+  inputs.push((0.70710678118654752 + t * 0.7) * 2 ** ((random() % 16) - 8));
 }
-writeFileSync(logsPath, Buffer.from(logs.buffer, logs.byteOffset, logs.byteLength));
+// Subnormals, which take the scale-by-2^54 path.
+for (let index = 0; index < 100; index += 1) {
+  inputs.push((random() / 4294967296) * 2 ** -1040);
+}
+// The floor the search clamps a zero prior to, exact powers of two, and the
+// domain edges.
+inputs.push(1e-9, 1, 0.5, 2, 0.25, 4, Number.MIN_VALUE, Number.EPSILON);
+inputs.push(2 ** 1023, 2 ** -1022, Number.MAX_VALUE, 1 - Number.EPSILON / 2);
+// A known architecture divergence: arm64 V8 (FMA-contracted) returns
+// 0xbfd880c6d8b3c8d6 here, baseline x86-64 V8 (uncontracted) returns ...d5.
+// Rust's explicit `mul_add` pins the contracted value on every target, so this
+// input is the single most load-bearing row in the fixture.
+inputs.push(0.6819084220333025);
 
-const stream = new Uint32Array(4096);
+const usable = [...new Set(inputs.filter((x) => Number.isFinite(x) && x > 0))];
+
+const stamp = [
+  '# Reference values for crate::js_math::js_log.',
+  '# Generated by scripts/dump-normal-duel-js-math.mjs -- do not hand-edit.',
+  `# node: ${process.version}`,
+  `# arch: ${process.arch}`,
+  `# platform: ${process.platform}`,
+  '# NOTE: V8 Math.log is NOT bit-portable across architectures; these values',
+  '# are the arm64 (FMA-contracted) results, which is what production runs and',
+  '# what Rust js_log reproduces on every target via explicit f64::mul_add.',
+];
+
+const logLines = [
+  ...stamp,
+  `# count: ${usable.length}`,
+  '# columns: <x bits hex> <Math.log(x) bits hex> <x decimal>',
+  ...usable.map((x) => `${bits(x)} ${bits(Math.log(x))} ${x}`),
+  '',
+].join('\n');
+writeFileSync(join(outputDirectory, 'js_log_reference.txt'), logLines);
+
 const streamRandom = createLcg32(1234);
-for (let index = 0; index < stream.length; index += 1) stream[index] = streamRandom();
-writeFileSync(streamPath, Buffer.from(stream.buffer, stream.byteOffset, stream.byteLength));
+const draws = Array.from({ length: 4096 }, () => streamRandom());
+const streamLines = [
+  '# Reference stream for crate::js_math::Lcg32, seed 1234.',
+  '# Generated by scripts/dump-normal-duel-js-math.mjs -- do not hand-edit.',
+  `# node: ${process.version}`,
+  `# arch: ${process.arch}`,
+  `# platform: ${process.platform}`,
+  '# Unlike the log values this stream IS bit-portable: it is exact u32',
+  '# arithmetic, identical in every engine on every target.',
+  `# count: ${draws.length}`,
+  ...draws.map(String),
+  '',
+].join('\n');
+writeFileSync(join(outputDirectory, 'lcg32_stream.txt'), streamLines);
 
-console.error(`dumped ${usable.length} log samples and ${stream.length} lcg32 draws`);
+console.error(
+  `wrote ${usable.length} log samples and ${draws.length} lcg32 draws to ${outputDirectory}`
+);
