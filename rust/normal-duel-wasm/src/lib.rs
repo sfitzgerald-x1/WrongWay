@@ -11,6 +11,10 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wasm_bindgen::prelude::*;
+use wrongway_normal_duel::selfplay::{
+    GameOutcome, SelfPlayBatch, SelfPlayOptions, RECORD_FEATURES, RECORD_FLOATS,
+    RECORD_META_FIELDS, RECORD_POLICY,
+};
 use wrongway_normal_duel::{
     action_from_json, apply_action, create_initial_state, decode_action, game_state_from_json,
     legal_action_codes, position_from_json, position_key, search_for, search_nodes,
@@ -367,6 +371,235 @@ pub fn normal_duel_search_nodes(request_json: &str) -> std::result::Result<Strin
 #[wasm_bindgen(js_name = normalDuelSearchFor)]
 pub fn normal_duel_search_for(request_json: &str) -> std::result::Result<String, JsValue> {
     search_for_impl(request_json).map_err(js_error)
+}
+
+/// Options DTO for [`NormalDuelSelfPlayBatch`]. JSON here is fine: it is read
+/// once at construction, off the hot path.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SelfPlayOptionsDto {
+    games: usize,
+    simulations: u32,
+    max_considered: u32,
+    #[serde(default = "default_c_puct")]
+    c_puct: f64,
+    #[serde(default)]
+    epsilon: f64,
+    #[serde(default = "default_ply_cap")]
+    ply_cap: u64,
+    #[serde(default)]
+    seed_base: u32,
+    #[serde(default)]
+    openings: Vec<Vec<u16>>,
+}
+
+fn default_c_puct() -> f64 {
+    wrongway_normal_duel::puct::DEFAULT_C_PUCT
+}
+
+fn default_ply_cap() -> u64 {
+    200
+}
+
+/// Batched self-play across the wasm boundary, **without JSON on the hot path**.
+///
+/// The per-step protocol is
+///
+/// ```text
+/// const n = batch.collect();      // features[0..n) are filled
+/// // read features through a Float32Array over wasm memory, run the network,
+/// // write logits into policy[0..n) and values into value[0..n)
+/// batch.submit(n);
+/// ```
+///
+/// # The wasm-memory-growth hazard
+///
+/// A JS `Float32Array` built over `WebAssembly.Memory.buffer` **detaches** the
+/// moment the wasm heap grows: the old `ArrayBuffer` is replaced, and the stale
+/// view reads as length 0 or throws. Detached-view reads do not surface as a
+/// crash in this pipeline — they surface as all-zero features and all-zero
+/// policy targets, i.e. silently corrupt training data. Two defences, both
+/// required:
+///
+/// 1. **Here:** every buffer the hot path touches is allocated at its final
+///    size in [`NormalDuelSelfPlayBatch::new`] and never resized —
+///    `features` (`games * 648` f32), `policy` (`games * 209` f32), `value`
+///    (`games` f32), plus the record and metadata sinks reserved to their
+///    worst case (`games * plyCap` records). Nothing on the steady-state path
+///    asks the allocator for more pages.
+/// 2. **On the JS side:** `memory.buffer` identity is compared before every
+///    access and the views are rebuilt when it changes. The tree arenas still
+///    allocate as a search deepens, so defence 1 shrinks the window rather than
+///    closing it; defence 2 is what actually closes it.
+#[wasm_bindgen(js_name = NormalDuelSelfPlayBatch)]
+pub struct NormalDuelSelfPlayBatch {
+    inner: SelfPlayBatch,
+}
+
+#[wasm_bindgen(js_class = NormalDuelSelfPlayBatch)]
+impl NormalDuelSelfPlayBatch {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        config_json: &str,
+        options_json: &str,
+    ) -> std::result::Result<NormalDuelSelfPlayBatch, JsValue> {
+        let config = parse_config(config_json).map_err(js_error)?;
+        let dto: SelfPlayOptionsDto =
+            serde_json::from_str(options_json).map_err(|_| js_error("invalid_options".to_owned()))?;
+        let options = SelfPlayOptions {
+            games: dto.games,
+            simulations: dto.simulations,
+            max_considered: dto.max_considered,
+            c_puct: dto.c_puct,
+            epsilon: dto.epsilon,
+            ply_cap: dto.ply_cap,
+            seed_base: dto.seed_base,
+            openings: dto.openings,
+        };
+        let inner = SelfPlayBatch::new(&config, options).map_err(|error| js_error(error.to_string()))?;
+        Ok(Self { inner })
+    }
+
+    /// Advance every unfinished game to its next leaf. Returns the number of
+    /// filled feature slots; `0` means the batch is finished.
+    pub fn collect(&mut self) -> std::result::Result<usize, JsValue> {
+        self.inner.collect().map_err(|error| js_error(error.to_string()))
+    }
+
+    /// Feed back `n` evaluations written into the policy and value buffers.
+    pub fn submit(&mut self, n: usize) -> std::result::Result<(), JsValue> {
+        self.inner.submit(n).map_err(|error| js_error(error.to_string()))
+    }
+
+    #[wasm_bindgen(js_name = isDone)]
+    #[must_use]
+    pub fn is_done(&self) -> bool {
+        self.inner.done()
+    }
+
+    /// Drain finished games into the record sink; returns the record count.
+    #[wasm_bindgen(js_name = takeRecords)]
+    pub fn take_records(&mut self) -> usize {
+        self.inner.take_records()
+    }
+
+    // --- Buffer addresses. Byte offsets into `WebAssembly.Memory.buffer`. ---
+    //
+    // Re-read these after *every* call into wasm: a moved buffer and a grown
+    // heap are indistinguishable from JS otherwise.
+
+    #[wasm_bindgen(js_name = featuresPtr)]
+    #[must_use]
+    pub fn features_ptr(&self) -> u32 {
+        self.inner.features().as_ptr() as u32
+    }
+
+    #[wasm_bindgen(js_name = legalMaskPtr)]
+    #[must_use]
+    pub fn legal_mask_ptr(&self) -> u32 {
+        self.inner.legal_mask().as_ptr() as u32
+    }
+
+    #[wasm_bindgen(js_name = policyPtr)]
+    #[must_use]
+    pub fn policy_ptr(&mut self) -> u32 {
+        self.inner.policy_mut().as_ptr() as u32
+    }
+
+    #[wasm_bindgen(js_name = valuePtr)]
+    #[must_use]
+    pub fn value_ptr(&mut self) -> u32 {
+        self.inner.value_mut().as_ptr() as u32
+    }
+
+    #[wasm_bindgen(js_name = recordsPtr)]
+    #[must_use]
+    pub fn records_ptr(&self) -> u32 {
+        self.inner.records().as_ptr() as u32
+    }
+
+    #[wasm_bindgen(js_name = recordMetaPtr)]
+    #[must_use]
+    pub fn record_meta_ptr(&self) -> u32 {
+        self.inner.record_meta().as_ptr() as u32
+    }
+
+    // --- Lengths, in elements. ---
+
+    #[wasm_bindgen(js_name = featuresLen)]
+    #[must_use]
+    pub fn features_len(&self) -> usize {
+        self.inner.features().len()
+    }
+
+    #[wasm_bindgen(js_name = policyLen)]
+    #[must_use]
+    pub fn policy_len(&mut self) -> usize {
+        self.inner.policy_mut().len()
+    }
+
+    #[wasm_bindgen(js_name = valueLen)]
+    #[must_use]
+    pub fn value_len(&mut self) -> usize {
+        self.inner.value_mut().len()
+    }
+
+    #[wasm_bindgen(js_name = recordsLen)]
+    #[must_use]
+    pub fn records_len(&self) -> usize {
+        self.inner.records().len()
+    }
+
+    #[wasm_bindgen(js_name = recordMetaLen)]
+    #[must_use]
+    pub fn record_meta_len(&self) -> usize {
+        self.inner.record_meta().len()
+    }
+
+    // --- Run summary. Cold path; JSON is fine. ---
+
+    /// `-1` B win, `0` draw, `1` A win, `2` ongoing, one per game.
+    ///
+    /// Ongoing is its own code rather than being folded into draw. A game that
+    /// stops because it hit the shard's ply cap is *unfinished*, which is what
+    /// the incumbent shard worker reports it as (`outcomes: {ongoing: 1}`);
+    /// mapping it to `0` made the two workers' shard stats disagree about what
+    /// had happened — one calling a truncated game a draw, the other calling it
+    /// ongoing — even when the records themselves were identical. `z` is 0
+    /// either way, so this never affected training, only the reporting that
+    /// would have to be trusted to notice if it had.
+    #[must_use]
+    pub fn outcomes(&self) -> Vec<i32> {
+        self.inner
+            .outcomes()
+            .into_iter()
+            .map(|outcome| match outcome {
+                GameOutcome::Win(wrongway_normal_duel::Player::A) => 1,
+                GameOutcome::Win(wrongway_normal_duel::Player::B) => -1,
+                GameOutcome::Draw => 0,
+                GameOutcome::Ongoing => 2,
+            })
+            .collect()
+    }
+
+    #[wasm_bindgen(js_name = pliesPlayed)]
+    #[must_use]
+    pub fn plies_played(&self) -> Vec<u32> {
+        self.inner
+            .plies_played()
+            .into_iter()
+            .map(|plies| u32::try_from(plies).unwrap_or(u32::MAX))
+            .collect()
+    }
+}
+
+/// Record layout constants, so the JS driver never hard-codes a stride.
+#[wasm_bindgen(js_name = normalDuelSelfPlayLayout)]
+#[must_use]
+pub fn normal_duel_self_play_layout() -> String {
+    format!(
+        r#"{{"features":{RECORD_FEATURES},"policy":{RECORD_POLICY},"recordFloats":{RECORD_FLOATS},"metaFields":{RECORD_META_FIELDS}}}"#
+    )
 }
 
 #[cfg(test)]

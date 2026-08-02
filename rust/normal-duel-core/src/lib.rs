@@ -13,7 +13,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 
+pub mod js_math;
+pub mod mock_evaluator;
+pub mod puct;
 mod search;
+pub mod selfplay;
 
 pub use search::{search_for, search_nodes, SearchDiagnostics, SearchOptions, SearchReport};
 
@@ -395,6 +399,15 @@ impl Wall {
     }
 
     #[must_use]
+    /// The anchor square, i.e. the upper-left of the two cells the wall's
+    /// first blocked edge separates.
+    const fn coord(self) -> Coord {
+        Coord {
+            r: self.r,
+            c: self.c,
+        }
+    }
+
     fn anchor_index(self, config: &Config) -> usize {
         self.r as usize * (config.columns as usize - 1) + self.c as usize
     }
@@ -701,11 +714,42 @@ impl Board {
         board
     }
 
+    /// Rebuild the edge bitboards straight off the anchor bits. This is on the
+    /// hot path via [`Board::from_position`], so it iterates set bits rather
+    /// than materializing the wall list.
     fn rebuild_blocked_edges(&mut self, config: &Config) {
         self.blocked_down = 0;
         self.blocked_right = 0;
-        for wall in self.walls.walls(config) {
-            self.add_wall_edges(config, wall);
+        let anchor_columns = config.columns.saturating_sub(1) as usize;
+        if anchor_columns == 0 {
+            return;
+        }
+        // `walls()` only ever looked at anchors below `anchors_per_axis()`;
+        // keep ignoring any stray high bits so behaviour is unchanged.
+        let anchors = config.anchors_per_axis();
+        let valid = if anchors >= 64 {
+            u64::MAX
+        } else {
+            (1_u64 << anchors) - 1
+        };
+        for orientation in [Orientation::Horizontal, Orientation::Vertical] {
+            let mut bits = valid
+                & match orientation {
+                    Orientation::Horizontal => self.walls.horizontal,
+                    Orientation::Vertical => self.walls.vertical,
+                };
+            while bits != 0 {
+                let anchor = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                self.add_wall_edges(
+                    config,
+                    Wall {
+                        orientation,
+                        r: (anchor / anchor_columns) as u8,
+                        c: (anchor % anchor_columns) as u8,
+                    },
+                );
+            }
         }
     }
 
@@ -948,7 +992,233 @@ pub fn normalize_position(config: &Config, input: &Position) -> Result<Position>
     })
 }
 
+/// Policy codes on the canonical 9x9 board: 81 pawn squares plus 2 x 64 wall
+/// anchors. A caller buffer of this length can never be overrun by
+/// [`legal_action_codes_fast`].
+pub const MAX_POLICY_CODES: usize = 209;
+
+/// Instrumentation for the shortest-path prefilter, so callers (and the
+/// benchmark) can report how much search the filter actually skipped.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FastLegalStats {
+    /// Wall anchors examined at all (0 when the mover has no stock left).
+    pub candidates: u32,
+    /// Candidates that survived the geometry test and so reached the filter.
+    pub geometry_ok: u32,
+    /// Candidates that cut at least one player's stored shortest path.
+    pub path_touching: u32,
+    /// Real `has_path` calls run, excluding the two per-node path searches.
+    pub searches: u32,
+}
+
 impl Board {
+    /// One shortest path from `from` to `goal_row`, returned as the edges it
+    /// uses in the `(down, right)` mask form [`Board::edge_blocked`] reads.
+    ///
+    /// Returns `None` when no path exists. Fixed-size stack scratch only: the
+    /// largest supported board has 81 squares.
+    fn shortest_path_edges(
+        self,
+        config: &Config,
+        from: Coord,
+        goal_row: u8,
+    ) -> Option<(u128, u128)> {
+        let columns = config.columns as usize;
+        let start = square(config, from);
+        let mut previous = [u8::MAX; 81];
+        let mut queue = [0_u8; 81];
+        let mut tail = 1_usize;
+        let mut head = 0_usize;
+        queue[0] = start as u8;
+        let mut seen = 1_u128 << start;
+        let mut reached = None;
+        while head < tail {
+            let current = usize::from(queue[head]);
+            head += 1;
+            let coord = Coord {
+                r: (current / columns) as u8,
+                c: (current % columns) as u8,
+            };
+            if coord.r == goal_row {
+                reached = Some(current);
+                break;
+            }
+            for (dr, dc) in DIRECTIONS {
+                let Some(next) = offset(coord, dr, dc) else {
+                    continue;
+                };
+                if !in_bounds(config, next) {
+                    continue;
+                }
+                let index = square(config, next);
+                if seen & (1_u128 << index) != 0 || self.edge_blocked(config, coord, next) {
+                    continue;
+                }
+                seen |= 1_u128 << index;
+                previous[index] = current as u8;
+                queue[tail] = index as u8;
+                tail += 1;
+            }
+        }
+        let mut node = reached?;
+        let (mut down, mut right) = (0_u128, 0_u128);
+        while node != start {
+            let parent = usize::from(previous[node]);
+            if node / columns == parent / columns {
+                right |= 1_u128 << node.min(parent);
+            } else {
+                down |= 1_u128 << node.min(parent);
+            }
+            node = parent;
+        }
+        Some((down, right))
+    }
+
+    /// The edges a candidate wall would block, in the same mask form
+    /// [`Board::shortest_path_edges`] returns. Mirrors [`Board::add_wall_edges`].
+    fn candidate_edge_mask(config: &Config, candidate: Wall) -> (u128, u128) {
+        match candidate.orientation {
+            Orientation::Horizontal => (
+                (1_u128 << square(config, candidate.coord()))
+                    | (1_u128
+                        << square(
+                            config,
+                            Coord {
+                                r: candidate.r,
+                                c: candidate.c + 1,
+                            },
+                        )),
+                0,
+            ),
+            Orientation::Vertical => (
+                0,
+                (1_u128 << square(config, candidate.coord()))
+                    | (1_u128
+                        << square(
+                            config,
+                            Coord {
+                                r: candidate.r + 1,
+                                c: candidate.c,
+                            },
+                        )),
+            ),
+        }
+    }
+
+    /// Write every legal policy code for this position into `out`, in
+    /// ascending code order, allocating nothing.
+    ///
+    /// The wall loop uses an exact prefilter rather than the two `has_path`
+    /// calls per candidate that [`Board::candidate_is_legal`] runs. Each
+    /// player's current shortest path is computed once; a candidate that
+    /// blocks no edge of that path leaves the path intact, so a path provably
+    /// still exists and no search is needed. Only a candidate that cuts a
+    /// stored path is searched, and only for the player whose path it cut.
+    ///
+    /// Returns the number of codes written. `out` must hold at least
+    /// `config.policy_size()` entries.
+    fn legal_codes_into(
+        self,
+        config: &Config,
+        pawns: Players<Coord>,
+        stock: Players<u64>,
+        turn: Player,
+        out: &mut [u16],
+        stats: &mut FastLegalStats,
+    ) -> usize {
+        let mut count = 0_usize;
+
+        // Pawn codes are all below `cells` and wall codes all at or above it,
+        // so emitting every pawn destination first keeps `out` ascending.
+        let mover = *pawns.get(turn);
+        let opponent = *pawns.get(turn.other());
+        let mut squares = [0_u16; 8];
+        let mut found = 0_usize;
+        for (dr, dc) in DIRECTIONS {
+            let Some(adjacent) = offset(mover, dr, dc) else {
+                continue;
+            };
+            if !in_bounds(config, adjacent) || self.edge_blocked(config, mover, adjacent) {
+                continue;
+            }
+            if adjacent != opponent {
+                squares[found] = square(config, adjacent) as u16;
+                found += 1;
+                continue;
+            }
+            for (exit_r, exit_c) in DIRECTIONS {
+                let Some(destination) = offset(opponent, exit_r, exit_c) else {
+                    continue;
+                };
+                if destination == mover
+                    || !in_bounds(config, destination)
+                    || self.edge_blocked(config, opponent, destination)
+                {
+                    continue;
+                }
+                let code = square(config, destination) as u16;
+                if !squares[..found].contains(&code) {
+                    squares[found] = code;
+                    found += 1;
+                }
+            }
+        }
+        squares[..found].sort_unstable();
+        out[..found].copy_from_slice(&squares[..found]);
+        count += found;
+
+        if *stock.get(turn) == 0 {
+            return count;
+        }
+        let (Some((down_a, right_a)), Some((down_b, right_b))) = (
+            self.shortest_path_edges(config, pawns.a, config.goal_rows.a),
+            self.shortest_path_edges(config, pawns.b, config.goal_rows.b),
+        ) else {
+            // A player is already walled in, so every candidate is illegal —
+            // the same answer `candidate_is_legal` gives.
+            return count;
+        };
+
+        // `H` anchors then `V` anchors, each row-major: already policy order.
+        for orientation in [Orientation::Horizontal, Orientation::Vertical] {
+            for r in 0..config.rows - 1 {
+                for c in 0..config.columns - 1 {
+                    let candidate = Wall { orientation, r, c };
+                    stats.candidates += 1;
+                    if !self.candidate_geometry_ok(config, candidate) {
+                        continue;
+                    }
+                    stats.geometry_ok += 1;
+                    let (down, right) = Self::candidate_edge_mask(config, candidate);
+                    let cuts_a = (down & down_a) | (right & right_a) != 0;
+                    let cuts_b = (down & down_b) | (right & right_b) != 0;
+                    if cuts_a || cuts_b {
+                        stats.path_touching += 1;
+                        let mut next = self;
+                        let inserted = next.walls.insert_valid(candidate, config);
+                        debug_assert!(inserted, "geometry-checked candidate is in bounds");
+                        next.add_wall_edges(config, candidate);
+                        if cuts_a {
+                            stats.searches += 1;
+                            if !next.has_path(config, pawns.a, config.goal_rows.a) {
+                                continue;
+                            }
+                        }
+                        if cuts_b {
+                            stats.searches += 1;
+                            if !next.has_path(config, pawns.b, config.goal_rows.b) {
+                                continue;
+                            }
+                        }
+                    }
+                    out[count] = candidate.policy_code(config) as u16;
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
     fn candidate_geometry_ok_except_self(self, config: &Config, wall: Wall) -> bool {
         let mut without = self;
         let removed = without.walls.remove_valid(wall, config);
@@ -1164,6 +1434,177 @@ pub fn legal_position_action_mask(config: &Config, position: &Position) -> Resul
         mask[code] = 1;
     }
     Ok(mask)
+}
+
+/// Allocation-free legal-action generation for an already normalized position.
+///
+/// Writes the legal policy codes into `out` in ascending code order and
+/// returns how many were written; `out` must hold at least
+/// `config.policy_size()` entries ([`MAX_POLICY_CODES`] always suffices).
+/// Nothing is heap-allocated: no wall text is formatted and no intermediate
+/// vector is built or sorted.
+///
+/// The result set is identical to [`legal_position_action_codes`]; only the
+/// amount of pathfinding differs. See [`Board::legal_codes_into`] for why the
+/// shortest-path prefilter is exact rather than a heuristic.
+///
+/// `position` is expected to already satisfy [`normalize_position`]. The
+/// configuration and buffer are still checked, and duplicate wall text is
+/// still rejected, but position invariants are not re-derived here — that is
+/// the allocation this function exists to avoid.
+pub fn legal_action_codes_fast(
+    config: &Config,
+    position: &Position,
+    out: &mut [u16],
+) -> Result<usize> {
+    Ok(legal_action_codes_fast_stats(config, position, out)?.0)
+}
+
+/// [`legal_action_codes_fast`] plus prefilter instrumentation.
+pub fn legal_action_codes_fast_stats(
+    config: &Config,
+    position: &Position,
+    out: &mut [u16],
+) -> Result<(usize, FastLegalStats)> {
+    config.validate()?;
+    if out.len() < config.policy_size() {
+        return Err(NormalDuelError::InvalidActionCode);
+    }
+    if !in_bounds(config, position.pawns.a) || !in_bounds(config, position.pawns.b) {
+        return Err(NormalDuelError::InvalidPosition);
+    }
+    let board = Board::from_position(config, position)?;
+    let mut stats = FastLegalStats::default();
+    let count = board.legal_codes_into(
+        config,
+        position.pawns,
+        position.stock,
+        position.turn,
+        out,
+        &mut stats,
+    );
+    Ok((count, stats))
+}
+
+/// Plane order of the Stage 4 network input, matching `NN_PLANE_LAYOUT` in
+/// `js/normal-duel-nn-encoding.mjs` index for index.
+pub const NN_PLANE_LAYOUT: [&str; 8] = [
+    "mover_pawn",
+    "opponent_pawn",
+    "wall_horizontal",
+    "wall_vertical",
+    "mover_stock",
+    "opponent_stock",
+    "goal_proximity",
+    "side_to_move",
+];
+
+pub const NN_INPUT_PLANES: usize = NN_PLANE_LAYOUT.len();
+
+/// Encode a game state as `NN_INPUT_PLANES * rows * columns` floats, a port of
+/// `encodeState` in `js/normal-duel-nn-encoding.mjs`.
+///
+/// Only `state.position` is read, so this is a thin wrapper over
+/// [`encode_position_into`]. Unlike the JavaScript, the state is not
+/// re-validated here: validation allocates, and this is the hot path. Callers
+/// must pass a state they already trust.
+pub fn encode_state_into(config: &Config, state: &GameState, out: &mut [f32]) -> Result<()> {
+    encode_position_into(config, &state.position, out)
+}
+
+/// The [`encode_state_into`] body, operating on the position directly.
+///
+/// The frame is absolute: every plane is indexed by engine `(r, c)` with no
+/// mirroring, because the policy codes it must line up with are absolute.
+/// Planes 0/1 and 4/5 are mover-relative only in the sense of *which* plane a
+/// value lands in — no coordinate is ever moved. See the module comment in
+/// `js/normal-duel-nn-encoding.mjs`.
+///
+/// Writes into the caller's buffer, which must be exactly
+/// `NN_INPUT_PLANES * config.cells()` long, and allocates nothing.
+pub fn encode_position_into(config: &Config, position: &Position, out: &mut [f32]) -> Result<()> {
+    config.validate()?;
+    // Stage 4's architecture was measured on the canonical 9x9 board only,
+    // matching the JS `unsupported_board` guard.
+    if config.rows != 9 || config.columns != 9 {
+        return Err(NormalDuelError::InvalidConfig);
+    }
+    let cells = config.cells();
+    if out.len() != NN_INPUT_PLANES * cells {
+        return Err(NormalDuelError::InvalidPosition);
+    }
+    if !in_bounds(config, position.pawns.a) || !in_bounds(config, position.pawns.b) {
+        return Err(NormalDuelError::InvalidPosition);
+    }
+    let board = Board::from_position(config, position)?;
+    encode_board_into(
+        config,
+        &board,
+        position.pawns,
+        position.stock,
+        position.turn,
+        out,
+    );
+    Ok(())
+}
+
+fn encode_board_into(
+    config: &Config,
+    board: &Board,
+    pawns: Players<Coord>,
+    stock: Players<u64>,
+    turn: Player,
+    out: &mut [f32],
+) {
+    let cells = config.cells();
+    let columns = config.columns as usize;
+    let opponent = turn.other();
+
+    // The four sparse planes are the caller's buffer, not a fresh array.
+    out[..4 * cells].fill(0.0);
+    out[square(config, *pawns.get(turn))] = 1.0;
+    out[cells + square(config, *pawns.get(opponent))] = 1.0;
+
+    // `blocked_down`/`blocked_right` are exactly the engine's `edgeBlocked`
+    // answers for the down and right edge of each cell, which is what the JS
+    // reads back out of the engine one edge at a time.
+    let (horizontal, vertical) = (2 * cells, 3 * cells);
+    for r in 0..config.rows {
+        for c in 0..config.columns {
+            let cell = square(config, Coord { r, c });
+            if r + 1 < config.rows && board.blocked_down & (1_u128 << cell) != 0 {
+                out[horizontal + cell] = 1.0;
+            }
+            if c + 1 < config.columns && board.blocked_right & (1_u128 << cell) != 0 {
+                out[vertical + cell] = 1.0;
+            }
+        }
+    }
+
+    // Divide in f64 and round once on store, the way a JS `Float32Array`
+    // assignment does, so the bit patterns agree exactly.
+    let scale = |player: Player| -> f32 {
+        let initial = *config.initial_stock.get(player);
+        if initial > 0 {
+            (*stock.get(player) as f64 / initial as f64) as f32
+        } else {
+            0.0
+        }
+    };
+    out[4 * cells..5 * cells].fill(scale(turn));
+    out[5 * cells..6 * cells].fill(scale(opponent));
+
+    let goal_row = *config.goal_rows.get(turn);
+    let span = f64::from(config.rows - 1);
+    let base = 6 * cells;
+    for r in 0..config.rows {
+        let value = ((span - f64::from(r.abs_diff(goal_row))) / span) as f32;
+        let row = base + usize::from(r) * columns;
+        out[row..row + columns].fill(value);
+    }
+
+    // Whose turn it is is not recoverable from an absolute frame, so state it.
+    out[7 * cells..8 * cells].fill(if turn == Player::A { 1.0 } else { 0.0 });
 }
 
 pub fn adjudicate(
@@ -1836,6 +2277,50 @@ impl SearchPosition {
             blocked_down: self.blocked_down,
             blocked_right: self.blocked_right,
         }
+    }
+
+    /// The fully allocation-free form of [`legal_action_codes_fast`]: this type
+    /// already holds the bitboards, so nothing is parsed or rebuilt.
+    ///
+    /// Writes ascending policy codes into `out` and returns the count. `out`
+    /// must hold at least `config.policy_size()` entries.
+    pub fn legal_action_codes_fast(&self, config: &Config, out: &mut [u16]) -> usize {
+        self.legal_action_codes_fast_stats(config, out).0
+    }
+
+    /// [`SearchPosition::legal_action_codes_fast`] plus prefilter counters.
+    pub fn legal_action_codes_fast_stats(
+        &self,
+        config: &Config,
+        out: &mut [u16],
+    ) -> (usize, FastLegalStats) {
+        let mut stats = FastLegalStats::default();
+        let count = self
+            .board()
+            .legal_codes_into(config, self.pawns, self.stock, self.turn, out, &mut stats);
+        (count, stats)
+    }
+
+    /// The fully allocation-free form of [`encode_state_into`].
+    ///
+    /// `out` must be exactly `NN_INPUT_PLANES * config.cells()` long.
+    pub fn encode_into(&self, config: &Config, out: &mut [f32]) -> Result<()> {
+        config.validate()?;
+        if config.rows != 9 || config.columns != 9 {
+            return Err(NormalDuelError::InvalidConfig);
+        }
+        if out.len() != NN_INPUT_PLANES * config.cells() {
+            return Err(NormalDuelError::InvalidPosition);
+        }
+        encode_board_into(
+            config,
+            &self.board(),
+            self.pawns,
+            self.stock,
+            self.turn,
+            out,
+        );
+        Ok(())
     }
 }
 
