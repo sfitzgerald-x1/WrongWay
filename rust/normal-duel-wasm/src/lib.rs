@@ -444,8 +444,8 @@ impl NormalDuelSelfPlayBatch {
         options_json: &str,
     ) -> std::result::Result<NormalDuelSelfPlayBatch, JsValue> {
         let config = parse_config(config_json).map_err(js_error)?;
-        let dto: SelfPlayOptionsDto =
-            serde_json::from_str(options_json).map_err(|_| js_error("invalid_options".to_owned()))?;
+        let dto: SelfPlayOptionsDto = serde_json::from_str(options_json)
+            .map_err(|_| js_error("invalid_options".to_owned()))?;
         let options = SelfPlayOptions {
             games: dto.games,
             simulations: dto.simulations,
@@ -456,19 +456,24 @@ impl NormalDuelSelfPlayBatch {
             seed_base: dto.seed_base,
             openings: dto.openings,
         };
-        let inner = SelfPlayBatch::new(&config, options).map_err(|error| js_error(error.to_string()))?;
+        let inner =
+            SelfPlayBatch::new(&config, options).map_err(|error| js_error(error.to_string()))?;
         Ok(Self { inner })
     }
 
     /// Advance every unfinished game to its next leaf. Returns the number of
     /// filled feature slots; `0` means the batch is finished.
     pub fn collect(&mut self) -> std::result::Result<usize, JsValue> {
-        self.inner.collect().map_err(|error| js_error(error.to_string()))
+        self.inner
+            .collect()
+            .map_err(|error| js_error(error.to_string()))
     }
 
     /// Feed back `n` evaluations written into the policy and value buffers.
     pub fn submit(&mut self, n: usize) -> std::result::Result<(), JsValue> {
-        self.inner.submit(n).map_err(|error| js_error(error.to_string()))
+        self.inner
+            .submit(n)
+            .map_err(|error| js_error(error.to_string()))
     }
 
     #[wasm_bindgen(js_name = isDone)]

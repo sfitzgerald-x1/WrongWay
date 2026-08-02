@@ -44,12 +44,42 @@ struct Case {
 /// budget that halves several times, the single-candidate drain, and a zero
 /// budget where the winner is decided by halving alone.
 const CASES: [Case; 6] = [
-    Case { simulations: 0, max_considered: 4, c_puct: 1.25, seed: 11 },
-    Case { simulations: 1, max_considered: 8, c_puct: 1.25, seed: 22 },
-    Case { simulations: 8, max_considered: 2, c_puct: 1.25, seed: 33 },
-    Case { simulations: 16, max_considered: 4, c_puct: 0.75, seed: 44 },
-    Case { simulations: 32, max_considered: 8, c_puct: 1.25, seed: 55 },
-    Case { simulations: 48, max_considered: 16, c_puct: 2.5, seed: 66 },
+    Case {
+        simulations: 0,
+        max_considered: 4,
+        c_puct: 1.25,
+        seed: 11,
+    },
+    Case {
+        simulations: 1,
+        max_considered: 8,
+        c_puct: 1.25,
+        seed: 22,
+    },
+    Case {
+        simulations: 8,
+        max_considered: 2,
+        c_puct: 1.25,
+        seed: 33,
+    },
+    Case {
+        simulations: 16,
+        max_considered: 4,
+        c_puct: 0.75,
+        seed: 44,
+    },
+    Case {
+        simulations: 32,
+        max_considered: 8,
+        c_puct: 1.25,
+        seed: 55,
+    },
+    Case {
+        simulations: 48,
+        max_considered: 16,
+        c_puct: 2.5,
+        seed: 66,
+    },
 ];
 
 fn repository_root() -> PathBuf {
@@ -215,10 +245,15 @@ fn rust_batched_puct_matches_the_javascript_search_exactly() {
                 .map(|code| code.as_u64().expect("code is unsigned") as u16)
                 .collect();
 
-            assert_eq!(actual.visit_counts, expected_counts, "visitCounts at {where_}");
+            assert_eq!(
+                actual.visit_counts, expected_counts,
+                "visitCounts at {where_}"
+            );
             assert_eq!(
                 actual.action_code,
-                expected["actionCode"].as_u64().expect("actionCode is unsigned") as u16,
+                expected["actionCode"]
+                    .as_u64()
+                    .expect("actionCode is unsigned") as u16,
                 "actionCode at {where_}"
             );
             assert_eq!(
@@ -240,7 +275,10 @@ fn rust_batched_puct_matches_the_javascript_search_exactly() {
                     .expect("maxDepthReached is unsigned") as u32,
                 "maxDepthReached at {where_}"
             );
-            assert_eq!(actual.considered, expected_considered, "considered at {where_}");
+            assert_eq!(
+                actual.considered, expected_considered,
+                "considered at {where_}"
+            );
 
             // How close the Gumbel ranking came to a tie. A `Math.log`
             // disagreement is bounded by an ULP of the logit (~1e-16 relative),

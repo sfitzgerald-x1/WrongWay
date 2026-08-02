@@ -29,6 +29,13 @@
 //! A 1-ULP disagreement would not obviously matter — the logarithm only ever
 //! reaches a comparison, never a visit count or a value — but "obviously" is
 //! how sign errors survive. Matching bit patterns removes the argument.
+// The fdlibm constants below are transcribed verbatim from `e_log.c`, including
+// digits beyond what f64 can represent. Trimming them to fit would change no
+// value -- the compiler rounds either way -- but it would break the property
+// that makes this file auditable: every literal here can be diffed character by
+// character against the published source. The bit patterns are pinned by
+// `constants_match_their_fdlibm_bit_patterns`, so a mistyped digit fails loudly.
+#![allow(clippy::excessive_precision)]
 
 /// `Math.LN2` split high/low, and the FDLIBM `log` polynomial coefficients.
 ///
@@ -161,6 +168,11 @@ impl Lcg32 {
     /// two guards are unreachable for a `u32` draw and exist only because the
     /// JavaScript has them: keeping the shapes identical is cheaper than
     /// re-deriving that they cannot fire.
+    // `!(u > 0.0)` is not `u <= 0.0`: they differ on NaN, and the negated form is
+    // both the NaN-correct guard and the shape the JavaScript uses. Rewriting it
+    // via `partial_cmp` would obscure exactly the correspondence this file exists
+    // to preserve.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     pub fn gumbel(&mut self) -> f64 {
         let raw = self.next_u32();
         let mut u = (f64::from(raw) + 0.5) / 4_294_967_296.0;

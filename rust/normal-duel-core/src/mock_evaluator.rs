@@ -64,7 +64,11 @@ fn unit(word: u32) -> f64 {
 /// The "logits" are used directly as unnormalised priors, which is what the
 /// search does with a real policy head's output after masking.
 pub fn evaluate(features: &[f32], policy: &mut [f32]) -> f64 {
-    assert_eq!(policy.len(), MAX_POLICY_CODES, "policy buffer is policy_size");
+    assert_eq!(
+        policy.len(),
+        MAX_POLICY_CODES,
+        "policy buffer is policy_size"
+    );
     let hash = hash_features(features);
     for (code, slot) in policy.iter_mut().enumerate() {
         *slot = unit(mix32(hash ^ (code as u32).wrapping_mul(0x9e37_79b1))) as f32;
@@ -82,7 +86,11 @@ mod tests {
         let mut policy = vec![0.0_f32; MAX_POLICY_CODES];
         let value = evaluate(&features, &mut policy);
         assert!((-1.0..1.0).contains(&value));
-        assert_eq!(f64::from(value as f32), value, "value survives an f32 round trip");
+        assert_eq!(
+            f64::from(value as f32),
+            value,
+            "value survives an f32 round trip"
+        );
         for probability in &policy {
             assert!((0.0..1.0).contains(probability));
         }

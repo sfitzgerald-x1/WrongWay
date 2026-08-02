@@ -85,7 +85,10 @@ fn js_log_is_bit_identical_to_v8_math_log() {
         samples.len(),
         first
     );
-    println!("js_log: {} samples, all bit-identical to Math.log", samples.len());
+    println!(
+        "js_log: {} samples, all bit-identical to Math.log",
+        samples.len()
+    );
 
     let mut rng = Lcg32::new(1234);
     for (index, expected) in stream.iter().enumerate() {

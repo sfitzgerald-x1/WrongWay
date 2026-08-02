@@ -161,7 +161,9 @@ impl Game {
                 if game.outcome != GameOutcome::Ongoing {
                     break;
                 }
-                let count = game.position.legal_action_codes_fast(config, &mut game.codes);
+                let count = game
+                    .position
+                    .legal_action_codes_fast(config, &mut game.codes);
                 if !game.codes[..count].contains(code) {
                     return Err(PuctError::InvalidActionCode);
                 }
@@ -174,6 +176,12 @@ impl Game {
     /// Apply one legal action code and re-adjudicate, without building a
     /// `GameState`. Mirrors `applyTrustedAction`: a wall placement restarts the
     /// repetition window, a pawn move extends it.
+    // Repetition and ply cap both yield a draw, so clippy sees identical arms in
+    // the terminal chain below. They stay separate because it mirrors
+    // `adjudicate`'s documented order -- goal, then repetition, then ply cap --
+    // and those are three distinct reasons a game ended. Collapsing them would
+    // save a line and lose the correspondence.
+    #[allow(clippy::if_same_then_else)]
     fn play(&mut self, config: &Config, code: u16) -> Result<()> {
         let applied = apply_action_code(config, &self.position, code)?;
         self.position = applied.position;
@@ -257,10 +265,7 @@ impl Game {
 
     /// The search finished: record the position, choose the move, play it.
     fn complete_move(&mut self, config: &Config, options: &SelfPlayOptions) -> Result<()> {
-        let search = self
-            .search
-            .take()
-            .ok_or(PuctError::OutOfOrderEvaluation)?;
+        let search = self.search.take().ok_or(PuctError::OutOfOrderEvaluation)?;
         self.rng = search.rng();
         let result = search.result();
         let turn = self.position.turn;
@@ -275,7 +280,9 @@ impl Game {
             &mut features,
         );
 
-        let count = self.position.legal_action_codes_fast(config, &mut self.codes);
+        let count = self
+            .position
+            .legal_action_codes_fast(config, &mut self.codes);
         if count == 0 {
             return Err(PuctError::NoLegalActions);
         }

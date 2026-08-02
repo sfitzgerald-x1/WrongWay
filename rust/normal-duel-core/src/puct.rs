@@ -463,12 +463,7 @@ pub fn apply_action_code(
 impl PuctTreeSearch {
     /// Start a search at `root`. The caller must have checked that the root is
     /// not already terminal; the reference fails with `terminal_state`.
-    pub fn new(
-        config: &Config,
-        root: RootContext,
-        params: PuctParams,
-        rng: Lcg32,
-    ) -> Result<Self> {
+    pub fn new(config: &Config, root: RootContext, params: PuctParams, rng: Lcg32) -> Result<Self> {
         config.validate()?;
         if config.rows != 9 || config.columns != 9 {
             return Err(PuctError::UnsupportedBoard);
@@ -828,7 +823,8 @@ impl PuctTreeSearch {
         self.ranking.truncate(keep);
         self.survivors.clear();
         self.survivors.extend(self.ranking.iter().map(|(i, _)| *i));
-        self.survivors.sort_by_key(|index| self.candidates[*index].code);
+        self.survivors
+            .sort_by_key(|index| self.candidates[*index].code);
     }
 
     /* -------------------------------------------------------------- *
@@ -909,6 +905,12 @@ impl PuctTreeSearch {
         }
     }
 
+    // Repetition and ply cap both yield a draw, so clippy sees identical arms in
+    // the terminal chain below. They stay separate because it mirrors
+    // `adjudicate`'s documented order -- goal, then repetition, then ply cap --
+    // and those are three distinct reasons a game ended. Collapsing them would
+    // save a line and lose the correspondence.
+    #[allow(clippy::if_same_then_else)]
     fn create_child(&mut self, config: &Config, node: u32, edge: u32) -> Result<u32> {
         let parent = self.nodes[node as usize];
         let code = self.edges[edge as usize].code;
@@ -1007,7 +1009,8 @@ impl PuctTreeSearch {
             } else {
                 fpu
             };
-            let score = q + self.params.c_puct * edge.prior * sqrt_total / f64::from(1 + edge.visits);
+            let score =
+                q + self.params.c_puct * edge.prior * sqrt_total / f64::from(1 + edge.visits);
             if score > best_score {
                 best_score = score;
                 best = index;
