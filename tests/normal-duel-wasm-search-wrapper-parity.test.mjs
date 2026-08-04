@@ -23,7 +23,7 @@
  * disagreement also fails here instead of being averaged away.
  */
 import { strict as assert } from 'node:assert';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
@@ -38,6 +38,17 @@ import { loadWasmPuct, wasmPuctSearch } from '../js/normal-duel-wasm-puct-search
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const RELEASE = join(ROOT, 'rust', 'target', 'wasm-candidate', 'release');
+
+// The candidate is a BUILD ARTIFACT under rust/target, so it is absent on a
+// clean checkout and in the CI job that only runs `npm test`. Skipping is right
+// here rather than failing: the wasm is exercised by its own workflow job, which
+// builds it first. The skip is explicit and names the command, so a local run
+// that meant to cover this cannot mistake it for a pass.
+const HAVE_CANDIDATE = existsSync(join(RELEASE, 'manifest.json'))
+  && existsSync(join(RELEASE, 'normal-duel-wasm_bg.wasm'));
+const SKIP = HAVE_CANDIDATE
+  ? false
+  : 'wasm candidate not built (node scripts/build-normal-duel-wasm-candidate.mjs)';
 
 const CONFIG = Object.freeze({
   ruleset: 'normal-duel-v1',
@@ -87,7 +98,7 @@ const BUDGETS = Object.freeze([
   { simulations: 64, maxConsidered: 1 }
 ]);
 
-test('the NormalDuelSearch wrapper plays puctSearch\'s move', async () => {
+test('the NormalDuelSearch wrapper plays puctSearch\'s move', { skip: SKIP }, async () => {
   assert.ok(
     readFileSync(join(RELEASE, 'manifest.json'), 'utf8').length > 0,
     'build the candidate first: node scripts/build-normal-duel-wasm-candidate.mjs'
