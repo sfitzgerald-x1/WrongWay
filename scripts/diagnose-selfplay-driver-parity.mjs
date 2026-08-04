@@ -151,8 +151,16 @@ async function runRust() {
   const { hashFeatures, mix32 } = await import(`${ROOT}/js/normal-duel-mock-evaluator.mjs`);
   const unit = (word) => (word >>> 8) / 16777216;
 
+  // `exploration` must be explicit. It defaults to visit-temperature with
+  // temperature_moves 0, so sending epsilon without it used to run pure argmax
+  // with no exploration at all -- and this script would then have compared a JS
+  // side that applies epsilon against a Rust side that silently does not, i.e.
+  // two different algorithms, while reporting on their "parity". The Rust side
+  // now rejects that combination outright; being explicit here keeps the two
+  // arms comparing the same thing.
   const options = {
     games: GAMES, simulations: SIMS, maxConsidered: CONSIDERED, cPuct: C_PUCT,
+    exploration: 'uniformEpsilon',
     epsilon: EPSILON, plyCap: PLY_CAP, seedBase: SEED_BASE >>> 0, openings: OPENINGS
   };
   const batch = new wasmMod.NormalDuelSelfPlayBatch(
@@ -228,7 +236,7 @@ for (const t of js.trace) perGameJs[t.game] = (perGameJs[t.game] ?? 0) + 1;
 const perGameRust = {};
 for (const t of rust.trace) perGameRust[t.game] = (perGameRust[t.game] ?? 0) + 1;
 
-console.log(JSON.stringify({
+const report = {
   options: { games: GAMES, sims: SIMS, epsilon: EPSILON, plyCap: PLY_CAP, seedBase: SEED_BASE },
   openingLengths: OPENINGS.map((o) => o.length),
   js: { records: js.lines.length, outcomes: js.outcomes, perGame: perGameJs },
@@ -240,4 +248,10 @@ console.log(JSON.stringify({
   rustPlyAt: firstPly >= 0 ? rust.trace[firstPly] : null,
   jsTailTrace: js.trace.slice(Math.max(0, firstPly - 2), firstPly + 3),
   rustTailTrace: rust.trace.slice(Math.max(0, firstPly - 2), firstPly + 3)
-}, null, 2));
+};
+console.log(JSON.stringify(report, null, 2));
+
+// Exit non-zero on divergence. A parity check that only prints is not a check:
+// nothing in CI or a script wrapper notices, which is how this file could have
+// been comparing two different algorithms without anyone being told.
+if (!report.identical) process.exitCode = 1;

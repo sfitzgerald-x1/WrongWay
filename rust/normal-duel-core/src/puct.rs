@@ -82,6 +82,10 @@ pub enum PuctError {
     InvalidEvaluation,
     #[error("invalid_max_considered")]
     InvalidMaxConsidered,
+    #[error("invalid_simulations")]
+    InvalidSimulations,
+    #[error("contradictory_exploration")]
+    ContradictoryExploration,
     #[error("invalid_c_puct")]
     InvalidCPuct,
     #[error("invalid_state")]
@@ -107,6 +111,8 @@ impl PuctError {
             Self::NoLegalActions => "no_legal_actions",
             Self::InvalidEvaluation => "invalid_evaluation",
             Self::InvalidMaxConsidered => "invalid_max_considered",
+            Self::InvalidSimulations => "invalid_simulations",
+            Self::ContradictoryExploration => "contradictory_exploration",
             Self::InvalidCPuct => "invalid_c_puct",
             Self::InvalidState => "invalid_state",
             Self::InvalidActionCode => "invalid_action_code",

@@ -274,3 +274,47 @@ fn invalid_temperature_is_rejected() {
     )
     .is_ok());
 }
+
+/// `simulations == 0` must be refused. With no simulations the search returns
+/// empty visit counts, `effective_visit_counts` falls back to a one-hot, and
+/// every recorded policy target becomes one-hot at a position with ~130 legal
+/// codes -- the degenerate target that cost an earlier run 114 flat iterations,
+/// emitted silently at full record count.
+#[test]
+fn zero_simulations_is_rejected_rather_than_emitting_one_hot_targets() {
+    let cfg = config();
+    let mut options = base_options();
+    options.simulations = 0;
+    let err = SelfPlayBatch::new(&cfg, options).expect_err("zero simulations must be refused");
+    assert_eq!(err.to_string(), "invalid_simulations");
+}
+
+/// An options object in the PRE-CHANGE wire format carries `epsilon` and no
+/// `exploration` key. Because `exploration` defaults to VisitTemperature and
+/// `temperature_moves` to 0, that combination used to parse cleanly and run pure
+/// argmax with NO exploration, while `epsilon` was range-checked and never read.
+/// An old driver must fail loudly instead of quietly stopping exploring.
+#[test]
+fn contradictory_exploration_options_are_rejected() {
+    let cfg = config();
+    let mut epsilon_under_temperature = base_options();
+    epsilon_under_temperature.exploration = Exploration::VisitTemperature;
+    epsilon_under_temperature.epsilon = 0.15;
+    assert_eq!(
+        SelfPlayBatch::new(&cfg, epsilon_under_temperature)
+            .expect_err("epsilon under visit-temperature must be refused")
+            .to_string(),
+        "contradictory_exploration"
+    );
+
+    let mut moves_under_epsilon = base_options();
+    moves_under_epsilon.exploration = Exploration::UniformEpsilon;
+    moves_under_epsilon.epsilon = 0.15;
+    moves_under_epsilon.temperature_moves = 24;
+    assert_eq!(
+        SelfPlayBatch::new(&cfg, moves_under_epsilon)
+            .expect_err("temperature_moves under uniform-epsilon must be refused")
+            .to_string(),
+        "contradictory_exploration"
+    );
+}

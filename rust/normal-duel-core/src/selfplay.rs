@@ -536,6 +536,34 @@ impl SelfPlayBatch {
         if options.games == 0 {
             return Err(PuctError::InvalidBufferLength);
         }
+        // `simulations == 0` must be rejected, not tolerated. With no
+        // simulations every search returns empty visit counts, so
+        // `effective_visit_counts` falls back to a one-hot of the chosen action
+        // and the recorded policy target becomes one-hot at a position with ~130
+        // legal codes -- silently, at full record count. That is precisely the
+        // degenerate target that removes AlphaZero's improvement ratchet and cost
+        // an earlier run 114 flat iterations. `max_considered == 0` was already
+        // rejected, so this was an asymmetry rather than a decision, and the
+        // trigger is mundane: `Number('')` is 0, so any driver resolving its sim
+        // count from an unset environment variable sends it.
+        if options.simulations == 0 {
+            return Err(PuctError::InvalidSimulations);
+        }
+        // Reject option combinations that contradict themselves, rather than
+        // silently honouring one and ignoring the other.
+        //
+        // `exploration` defaults to VisitTemperature and `temperature_moves` to
+        // 0, so an options object in the PRE-CHANGE wire format -- carrying
+        // `epsilon` and no `exploration` key -- parsed cleanly and ran pure
+        // argmax with NO exploration at all, while `epsilon` was range-checked
+        // and then never read. An old driver must fail loudly, not quietly stop
+        // exploring.
+        if options.exploration == Exploration::VisitTemperature && options.epsilon != 0.0 {
+            return Err(PuctError::ContradictoryExploration);
+        }
+        if options.exploration == Exploration::UniformEpsilon && options.temperature_moves != 0 {
+            return Err(PuctError::ContradictoryExploration);
+        }
         if !(0.0..=1.0).contains(&options.epsilon) || !options.epsilon.is_finite() {
             return Err(PuctError::InvalidEvaluation);
         }
