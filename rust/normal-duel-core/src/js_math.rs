@@ -56,7 +56,7 @@
 //! tied actions and select a different move — from there the games diverge
 //! completely. **A mixed JS/Rust deployment is only bit-identical when the
 //! JavaScript side runs on arm64.** The same JS on x86-64 is a different
-//! searcher. Production self-play runs on arm64 (GB200) and emits byte-identical
+//! searcher. Production self-play runs on arm64 and emits byte-identical
 //! shards there, which is why the shipped code is correct and why the fixture in
 //! `tests/fixtures/js_log_reference.txt` records arm64 values.
 //!

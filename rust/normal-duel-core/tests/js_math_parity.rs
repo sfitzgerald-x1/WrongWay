@@ -188,7 +188,7 @@ fn host_math_log_divergence_from_the_fixture_is_reported() {
          This is EXPECTED and is not a failure. V8's Math.log is C++ compiled by the host\n\
          toolchain: arm64 clang contracts a*b+c in base/ieee754.cc into an FMA, baseline\n\
          x86-64 has no FMA instruction and does not, so the two differ by 1 ULP. Production\n\
-         self-play runs on arm64 (GB200), which is what the fixture records, and Rust js_log\n\
+         self-play runs on arm64, which is what the fixture records, and Rust js_log\n\
          reproduces those bits on every target via explicit f64::mul_add.\n\
          The consequence to keep in mind: a JS/Rust mixed deployment on x86_64 can pick a\n\
          different move where the two disagree by 1 ULP in a logit, because that can reorder\n\
