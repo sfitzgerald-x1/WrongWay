@@ -881,6 +881,58 @@ impl Board {
         }
     }
 
+    /// Wall-aware distance from *every* cell to `goal_row`, written into
+    /// `out[cell]`, or `None` where walls seal that cell off from the goal row
+    /// entirely.
+    ///
+    /// This is [`Board::shortest_distance`] run backwards and all at once. The
+    /// move graph is undirected — `blocked_down`/`blocked_right` cut an edge
+    /// for both of the cells it joins — so the distance from a cell to the
+    /// nearest goal-row square is exactly the depth at which a BFS seeded with
+    /// the whole goal row arrives at that cell. One sweep, rather than the 81
+    /// single-source calls the encoder would otherwise need per plane.
+    ///
+    /// The frontier expansion below is character-for-character the one in
+    /// `shortest_distance`; `goal_distance_field_agrees_with_shortest_distance`
+    /// holds the two to the same answers so they cannot drift apart.
+    fn goal_distance_field(&self, config: &Config, goal_row: u8, out: &mut [Option<u8>]) {
+        let columns = config.columns as usize;
+        let valid = (1_u128 << config.cells()) - 1;
+        let mut right_column = 0_u128;
+        for row in 0..config.rows {
+            right_column |= 1_u128
+                << square(
+                    config,
+                    Coord {
+                        r: row,
+                        c: config.columns - 1,
+                    },
+                );
+        }
+
+        out[..config.cells()].fill(None);
+        let mut frontier = ((1_u128 << columns) - 1) << (usize::from(goal_row) * columns);
+        let mut seen = frontier;
+        let mut distance = 0_u8;
+        loop {
+            let mut bits = frontier;
+            while bits != 0 {
+                out[bits.trailing_zeros() as usize] = Some(distance);
+                bits &= bits - 1;
+            }
+            let upward = (frontier >> columns) & !self.blocked_down;
+            let downward = ((frontier & !self.blocked_down) << columns) & valid;
+            let leftward = (frontier >> 1) & !right_column & !self.blocked_right;
+            let rightward = ((frontier & !right_column & !self.blocked_right) << 1) & valid;
+            frontier = (upward | downward | leftward | rightward) & !seen;
+            if frontier == 0 {
+                return;
+            }
+            seen |= frontier;
+            distance += 1;
+        }
+    }
+
     fn candidate_geometry_ok(self, config: &Config, candidate: Wall) -> bool {
         if self.walls.contains_valid(candidate, config) {
             return false;
@@ -996,6 +1048,11 @@ pub fn normalize_position(config: &Config, input: &Position) -> Result<Position>
 /// anchors. A caller buffer of this length can never be overrun by
 /// [`legal_action_codes_fast`].
 pub const MAX_POLICY_CODES: usize = 209;
+
+/// Upper bound on `Config::cells()`, fixed by the `u128` bitboards every
+/// wall/path routine here is built on. Lets the encoder hold a per-cell
+/// scratch buffer on the stack instead of allocating on the hot path.
+pub const MAX_BOARD_CELLS: usize = 128;
 
 /// Instrumentation for the shortest-path prefilter, so callers (and the
 /// benchmark) can report how much search the filter actually skipped.
@@ -1488,7 +1545,7 @@ pub fn legal_action_codes_fast_stats(
 
 /// Plane order of the Stage 4 network input, matching `NN_PLANE_LAYOUT` in
 /// `js/normal-duel-nn-encoding.mjs` index for index.
-pub const NN_PLANE_LAYOUT: [&str; 8] = [
+pub const NN_PLANE_LAYOUT: [&str; 10] = [
     "mover_pawn",
     "opponent_pawn",
     "wall_horizontal",
@@ -1497,7 +1554,22 @@ pub const NN_PLANE_LAYOUT: [&str; 8] = [
     "opponent_stock",
     "goal_proximity",
     "side_to_move",
+    "mover_path_distance",
+    "opponent_path_distance",
 ];
+
+/// Value written into the two path-distance planes for a cell with no
+/// wall-legal route to the goal row at all.
+///
+/// Unreachable is not "very far", it is a different thing, but the planes have
+/// one channel each and every other plane lives in [0, 1], so it has to be
+/// spelled as a distance. 1.0 — the top of the range — keeps the ordering
+/// monotone: no reachable cell ever scores above it. It is not a *reserved*
+/// value; a cell at the maximum distance of `cells - 1` steps would normalise
+/// to 1.0 as well. That collision is accepted rather than engineered around,
+/// because a route that long cannot occur under the wall budget, and the two
+/// cases mean nearly the same thing to the trunk in any case.
+pub const NN_UNREACHABLE_DISTANCE: f32 = 1.0;
 
 pub const NN_INPUT_PLANES: usize = NN_PLANE_LAYOUT.len();
 
@@ -1605,6 +1677,32 @@ fn encode_board_into(
 
     // Whose turn it is is not recoverable from an absolute frame, so state it.
     out[7 * cells..8 * cells].fill(if turn == Player::A { 1.0 } else { 0.0 });
+
+    // Planes 8/9: the wall-aware shortest-path distance from each cell to the
+    // mover's goal row and to the opponent's, normalised by the longest path
+    // the board can hold (`cells - 1` steps) so both land in [0, 1].
+    //
+    // This is the quantity the classical eval is built out of — its shortest
+    // path term carries weight 100 against 12/6/8 for everything else — handed
+    // to the trunk directly instead of left for it to rediscover with a stack
+    // of 3x3 convolutions. Like planes 0/1 and 4/5 these are mover-relative by
+    // plane SELECTION only: no coordinate moves, so the absolute frame the
+    // action codes live in is untouched.
+    //
+    // Divided in f64 and rounded once on store, the way a JS `Float32Array`
+    // assignment does, so the bit patterns agree with `encodeState` exactly.
+    let mut field = [None::<u8>; MAX_BOARD_CELLS];
+    let longest_path = (cells - 1) as f64;
+    for (slot, player) in [turn, opponent].into_iter().enumerate() {
+        board.goal_distance_field(config, *config.goal_rows.get(player), &mut field);
+        let base = (8 + slot) * cells;
+        for cell in 0..cells {
+            out[base + cell] = match field[cell] {
+                Some(distance) => (f64::from(distance) / longest_path) as f32,
+                None => NN_UNREACHABLE_DISTANCE,
+            };
+        }
+    }
 }
 
 pub fn adjudicate(
@@ -3347,6 +3445,123 @@ mod tests {
             ply_cap: 200,
             first_player: Player::A,
         }
+    }
+
+    /// The encoder's all-cells sweep has to answer exactly what the
+    /// single-source routine answers, cell for cell. They are two BFS
+    /// implementations over the same graph; without this they can drift, and a
+    /// drifted path plane is a silently wrong input the training run would
+    /// never flag.
+    #[test]
+    fn goal_distance_field_agrees_with_shortest_distance() {
+        let config = standard();
+        // Walls placed to make the field interesting: detours, a dead end in
+        // the corner, and enough structure that a naive flood fill would
+        // disagree with a wall-aware one.
+        let positions = [
+            vec![],
+            vec!["H-0-0".to_owned(), "H-0-2".to_owned(), "V-3-3".to_owned()],
+            vec![
+                "H-4-0".to_owned(),
+                "H-4-2".to_owned(),
+                "H-4-4".to_owned(),
+                "H-4-6".to_owned(),
+                "V-5-7".to_owned(),
+                "V-3-3".to_owned(),
+                "H-1-1".to_owned(),
+            ],
+        ];
+
+        for walls in positions {
+            let position = Position {
+                pawns: Players {
+                    a: Coord { r: 8, c: 4 },
+                    b: Coord { r: 0, c: 4 },
+                },
+                walls,
+                stock: Players { a: 4, b: 5 },
+                turn: Player::A,
+            };
+            let board = Board::from_position(&config, &position).expect("walls are legal");
+
+            for goal_row in [0_u8, 8_u8] {
+                let mut field = [None::<u8>; MAX_BOARD_CELLS];
+                board.goal_distance_field(&config, goal_row, &mut field);
+
+                for r in 0..config.rows {
+                    for c in 0..config.columns {
+                        let from = Coord { r, c };
+                        assert_eq!(
+                            field[square(&config, from)],
+                            board.shortest_distance(&config, from, goal_row),
+                            "walls {:?}, goal row {goal_row}, cell {from:?}",
+                            position.walls
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every one of the 209 policy codes must land on a distinct slot of the
+    /// convolutional policy head's three planes, and read back as the code it
+    /// started from. A transposition here would train the policy on permuted
+    /// labels and look perfectly healthy while doing it.
+    ///
+    /// The head emits a 9x9 pawn plane and two 8x8 wall planes; this is the
+    /// flattening `WrongWayNet.forward` applies, held against the engine's own
+    /// `encode_action`/`decode_action`.
+    #[test]
+    fn policy_codes_round_trip_through_the_convolutional_head_layout() {
+        let config = standard();
+        let cells = config.cells();
+        let anchors = usize::from(config.rows - 1) * usize::from(config.columns - 1);
+        assert_eq!(policy_size(&config), Ok(cells + 2 * anchors));
+
+        let mut seen = vec![None::<usize>; cells + 2 * anchors];
+        for code in 0..cells + 2 * anchors {
+            let action = decode_action(&config, code).expect("code decodes");
+            // Slot in the concatenation [pawn 9x9 | wall H 8x8 | wall V 8x8].
+            let slot = match &action {
+                Action::Pawn { to } => {
+                    usize::from(to.r) * usize::from(config.columns) + usize::from(to.c)
+                }
+                Action::Wall { wall } => {
+                    let parsed = Wall::parse(&config, wall).expect("wall parses");
+                    let plane = match parsed.orientation {
+                        Orientation::Horizontal => 0,
+                        Orientation::Vertical => 1,
+                    };
+                    cells
+                        + plane * anchors
+                        + usize::from(parsed.r) * usize::from(config.columns - 1)
+                        + usize::from(parsed.c)
+                }
+            };
+            assert!(
+                slot < cells + 2 * anchors,
+                "code {code} slot {slot} out of range"
+            );
+            assert_eq!(
+                seen[slot], None,
+                "code {code} collides with code {:?}",
+                seen[slot]
+            );
+            seen[slot] = Some(code);
+            assert_eq!(
+                encode_action(&config, &action),
+                Ok(code),
+                "code {code} does not round trip"
+            );
+            // The head's flattening is the identity on the code space: slot and
+            // code must be the same number, which is what lets the network emit
+            // planes and the search read policy codes with no permutation table.
+            assert_eq!(slot, code, "code {code} maps to head slot {slot}");
+        }
+        assert!(
+            seen.iter().all(Option::is_some),
+            "some head slot is unreachable"
+        );
     }
 
     #[test]

@@ -91,13 +91,14 @@ const DIRECT_LINE = [
 
 test('layout is frozen, self-consistent and carries side to move', () => {
   assert.equal(NN_PLANE_LAYOUT.length, NN_INPUT_PLANES);
-  assert.equal(NN_INPUT_PLANES, 8);
+  assert.equal(NN_INPUT_PLANES, 10);
   assert.ok(Object.isFrozen(NN_PLANE_LAYOUT));
   assert.ok(NN_PLANE_LAYOUT.every((entry) => Object.isFrozen(entry) && typeof entry.name === 'string'));
   assert.equal(new Set(NN_PLANE_LAYOUT.map((entry) => entry.name)).size, NN_INPUT_PLANES);
   assert.deepEqual(NN_PLANE_LAYOUT.map((entry) => entry.name), [
     'mover_pawn', 'opponent_pawn', 'wall_horizontal', 'wall_vertical',
-    'mover_stock', 'opponent_stock', 'goal_proximity', 'side_to_move'
+    'mover_stock', 'opponent_stock', 'goal_proximity', 'side_to_move',
+    'mover_path_distance', 'opponent_path_distance'
   ]);
 });
 

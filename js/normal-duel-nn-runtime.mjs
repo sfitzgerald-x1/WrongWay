@@ -432,6 +432,54 @@ export function forwardRaw(weights, features) {
  * allocated here, once; each call returns a fresh policy array because that
  * array belongs to the caller.
  */
+/**
+ * The same forward-plus-mask-plus-softmax as `createNetworkEvaluator`, but
+ * entered from a feature vector and a legal mask the caller already holds
+ * rather than from a state.
+ *
+ *     evaluate(features, mask, policyOut) -> value
+ *
+ * This is what the native PUCT tree needs: it hands out the encoded leaf and
+ * its mask directly, so re-deriving them from a state object would be pure
+ * waste. `policyOut` is filled in place — it may be a view into wasm memory —
+ * and scratch is allocated once here, so nothing allocates per leaf.
+ */
+export function createFeatureEvaluator(weights) {
+  const checked = checkWeights(weights);
+  const scratch = createScratch();
+  const masked = new Float64Array(POLICY_SIZE);
+
+  return function evaluateFeatures(features, mask, policyOut) {
+    checkFeatures(features);
+    if (mask.length !== POLICY_SIZE || policyOut.length !== POLICY_SIZE) {
+      fail('unsupported_policy_size');
+    }
+    const value = forwardInto(checked, features, scratch);
+
+    const logits = scratch.logits;
+    let max = -Infinity;
+    for (let code = 0; code < POLICY_SIZE; code += 1) {
+      const logit = mask[code] > 0 ? logits[code] : MASK_FILL;
+      masked[code] = logit;
+      if (logit > max) max = logit;
+    }
+
+    let total = 0;
+    for (let code = 0; code < POLICY_SIZE; code += 1) {
+      if (mask[code] <= 0) { policyOut[code] = 0; continue; }
+      const weight = Math.exp(masked[code] - max);
+      policyOut[code] = weight;
+      total += weight;
+    }
+    if (total > 0) {
+      for (let code = 0; code < POLICY_SIZE; code += 1) {
+        if (policyOut[code] !== 0) policyOut[code] /= total;
+      }
+    }
+    return value;
+  };
+}
+
 export function createNetworkEvaluator(weights) {
   const checked = checkWeights(weights);
   const scratch = createScratch();

@@ -27,7 +27,7 @@
 //! Record format
 //! -------------
 //! One record per position actually played, laid out as a flat `f32` run of
-//! [`RECORD_FLOATS`]: `features` (648), `policyTarget` (209), `legalMask`
+//! [`RECORD_FLOATS`]: `features` (810), `policyTarget` (209), `legalMask`
 //! (209), `z` (1).
 //!
 //! `policyTarget` is the **visit distribution** from `effectiveVisitCounts`,
@@ -35,10 +35,11 @@
 //! and is only correct for a search that had nothing to decide, which is the
 //! case `effectiveVisitCounts` already handles.
 //!
-//! Epsilon exploration records the *search's* target for the state actually
-//! visited even when the played move is the random one. The label answers
+//! Exploration records the *search's* target for the state actually visited
+//! even when the played move is not the search's argmax. The label answers
 //! "what did search think here", and that question does not change because a
-//! different move was played afterwards.
+//! different move was played afterwards. This holds for both [`Exploration`]
+//! modes and is the invariant `meanTargetEntropy` guards.
 
 use crate::js_math::Lcg32;
 use crate::puct::{
@@ -65,15 +66,53 @@ pub enum GameOutcome {
     Draw,
 }
 
+/// How the played move is chosen once a search finishes.
+///
+/// Both modes leave the recorded policy target alone: it is the search's full
+/// visit distribution for the state actually visited, always.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Exploration {
+    /// AlphaZero's recipe. For the first [`SelfPlayOptions::temperature_moves`]
+    /// plies, sample the played move from `visits^(1/T)` over the search's own
+    /// visit counts; after that play the argmax.
+    ///
+    /// This explores only among moves the search already rated plausible, and
+    /// it tapers by construction: the sampling stops when the opening does, so
+    /// no exploration move can throw away a decided endgame.
+    #[default]
+    VisitTemperature,
+    /// The legacy path: play a uniformly random legal move with probability
+    /// [`SelfPlayOptions::epsilon`], otherwise the argmax.
+    ///
+    /// Uniform over ~130 legal codes is mostly wall placements the search had
+    /// already dismissed, and it fires at every ply rather than only in the
+    /// opening. Kept reachable so the two recipes can be run head to head.
+    UniformEpsilon,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelfPlayOptions {
     pub games: usize,
     pub simulations: u32,
     pub max_considered: u32,
     pub c_puct: f64,
+    /// Which exploration recipe drives the played move.
+    pub exploration: Exploration,
     /// Probability of playing a uniformly random legal move instead of the
-    /// search's choice. The recorded target is unaffected.
+    /// search's choice. Read only by [`Exploration::UniformEpsilon`]. The
+    /// recorded target is unaffected.
     pub epsilon: f64,
+    /// Softmax temperature for [`Exploration::VisitTemperature`]. `1.0` samples
+    /// straight from the visit distribution; `-> 0` approaches argmax; `> 1`
+    /// flattens it.
+    pub temperature: f64,
+    /// Number of **absolute** plies sampled from the visit distribution before
+    /// switching to argmax. Absolute for the same reason [`Self::ply_cap`] is:
+    /// `ply` counts the forced opening, whose plies no search produced.
+    ///
+    /// `0` disables temperature sampling entirely (pure argmax), which is what
+    /// [`Default`] does so existing callers see no behaviour change.
+    pub temperature_moves: u64,
     /// Cap on a game's **absolute** ply count, matching the incumbent shard
     /// worker's `while (state.outcome.kind === 'ongoing' && state.ply < PLY_CAP)`.
     ///
@@ -98,12 +137,78 @@ impl Default for SelfPlayOptions {
             simulations: 32,
             max_considered: 8,
             c_puct: crate::puct::DEFAULT_C_PUCT,
+            exploration: Exploration::VisitTemperature,
             epsilon: 0.0,
+            temperature: 1.0,
+            temperature_moves: 0,
             ply_cap: 200,
             seed_base: 0,
             openings: Vec::new(),
         }
     }
+}
+
+/// Sample an action code from `target^(1/temperature)`, where `target` is the
+/// normalised visit distribution already written as the policy target.
+///
+/// Sampling from the *target* rather than from the raw `(code, visits)` pairs is
+/// deliberate on two counts. It reuses the exact f32 values that went to disk,
+/// so the sampled move can never be drawn from a distribution the record does
+/// not describe; and it fixes the traversal to ascending code order, so the f64
+/// accumulator sees the same addition sequence on every platform.
+///
+/// `roll` must be in `[0, 1)`. `word / 2^32` is the intended source: the divisor
+/// is a power of two, so that quotient is exact in f64 and identical in JS,
+/// which is what lets `cluster-selfplay.mjs` reproduce this draw for draw.
+///
+/// `temperature == 1.0` short-circuits the `powf`: `powf` is not guaranteed
+/// bit-identical across targets, and `T = 1` is the default, so the default path
+/// stays free of it. Any other `T` is reproducible per platform but should not
+/// be assumed bit-exact between the wasm and native builds.
+///
+/// Returns `None` when `target` carries no positive mass, which leaves the
+/// caller on the search's argmax.
+#[must_use]
+pub fn sample_visit_temperature(target: &[f32], temperature: f64, roll: f64) -> Option<u16> {
+    let exponent = 1.0 / temperature;
+    let weight = |p: f32| -> f64 {
+        let p = f64::from(p);
+        if temperature == 1.0 {
+            p
+        } else {
+            p.powf(exponent)
+        }
+    };
+
+    let mut total = 0.0_f64;
+    for &p in target.iter() {
+        if p > 0.0 {
+            total += weight(p);
+        }
+    }
+    // `is_finite` first, so a NaN total is rejected here rather than falling
+    // through a negated comparison.
+    if !total.is_finite() || total <= 0.0 {
+        return None;
+    }
+
+    let threshold = roll * total;
+    let mut acc = 0.0_f64;
+    let mut last = None;
+    for (code, &p) in target.iter().enumerate() {
+        if p <= 0.0 {
+            continue;
+        }
+        acc += weight(p);
+        last = Some(code as u16);
+        if acc > threshold {
+            return last;
+        }
+    }
+    // Only reachable when float error leaves `acc` a hair under `threshold` on
+    // the final code. Falling through to the last positive code keeps the draw
+    // inside the support instead of reporting failure.
+    last
 }
 
 #[derive(Debug, Clone)]
@@ -304,24 +409,47 @@ impl Game {
             policy_target[usize::from(*code)] = (f64::from(*visits) / total as f64) as f32;
         }
 
-        // Epsilon exploration. The draw is taken from the same stream that
-        // drives the search, so a seed still reproduces the whole game.
-        //
-        // The probe is `(word % 10000) / 10000`, NOT `word / 2^32`. Both are
-        // uniform on [0, 1) and the two are not interchangeable here: they map
-        // the *same* word to different sides of the epsilon threshold for a
-        // large fraction of words, so the second form accepts a different
-        // subset of plies. Once one probe disagrees, the accepted ply consumes
-        // an extra draw for the random-move pick, the two streams are offset by
-        // one word forever after, and the games fork. This form is the
-        // incumbent shard worker's, and it is the one the RNG stream is
-        // defined by.
+        // Exploration. Every draw below comes from the same per-game `Lcg32`
+        // that drives the search, taken *after* `search.rng()` was folded back
+        // in above and *after* the policy target is computed -- i.e. at exactly
+        // the stream position the incumbent epsilon probe occupied. A seed
+        // therefore still reproduces the whole game.
         let mut played = result.action_code;
-        if options.epsilon > 0.0 {
-            let roll = f64::from(self.rng.next_u32() % 10_000) / 10_000.0;
-            if roll < options.epsilon {
-                let pick = self.rng.next_u32() as usize % count;
-                played = self.codes[pick];
+        match options.exploration {
+            // The probe is `(word % 10000) / 10000`, NOT `word / 2^32`. Both
+            // are uniform on [0, 1) and the two are not interchangeable here:
+            // they map the *same* word to different sides of the epsilon
+            // threshold for a large fraction of words, so the second form
+            // accepts a different subset of plies. Once one probe disagrees,
+            // the accepted ply consumes an extra draw for the random-move pick,
+            // the two streams are offset by one word forever after, and the
+            // games fork. This form is the incumbent shard worker's, and it is
+            // the one the RNG stream is defined by.
+            Exploration::UniformEpsilon => {
+                if options.epsilon > 0.0 {
+                    let roll = f64::from(self.rng.next_u32() % 10_000) / 10_000.0;
+                    if roll < options.epsilon {
+                        let pick = self.rng.next_u32() as usize % count;
+                        played = self.codes[pick];
+                    }
+                }
+            }
+            // Exactly ONE word per ply while the temperature phase is live, and
+            // ZERO once it is over. Unconditional within the phase: not skipped
+            // when the search had a single candidate, not skipped when the
+            // sample lands on the argmax anyway. That makes the stream offset a
+            // pure function of the ply index, so a fork cannot be introduced by
+            // a search-shape change that happens to alter how many plies would
+            // have "needed" a draw.
+            Exploration::VisitTemperature => {
+                if self.ply < options.temperature_moves {
+                    let roll = f64::from(self.rng.next_u32()) / 4_294_967_296.0;
+                    if let Some(code) =
+                        sample_visit_temperature(&policy_target, options.temperature, roll)
+                    {
+                        played = code;
+                    }
+                }
             }
         }
         if !self.codes[..count].contains(&played) {
@@ -409,6 +537,15 @@ impl SelfPlayBatch {
             return Err(PuctError::InvalidBufferLength);
         }
         if !(0.0..=1.0).contains(&options.epsilon) || !options.epsilon.is_finite() {
+            return Err(PuctError::InvalidEvaluation);
+        }
+        // A non-positive or non-finite temperature would make `1/T` infinite or
+        // NaN and every weight garbage. Only checked when it can actually be
+        // read, so a caller on the epsilon path need not supply a sane T.
+        if options.exploration == Exploration::VisitTemperature
+            && options.temperature_moves > 0
+            && !(options.temperature.is_finite() && options.temperature > 0.0)
+        {
             return Err(PuctError::InvalidEvaluation);
         }
         let games = (0..options.games)

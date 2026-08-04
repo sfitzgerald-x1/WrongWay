@@ -11,15 +11,17 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wasm_bindgen::prelude::*;
+use wrongway_normal_duel::js_math::Lcg32;
+use wrongway_normal_duel::puct::{PuctParams, PuctTreeSearch};
 use wrongway_normal_duel::selfplay::{
-    GameOutcome, SelfPlayBatch, SelfPlayOptions, RECORD_FEATURES, RECORD_FLOATS,
+    Exploration, GameOutcome, SelfPlayBatch, SelfPlayOptions, RECORD_FEATURES, RECORD_FLOATS,
     RECORD_META_FIELDS, RECORD_POLICY,
 };
 use wrongway_normal_duel::{
     action_from_json, apply_action, create_initial_state, decode_action, game_state_from_json,
     legal_action_codes, position_from_json, position_key, search_for, search_nodes,
     validate_config_json, validate_state, Action, Config, NormalDuelError, SearchDiagnostics,
-    SearchOptions, SearchReport, MAX_JS_SAFE_INTEGER, RULESET,
+    SearchOptions, SearchReport, MAX_JS_SAFE_INTEGER, NN_INPUT_PLANES, RULESET,
 };
 
 type BoundaryResult<T> = std::result::Result<T, String>;
@@ -383,14 +385,43 @@ struct SelfPlayOptionsDto {
     max_considered: u32,
     #[serde(default = "default_c_puct")]
     c_puct: f64,
+    /// `"visitTemperature"` (default) or `"uniformEpsilon"`. Spelled out rather
+    /// than a bool so a third recipe does not have to break the wire format.
+    #[serde(default)]
+    exploration: ExplorationDto,
     #[serde(default)]
     epsilon: f64,
+    #[serde(default = "default_temperature")]
+    temperature: f64,
+    #[serde(default)]
+    temperature_moves: u64,
     #[serde(default = "default_ply_cap")]
     ply_cap: u64,
     #[serde(default)]
     seed_base: u32,
     #[serde(default)]
     openings: Vec<Vec<u16>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ExplorationDto {
+    #[default]
+    VisitTemperature,
+    UniformEpsilon,
+}
+
+impl From<ExplorationDto> for Exploration {
+    fn from(dto: ExplorationDto) -> Self {
+        match dto {
+            ExplorationDto::VisitTemperature => Exploration::VisitTemperature,
+            ExplorationDto::UniformEpsilon => Exploration::UniformEpsilon,
+        }
+    }
+}
+
+fn default_temperature() -> f64 {
+    1.0
 }
 
 fn default_c_puct() -> f64 {
@@ -451,7 +482,10 @@ impl NormalDuelSelfPlayBatch {
             simulations: dto.simulations,
             max_considered: dto.max_considered,
             c_puct: dto.c_puct,
+            exploration: dto.exploration.into(),
             epsilon: dto.epsilon,
+            temperature: dto.temperature,
+            temperature_moves: dto.temperature_moves,
             ply_cap: dto.ply_cap,
             seed_base: dto.seed_base,
             openings: dto.openings,
@@ -595,6 +629,184 @@ impl NormalDuelSelfPlayBatch {
             .into_iter()
             .map(|plies| u32::try_from(plies).unwrap_or(u32::MAX))
             .collect()
+    }
+}
+
+/// One search-to-move over the native PUCT tree, with the network evaluated by
+/// the caller.
+///
+/// `NormalDuelSelfPlayBatch` cannot serve matchplay: it owns the game loop and
+/// picks its own moves, so it has no way to play an externally chosen opponent
+/// reply. This wrapper exposes the single-search coroutine instead — the caller
+/// supplies the root state, pumps one leaf at a time, and reads the chosen
+/// action. That is one boundary crossing per NODE, but the crossing itself is
+/// nanoseconds; what it removes is the JS tree's ~4 ms/simulation of move
+/// generation. The network round trip is paid identically by both paths.
+///
+/// The per-move protocol is
+///
+/// ```text
+/// const s = new NormalDuelSearch(configJson, stateJson, optionsJson);
+/// while (s.nextLeaf()) {                // features[0..featuresLen) filled
+///   s.pendingLeafMask();                // mask[0..policyLen)  filled
+///   // run the network, write probabilities into policy[0..policyLen)
+///   s.submit(value);
+/// }
+/// const chosen = s.actionCode();
+/// ```
+///
+/// The same wasm-memory-growth hazard documented on `NormalDuelSelfPlayBatch`
+/// applies: the tree arenas grow as a search deepens, so the JS side MUST
+/// compare `memory.buffer` identity before every access and rebuild its views.
+#[wasm_bindgen(js_name = NormalDuelSearch)]
+pub struct NormalDuelSearch {
+    config: Config,
+    inner: PuctTreeSearch,
+    features: Vec<f32>,
+    policy: Vec<f32>,
+    mask: Vec<f32>,
+}
+
+/// Options DTO for [`NormalDuelSearch`]. Read once at construction.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchOptionsDto {
+    simulations: u32,
+    max_considered: u32,
+    #[serde(default = "default_c_puct")]
+    c_puct: f64,
+    /// The JS reference drives one search from `createLcg32(seed)`; the same
+    /// seed here is what makes the two trees choose the same move.
+    seed: u32,
+}
+
+#[wasm_bindgen(js_class = NormalDuelSearch)]
+impl NormalDuelSearch {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        config_json: &str,
+        state_json: &str,
+        options_json: &str,
+    ) -> std::result::Result<NormalDuelSearch, JsValue> {
+        let config = parse_config(config_json).map_err(js_error)?;
+        let state_value = parse_value(state_json, "invalid_state").map_err(js_error)?;
+        // Same validation the other search entry points use: decode, then check
+        // the state against this config, so a state from a different board
+        // cannot reach the tree.
+        let state = validated_search_state(&config, &state_value).map_err(js_error)?;
+        let dto: SearchOptionsDto = serde_json::from_str(options_json)
+            .map_err(|_| js_error("invalid_options".to_owned()))?;
+        let params = PuctParams {
+            simulations: dto.simulations,
+            max_considered: dto.max_considered,
+            c_puct: dto.c_puct,
+        };
+        let inner = PuctTreeSearch::from_state(&config, &state, params, Lcg32::new(dto.seed))
+            .map_err(|error| js_error(error.reason().to_owned()))?;
+        let features = vec![0.0; NN_INPUT_PLANES * config.cells()];
+        let policy = vec![0.0; config.policy_size()];
+        let mask = vec![0.0; config.policy_size()];
+        Ok(Self {
+            config,
+            inner,
+            features,
+            policy,
+            mask,
+        })
+    }
+
+    /// Advance to the next leaf awaiting evaluation, filling `features`.
+    /// Returns `false` when the search is finished.
+    #[wasm_bindgen(js_name = nextLeaf)]
+    pub fn next_leaf(&mut self) -> std::result::Result<bool, JsValue> {
+        self.inner
+            .next_leaf(&self.config, &mut self.features)
+            .map_err(|error| js_error(error.reason().to_owned()))
+    }
+
+    /// Fill `mask` with the pending leaf's legal-action mask.
+    #[wasm_bindgen(js_name = pendingLeafMask)]
+    pub fn pending_leaf_mask(&mut self) -> std::result::Result<(), JsValue> {
+        self.inner
+            .pending_leaf_mask(&self.config, &mut self.mask)
+            .map_err(|error| js_error(error.reason().to_owned()))
+    }
+
+    /// Hand the pending leaf's evaluation back to the tree. The caller has
+    /// already written probabilities into `policy[0..policyLen)`.
+    pub fn submit(&mut self, value: f64) -> std::result::Result<(), JsValue> {
+        let policy = std::mem::take(&mut self.policy);
+        let outcome = self.inner.submit(&self.config, &policy, value);
+        self.policy = policy;
+        outcome.map_err(|error| js_error(error.reason().to_owned()))
+    }
+
+    #[wasm_bindgen(js_name = isDone)]
+    #[must_use]
+    pub fn is_done(&self) -> bool {
+        self.inner.is_done()
+    }
+
+    /// The chosen action code. Only meaningful once the search is done.
+    #[wasm_bindgen(js_name = actionCode)]
+    #[must_use]
+    pub fn action_code(&self) -> u16 {
+        self.inner.result().action_code
+    }
+
+    /// `simulationsUsed`, for the harness's node-budget check.
+    #[wasm_bindgen(js_name = simulationsUsed)]
+    #[must_use]
+    pub fn simulations_used(&self) -> u32 {
+        self.inner.result().simulations_used
+    }
+
+    #[wasm_bindgen(js_name = rootValue)]
+    #[must_use]
+    pub fn root_value(&self) -> f64 {
+        self.inner.result().root_value
+    }
+
+    /// `(code, visits)` pairs flattened, ascending by code — the parity surface.
+    #[wasm_bindgen(js_name = visitCounts)]
+    #[must_use]
+    pub fn visit_counts(&self) -> Vec<u32> {
+        self.inner
+            .result()
+            .visit_counts
+            .into_iter()
+            .flat_map(|(code, visits)| [u32::from(code), visits])
+            .collect()
+    }
+
+    #[wasm_bindgen(js_name = featuresPtr)]
+    #[must_use]
+    pub fn features_ptr(&self) -> u32 {
+        self.features.as_ptr() as u32
+    }
+
+    #[wasm_bindgen(js_name = featuresLen)]
+    #[must_use]
+    pub fn features_len(&self) -> usize {
+        self.features.len()
+    }
+
+    #[wasm_bindgen(js_name = policyPtr)]
+    #[must_use]
+    pub fn policy_ptr(&self) -> u32 {
+        self.policy.as_ptr() as u32
+    }
+
+    #[wasm_bindgen(js_name = policyLen)]
+    #[must_use]
+    pub fn policy_len(&self) -> usize {
+        self.policy.len()
+    }
+
+    #[wasm_bindgen(js_name = maskPtr)]
+    #[must_use]
+    pub fn mask_ptr(&self) -> u32 {
+        self.mask.as_ptr() as u32
     }
 }
 

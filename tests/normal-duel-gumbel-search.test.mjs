@@ -281,7 +281,7 @@ test('self-play records carry encoder-shaped features and policy targets', () =>
   const game = defaultGame({ plyCap: 5 });
   for (const record of game.plies) {
     assert.ok(record.features instanceof Float32Array);
-    assert.equal(record.features.length, 8 * 81);
+    assert.equal(record.features.length, 10 * 81);
     assert.ok(record.policyTarget instanceof Float32Array);
     assert.equal(record.policyTarget.length, SIZE);
     let sum = 0;

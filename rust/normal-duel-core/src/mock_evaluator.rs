@@ -82,7 +82,7 @@ mod tests {
 
     #[test]
     fn evaluations_are_exactly_representable_in_f32() {
-        let features: Vec<f32> = (0..648).map(|index| index as f32 / 648.0).collect();
+        let features: Vec<f32> = (0..810).map(|index| index as f32 / 810.0).collect();
         let mut policy = vec![0.0_f32; MAX_POLICY_CODES];
         let value = evaluate(&features, &mut policy);
         assert!((-1.0..1.0).contains(&value));
@@ -98,7 +98,7 @@ mod tests {
 
     #[test]
     fn a_one_ulp_feature_change_changes_the_evaluation() {
-        let mut features = vec![0.5_f32; 648];
+        let mut features = vec![0.5_f32; 810];
         let mut left = vec![0.0_f32; MAX_POLICY_CODES];
         let mut right = vec![0.0_f32; MAX_POLICY_CODES];
         let value_left = evaluate(&features, &mut left);
