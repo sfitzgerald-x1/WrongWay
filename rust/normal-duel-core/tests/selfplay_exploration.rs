@@ -318,3 +318,41 @@ fn contradictory_exploration_options_are_rejected() {
         "contradictory_exploration"
     );
 }
+
+/// `games` and `ply_cap` feed an up-front `Vec::with_capacity` whose product is
+/// unbounded without these checks. On wasm32 that is an abort across the
+/// boundary rather than a readable error, and even in-range values can reserve
+/// over a gigabyte, so both must come back as `invalid_*` strings.
+#[test]
+fn oversized_games_and_ply_cap_are_rejected_rather_than_reserving_unboundedly() {
+    let config = config();
+
+    let mut options = SelfPlayOptions {
+        games: 100_000,
+        ..SelfPlayOptions::default()
+    };
+    let err = SelfPlayBatch::new(&config, options.clone()).unwrap_err();
+    assert_eq!(err.reason(), "invalid_buffer_length");
+
+    options = SelfPlayOptions {
+        ply_cap: u64::from(u32::MAX) + 1,
+        ..SelfPlayOptions::default()
+    };
+    let err = SelfPlayBatch::new(&config, options.clone()).unwrap_err();
+    assert_eq!(err.reason(), "invalid_ply_cap");
+
+    options = SelfPlayOptions {
+        ply_cap: 0,
+        ..SelfPlayOptions::default()
+    };
+    let err = SelfPlayBatch::new(&config, options).unwrap_err();
+    assert_eq!(err.reason(), "invalid_ply_cap");
+
+    // The canonical shard shape stays accepted.
+    let ok = SelfPlayOptions {
+        games: 32,
+        ply_cap: 200,
+        ..SelfPlayOptions::default()
+    };
+    assert!(SelfPlayBatch::new(&config, ok).is_ok());
+}

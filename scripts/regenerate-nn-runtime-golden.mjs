@@ -54,6 +54,7 @@ const REFERENCE = `
 import json, sys
 from pathlib import Path
 import numpy as np, torch
+import torch.nn.functional as F
 
 training = Path(sys.argv[1])
 sys.path.insert(0, str(training))
@@ -74,7 +75,24 @@ rows, columns = manifest["input"]["rows"], manifest["input"]["columns"]
 features = np.asarray(payload["features"], dtype=np.float32)
 x = torch.from_numpy(features.reshape(1, planes, rows, columns))
 logits, value = reference_forward(tensors, x, manifest["architecture"]["blocks"])
-print(json.dumps({"logits": logits[0].tolist(), "value": float(value[0])}))
+
+# The pooled value-head vector, recomputed here from the same tensors. The value
+# is a single scalar and cannot pin down how 96 numbers were pooled, so the
+# fixture carries the vector too and the test asserts it elementwise.
+h = F.relu(F.conv2d(x, tensors["stem.conv.weight"], tensors["stem.conv.bias"], padding=1))
+for i in range(manifest["architecture"]["blocks"]):
+    y = F.relu(F.conv2d(h, tensors[f"block{i}.conv1.weight"],
+                        tensors[f"block{i}.conv1.bias"], padding=1))
+    y = F.conv2d(y, tensors[f"block{i}.conv2.weight"],
+                 tensors[f"block{i}.conv2.bias"], padding=1)
+    h = F.relu(h + y)
+v = F.relu(F.conv2d(h, tensors["value.conv.weight"], tensors["value.conv.bias"]))
+flat = v.flatten(2)
+pooled = torch.cat((flat.mean(dim=2), flat.amax(dim=2),
+                    flat.std(dim=2, unbiased=False)), dim=1)
+
+print(json.dumps({"logits": logits[0].tolist(), "value": float(value[0]),
+                  "valuePooled": pooled[0].tolist()}))
 `;
 
 const synthetic = syntheticWeightSet();
@@ -103,6 +121,7 @@ try {
     input: synthetic.manifest.input,
     features,
     policyLogits: reference.logits,
+    valuePooled: reference.valuePooled,
     value: reference.value
   };
   fs.writeFileSync(OUT, `${JSON.stringify(fixture, null, 2)}\n`);

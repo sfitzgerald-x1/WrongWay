@@ -115,6 +115,23 @@ const REQUIRED_TENSORS = (() => {
   return Object.freeze(new Map(spec));
 })();
 
+/**
+ * The tensor table this runtime demands, as `name -> shape`.
+ *
+ * Exported so a test can compare it against a shape table captured from a real
+ * `export_weights.py` run. Everything else that guards this module is internal:
+ * the golden is generated from a synthetic spec that lives in this repo, so if
+ * the exporter grows a plane or moves a head width, nothing here changes, the
+ * blob hash is unchanged, the golden still matches, and CI stays green while
+ * `loadWeights` rejects every real export. That is exactly how this module came
+ * to implement a dead architecture for three commits.
+ */
+export function requiredTensorShapes() {
+  const out = {};
+  for (const [name, shape] of REQUIRED_TENSORS) out[name] = [...shape];
+  return out;
+}
+
 /** Brand for weight sets this module produced; nothing else is accepted. */
 const WEIGHTS_BRAND = Symbol.for('wrongway.nnRuntime.weights.v1');
 
@@ -491,7 +508,12 @@ export function forwardRaw(weights, features) {
   const scratch = createScratch();
   const source = features instanceof Float32Array ? features : Float32Array.from(features);
   const value = forwardInto(checked, source, scratch);
-  return { policyLogits: scratch.logits, value };
+  // `valuePooled` is exposed for the golden to assert against. The value is one
+  // tanh scalar summarising 96 pooled numbers, so it cannot discriminate an
+  // error in how they are pooled: reordering the mean/max/std blocks moves it by
+  // 2e-5 and switching to the sample std by 2e-6, both inside any tolerance the
+  // scalar can carry. Comparing the pooled vector elementwise does catch them.
+  return { policyLogits: scratch.logits, value, valuePooled: scratch.pooled };
 }
 
 /* ------------------------------------------------------------------ *

@@ -10,7 +10,7 @@ import { encodeState } from '../js/normal-duel-nn-encoding.mjs';
 import { gumbelRootSearch } from '../js/normal-duel-gumbel-search.mjs';
 import { createLcg32 } from '../js/lcg32.mjs';
 import {
-  NN_RUNTIME_VERSION, createNetworkEvaluator, forwardRaw, loadWeights
+  NN_RUNTIME_VERSION, createNetworkEvaluator, forwardRaw, loadWeights, requiredTensorShapes
 } from '../js/normal-duel-nn-runtime.mjs';
 import {
   CONFIG_9X9, FEATURE_LEN, POLICY_SIZE, fixedState, fnv1a32, syntheticWeightSet
@@ -100,6 +100,19 @@ test('forwardRaw reproduces the committed PyTorch goldens (hermetic, never skips
 
   assert.ok(maxLogitDelta < 1e-4, `policy logits differ from the golden by ${maxLogitDelta}`);
   assert.ok(valueDelta < 1e-4, `value differs from the golden by ${valueDelta}`);
+
+  // The value alone does not pin the pooling down. Measured against this blob:
+  // reordering the pooled blocks to [mean|std|max] moves the value by 1.4e-3,
+  // interleaving them per channel by 2.3e-5, and using the sample std instead of
+  // the population std by 2.3e-6 -- the last two sail through the 1e-4 above. So
+  // assert the 96-element pooled vector the reference produced, elementwise,
+  // where those same three mistakes are off by ~1e-1 in many components.
+  assert.equal(GOLDEN.valuePooled.length, actual.valuePooled.length);
+  let maxPooledDelta = 0;
+  for (let i = 0; i < GOLDEN.valuePooled.length; i += 1) {
+    maxPooledDelta = Math.max(maxPooledDelta, Math.abs(actual.valuePooled[i] - GOLDEN.valuePooled[i]));
+  }
+  assert.ok(maxPooledDelta < 1e-5, `value-head pooling differs from the golden by ${maxPooledDelta}`);
 
   // The goldens must actually exercise the graph: an all-zero logit vector
   // would satisfy the deltas above against an all-zero golden.
@@ -387,4 +400,42 @@ test('a single evaluate call fits the per-turn budget', (t) => {
 
   t.diagnostic(`single evaluate: ${perCall.toFixed(2)} ms (mean of ${runs}); ~20 per 900 ms turn needs <= 45 ms`);
   assert.ok(perCall < 200, `evaluate took ${perCall} ms, far outside any plausible turn budget`);
+});
+
+/* ------------------------------------------------------------------ *
+ * Exporter drift — this one cannot skip
+ * ------------------------------------------------------------------ */
+
+/**
+ * `tests/fixtures/exporter-tensor-shapes.json` is a shape table (names and
+ * shapes, no weights) captured from a real `export_weights.py` run. Everything
+ * else guarding this module is internal to the repo: the golden is generated
+ * from a synthetic spec written here, so an exporter-side head change leaves the
+ * blob hash and the golden untouched and CI green while `loadWeights` would
+ * reject every real export. This test is the one link to the other side of the
+ * boundary, and unlike the Python parity test it needs no venv and no artifact,
+ * so it runs everywhere.
+ *
+ * Channels and blocks are exporter CLI arguments rather than drift, so only the
+ * tensor names and the shapes that do not depend on them are compared.
+ */
+test('the runtime demands exactly the tensors a real export produces', () => {
+  const captured = JSON.parse(fs.readFileSync(
+    new URL('./fixtures/exporter-tensor-shapes.json', import.meta.url), 'utf8'
+  ));
+  const required = requiredTensorShapes();
+
+  assert.deepEqual(
+    Object.keys(required).sort(), captured.tensors.map((t) => t.name).sort(),
+    'the runtime and the exporter disagree about which tensors exist; '
+    + 'regenerate tests/fixtures/exporter-tensor-shapes.json from a real export '
+    + 'and port the graph change into normal-duel-nn-runtime.mjs'
+  );
+
+  assert.equal(captured.input.planes, encodeState(CONFIG_9X9, fixedState()).length / 81,
+    'the exporter and the encoder disagree about the plane count');
+
+  for (const { name, shape } of captured.tensors) {
+    assert.deepEqual(required[name], shape, `shape drift on ${name}`);
+  }
 });

@@ -8,6 +8,16 @@
 //! parallelism, nothing that changes a search decision. What changes is only
 //! how many feature vectors the network sees per call.
 //!
+//! One qualification on "bit-identical": the value channel is `f32`, so a leaf
+//! value is rounded to single precision on the way in. That is the contract, not
+//! an oversight — the values come from the network, which produces `f32` — but a
+//! caller computing values in `f64` (`createNetworkEvaluator` returns an `f64`
+//! `tanh`) hands over ~29 bits fewer than it holds, and two PUCT edges within
+//! ~6e-8 of each other could then order differently than in an `f64` serial run.
+//! `NormalDuelSearch`, the matchplay path, takes `f64` and has no such step.
+//! Note that the mock evaluator is deliberately `f32`-exact, so the driver
+//! parity check cannot observe this either way.
+//!
 //! The loop is:
 //!
 //! ```text
@@ -527,6 +537,16 @@ pub struct SelfPlayBatch {
     meta: Vec<i32>,
 }
 
+/// Upper bounds on the two options that drive the up-front record reservation.
+///
+/// Sized generously against real use -- the cluster runs 32 games per shard and
+/// the canonical `ply_cap` is 200 -- so these reject typos and hostile input
+/// without constraining anything a caller legitimately wants. At the maxima the
+/// reservation is 512 * 2048 * 1229 * 4 B, which is still large, but it is now a
+/// reachable ceiling rather than an unbounded multiply.
+const MAX_GAMES: usize = 512;
+const MAX_PLY_CAP: u64 = 2048;
+
 impl SelfPlayBatch {
     pub fn new(config: &Config, options: SelfPlayOptions) -> Result<Self> {
         config.validate()?;
@@ -535,6 +555,20 @@ impl SelfPlayBatch {
         }
         if options.games == 0 {
             return Err(PuctError::InvalidBufferLength);
+        }
+        // `games` and `ply_cap` arrive from JSON and are multiplied into an
+        // up-front `Vec::with_capacity` below. Unbounded, they abort rather than
+        // erroring: on wasm32 `usize` is 32 bits, so a large `ply_cap` saturates
+        // to `usize::MAX` and `with_capacity` raises a capacity-overflow panic
+        // across the boundary instead of returning `invalid_options`. Even
+        // in-range values bite -- `games: 64, ply_cap: 4000` reserves
+        // 64 * 4000 * 1229 * 4 B, about 1.26 GB, against a 512 MiB budget.
+        // Bound them here so the failure is a string the caller can read.
+        if options.games > MAX_GAMES {
+            return Err(PuctError::InvalidBufferLength);
+        }
+        if options.ply_cap == 0 || options.ply_cap > MAX_PLY_CAP {
+            return Err(PuctError::InvalidPlyCap);
         }
         // `simulations == 0` must be rejected, not tolerated. With no
         // simulations every search returns empty visit counts, so
