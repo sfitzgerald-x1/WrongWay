@@ -4,6 +4,12 @@
  * reference implementation.
  *
  *     node scripts/regenerate-nn-runtime-golden.mjs [--training DIR]
+ *                                                   [--update-exporter-shapes]
+ *
+ * `--update-exporter-shapes` additionally re-captures
+ * `tests/fixtures/exporter-tensor-shapes.json` from the training checkout's real
+ * `weights.manifest.json`, which is what the exporter-drift test compares the
+ * runtime against.
  *
  * The golden pins the JS forward graph against `export_weights.reference_forward`
  * so that `tests/normal-duel-nn-runtime.test.mjs` can verify the whole graph
@@ -31,8 +37,16 @@ import {
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
 const OUT = path.join(REPO, 'tests/fixtures/nn-runtime-golden-forward-v1.json');
+const SHAPES_OUT = path.join(REPO, 'tests/fixtures/exporter-tensor-shapes.json');
 
 const argv = process.argv.slice(2);
+for (const flag of argv.filter((a) => a.startsWith('--'))) {
+  if (!['--training', '--update-exporter-shapes'].includes(flag)) {
+    console.error(`unknown flag ${flag}`);
+    process.exit(2);
+  }
+}
+const UPDATE_SHAPES = argv.includes('--update-exporter-shapes');
 const trainingFlag = argv.indexOf('--training');
 const TRAINING = trainingFlag === -1
   ? '/Users/scott/workspace/agents/wrongway-training'
@@ -91,8 +105,21 @@ flat = v.flatten(2)
 pooled = torch.cat((flat.mean(dim=2), flat.amax(dim=2),
                     flat.std(dim=2, unbiased=False)), dim=1)
 
+# The trunk above is a second implementation of the same graph, so cross-check it
+# against reference_forward rather than trusting it: recompute the policy logits
+# from this h and require them to match. Without this the pooled vector would have
+# a different provenance from the rest of the fixture, unverified.
+p = F.conv2d(h, tensors["policy.conv.weight"], tensors["policy.conv.bias"])
+WR = WC = 8
+check = torch.cat((p[:, 0].flatten(1),
+                   p[:, 1, :WR, :WC].flatten(1),
+                   p[:, 2, :WR, :WC].flatten(1)), dim=1)
+drift = float((check - logits).abs().max())
+if drift > 1e-6:
+    raise SystemExit(f"the local trunk disagrees with reference_forward by {drift}")
+
 print(json.dumps({"logits": logits[0].tolist(), "value": float(value[0]),
-                  "valuePooled": pooled[0].tolist()}))
+                  "valuePooled": pooled[0].tolist(), "trunkCrossCheck": drift}))
 `;
 
 const synthetic = syntheticWeightSet();
@@ -128,6 +155,33 @@ try {
   console.log(`wrote ${path.relative(REPO, OUT)}`);
   console.log(`  planes ${fixture.input.planes}, features ${features.length}, blob ${fixture.blob.byteLength} B (${fixture.blob.fnv1a32})`);
   console.log(`  value ${reference.value}`);
+  console.log(`  local trunk vs reference_forward: ${reference.trunkCrossCheck}`);
+  if (UPDATE_SHAPES) {
+    // Re-capture the exporter shape table from the REAL export, not from the
+    // synthetic spec -- the fixture's whole value is that it comes from the other
+    // side of the boundary.
+    const manifestPath = path.join(TRAINING, 'weights.manifest.json');
+    if (!fs.existsSync(manifestPath)) {
+      console.error(`no real export to capture: ${manifestPath}`);
+      console.error('run export_weights.py in the training checkout first.');
+      process.exit(1);
+    }
+    const real = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const shapes = {
+      note: 'Shape table only, no weights. Captured from a real export_weights.py run so'
+        + " the runtime's REQUIRED_TENSORS cannot drift from the exporter without a red"
+        + ' build. Regenerate with'
+        + ' scripts/regenerate-nn-runtime-golden.mjs --update-exporter-shapes.',
+      input: real.input,
+      architecture: real.architecture,
+      policySize: real.policySize,
+      tensors: real.tensors.map((tensor) => ({ name: tensor.name, shape: tensor.shape }))
+    };
+    fs.writeFileSync(SHAPES_OUT, `${JSON.stringify(shapes, null, 2)}\n`);
+    console.log(`wrote ${path.relative(REPO, SHAPES_OUT)}`);
+    console.log(`  ${shapes.tensors.length} tensors, ${shapes.input.planes} planes,`
+      + ` ${shapes.architecture.channels}ch/${shapes.architecture.blocks} blocks`);
+  }
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }

@@ -86,6 +86,8 @@ pub enum PuctError {
     InvalidSimulations,
     #[error("invalid_ply_cap")]
     InvalidPlyCap,
+    #[error("invalid_games")]
+    InvalidGames,
     #[error("contradictory_exploration")]
     ContradictoryExploration,
     #[error("invalid_c_puct")]
@@ -115,6 +117,7 @@ impl PuctError {
             Self::InvalidMaxConsidered => "invalid_max_considered",
             Self::InvalidSimulations => "invalid_simulations",
             Self::InvalidPlyCap => "invalid_ply_cap",
+            Self::InvalidGames => "invalid_games",
             Self::ContradictoryExploration => "contradictory_exploration",
             Self::InvalidCPuct => "invalid_c_puct",
             Self::InvalidState => "invalid_state",
@@ -381,9 +384,17 @@ pub struct PuctResult {
 }
 
 impl PuctResult {
-    /// `effectiveVisitCounts`: a search with nothing to decide or a zero budget
-    /// spends no simulations, so the raw counts sum to zero and cannot be
-    /// normalised; the played action then carries the whole target.
+    /// `effectiveVisitCounts`: a search with nothing to decide spends no
+    /// simulations, so the raw counts sum to zero and cannot be normalised; the
+    /// played action then carries the whole target. That is correct only because
+    /// there was one action to choose.
+    ///
+    /// A zero *budget* used to reach this fallback too, which made the same
+    /// one-hot the policy target at a position with ~130 legal codes. It can no
+    /// longer: `PuctTreeSearch::new` rejects `simulations < 1`, which is the
+    /// constructor every entry point funnels through -- the wasm boundary and
+    /// `SelfPlayBatch` included -- so the fallback is reachable only for the
+    /// nothing-to-decide case it is written for.
     #[must_use]
     pub fn effective_visit_counts(&self) -> Vec<(u16, u32)> {
         let total: u32 = self.visit_counts.iter().map(|(_, count)| *count).sum();
@@ -476,6 +487,9 @@ impl PuctTreeSearch {
         config.validate()?;
         if config.rows != 9 || config.columns != 9 {
             return Err(PuctError::UnsupportedBoard);
+        }
+        if params.simulations < 1 {
+            return Err(PuctError::InvalidSimulations);
         }
         if params.max_considered < 1 {
             return Err(PuctError::InvalidMaxConsidered);

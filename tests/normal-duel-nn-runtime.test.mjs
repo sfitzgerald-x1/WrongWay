@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createInitialState, applyAction, legalActionCodes, policySize } from '../js/normal-duel-engine.mjs';
-import { encodeState, legalMaskFloat } from '../js/normal-duel-nn-encoding.mjs';
+import { NN_PLANE_LAYOUT, encodeState, legalMaskFloat } from '../js/normal-duel-nn-encoding.mjs';
 import { gumbelRootSearch } from '../js/normal-duel-gumbel-search.mjs';
 import { createLcg32 } from '../js/lcg32.mjs';
 import {
@@ -71,7 +71,7 @@ const GOLDEN = JSON.parse(fs.readFileSync(
  * cross-checked against the reference, and reproducing them needs neither
  * Python nor `weights.bin`. This test can never skip.
  */
-test('forwardRaw reproduces the committed PyTorch goldens (hermetic, never skips)', () => {
+test('forwardRaw reproduces the committed PyTorch goldens (hermetic, never skips)', (t) => {
   assert.equal(GOLDEN.format, 'nn-runtime-golden-forward-v1');
 
   // The goldens are only meaningful for the blob they were computed from.
@@ -114,6 +114,12 @@ test('forwardRaw reproduces the committed PyTorch goldens (hermetic, never skips
     maxPooledDelta = Math.max(maxPooledDelta, Math.abs(actual.valuePooled[i] - GOLDEN.valuePooled[i]));
   }
   assert.ok(maxPooledDelta < 1e-5, `value-head pooling differs from the golden by ${maxPooledDelta}`);
+  // Printed so margin erosion is visible rather than silent. The bound sits far
+  // below the tightest error it must catch (sample-std, 7.5e-5) and far above the
+  // measured agreement, but per-element accumulation error grows roughly as
+  // sqrt(channels), so lifting the TODO(runtime-size) pin from 64 to 128 will
+  // narrow that gap by about 1.4x. This is the number to watch when it does.
+  t.diagnostic(`maxLogitDelta=${maxLogitDelta} valueDelta=${valueDelta} maxPooledDelta=${maxPooledDelta}`);
 
   // The goldens must actually exercise the graph: an all-zero logit vector
   // would satisfy the deltas above against an all-zero golden.
@@ -417,8 +423,11 @@ test('a single evaluate call fits the per-turn budget', (t) => {
  * boundary, and unlike the Python parity test it needs no venv and no artifact,
  * so it runs everywhere.
  *
- * Channels and blocks are exporter CLI arguments rather than drift, so only the
- * tensor names and the shapes that do not depend on them are compared.
+ * Note that channels and blocks ARE compared, via the shapes -- they are
+ * exporter CLI arguments, so re-capturing the fixture is the correct response to
+ * a red result there, and the assertion message says so separately from the
+ * graph-change case. Whoever lifts the TODO(runtime-size) pin to 128 channels
+ * will trip that assertion and should re-capture, not port a graph change.
  */
 test('the runtime demands exactly the tensors a real export produces', () => {
   const captured = JSON.parse(fs.readFileSync(
@@ -437,8 +446,25 @@ test('the runtime demands exactly the tensors a real export produces', () => {
     'the exporter and the encoder disagree about the plane count');
 
   for (const { name, shape } of captured.tensors) {
-    assert.deepEqual(required[name], shape, `shape drift on ${name}`);
+    assert.deepEqual(
+      required[name], shape,
+      `shape drift on ${name}: if only channels or blocks moved, re-capture `
+      + 'tests/fixtures/exporter-tensor-shapes.json from a real export; if the graph '
+      + 'itself changed, port it into normal-duel-nn-runtime.mjs first'
+    );
   }
+
+  // Shapes alone leave two drifts invisible, and both are silently wrong rather
+  // than loudly broken. If the exporter stopped cropping the wall planes to 8x8
+  // the policy would be 243 wide with every tensor shape unchanged, and
+  // readPolicyPlanes would read the wrong codes. If it permuted the input planes
+  // the count would still be 10 and encodeState would feed the trunk in the
+  // wrong order.
+  assert.equal(captured.policySize, POLICY_SIZE, 'the exporter policy size moved');
+  assert.deepEqual(
+    captured.input.planeOrder, NN_PLANE_LAYOUT.map((plane) => plane.name),
+    'the exporter and the encoder disagree about plane ORDER, not just count'
+  );
 });
 
 /* ------------------------------------------------------------------ *

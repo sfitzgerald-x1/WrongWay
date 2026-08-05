@@ -1,5 +1,5 @@
 {
-  "note": "Shape table only, no weights. Copied from a real export_weights.py run so the runtime's REQUIRED_TENSORS cannot drift from the exporter without a red build. Regenerate with scripts/regenerate-nn-runtime-golden.mjs --update-exporter-shapes.",
+  "note": "Shape table only, no weights. Captured from a real export_weights.py run so the runtime's REQUIRED_TENSORS cannot drift from the exporter without a red build. Regenerate with scripts/regenerate-nn-runtime-golden.mjs --update-exporter-shapes.",
   "input": {
     "columns": 9,
     "layout": "plane-major then row-major, absolute engine (r, c)",

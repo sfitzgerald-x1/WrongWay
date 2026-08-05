@@ -9,8 +9,8 @@
 
 use wrongway_normal_duel::mock_evaluator;
 use wrongway_normal_duel::selfplay::{
-    sample_visit_temperature, Exploration, SelfPlayBatch, SelfPlayOptions, RECORD_FEATURES,
-    RECORD_FLOATS, RECORD_META_FIELDS, RECORD_POLICY,
+    sample_visit_temperature, Exploration, GameOutcome, SelfPlayBatch, SelfPlayOptions,
+    RECORD_FEATURES, RECORD_FLOATS, RECORD_POLICY,
 };
 use wrongway_normal_duel::{Config, Coord, Player, Players, JUMP_RULE, RULESET};
 
@@ -36,11 +36,20 @@ struct Run {
     records: Vec<f32>,
     meta: Vec<i32>,
     count: usize,
+    outcomes: Vec<GameOutcome>,
+    plies: Vec<u64>,
 }
 
 /// Drive a whole batch to completion against the deterministic mock network.
 fn run(options: SelfPlayOptions) -> Run {
-    let config = config();
+    run_with(&config(), options)
+}
+
+/// As [`run`], but over a caller-supplied config. The tree re-derives
+/// adjudication from `config.ply_cap`, not `SelfPlayOptions::ply_cap`, so a test
+/// that wants the tree's cap arm executed has to move the one on the config.
+fn run_with(config: &Config, options: SelfPlayOptions) -> Run {
+    let config = config.clone();
     let mut batch = SelfPlayBatch::new(&config, options).expect("valid options");
     let mut scratch = vec![0.0_f32; RECORD_POLICY];
     loop {
@@ -65,6 +74,8 @@ fn run(options: SelfPlayOptions) -> Run {
         records: batch.records().to_vec(),
         meta: batch.record_meta().to_vec(),
         count,
+        outcomes: batch.outcomes(),
+        plies: batch.plies_played(),
     }
 }
 
@@ -332,7 +343,7 @@ fn oversized_games_and_ply_cap_are_rejected_rather_than_reserving_unboundedly() 
         ..SelfPlayOptions::default()
     };
     let err = SelfPlayBatch::new(&config, options.clone()).unwrap_err();
-    assert_eq!(err.reason(), "invalid_buffer_length");
+    assert_eq!(err.reason(), "invalid_games");
 
     options = SelfPlayOptions {
         ply_cap: u64::from(u32::MAX) + 1,
@@ -348,6 +359,25 @@ fn oversized_games_and_ply_cap_are_rejected_rather_than_reserving_unboundedly() 
     let err = SelfPlayBatch::new(&config, options).unwrap_err();
     assert_eq!(err.reason(), "invalid_ply_cap");
 
+    // In-range factors whose PRODUCT is out of range. This is the case the
+    // per-factor caps miss: 512 x 2048 x 1229 x 4 B is ~5.15 GB, past wasm32's
+    // address space entirely, so without a byte bound the top of the allowed
+    // range aborts instead of erroring.
+    let roomy = Config {
+        ply_cap: 2048,
+        ..config.clone()
+    };
+    let err = SelfPlayBatch::new(
+        &roomy,
+        SelfPlayOptions {
+            games: 512,
+            ply_cap: 2048,
+            ..SelfPlayOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert_eq!(err.reason(), "invalid_buffer_length");
+
     // The canonical shard shape stays accepted.
     let ok = SelfPlayOptions {
         games: 32,
@@ -357,41 +387,76 @@ fn oversized_games_and_ply_cap_are_rejected_rather_than_reserving_unboundedly() 
     assert!(SelfPlayBatch::new(&config, ok).is_ok());
 }
 
-/// The search tree re-derives adjudication itself (goal, then repetition, then
-/// ply cap) rather than asking the engine. The JS parity grid samples states at
-/// plies 4-44 with at most 48 simulations, so a tree rooted there cannot descend
-/// to `ply_cap = 200`: the cap arm is never executed in that grid, and a missed
-/// cap is silent -- the game just keeps being scored as a continuation.
+/// The outer loop's stop and the game-level cap adjudication.
 ///
-/// Rooting a batch at a `ply_cap` the tree reaches during descent exercises it.
+/// This deliberately does NOT claim to cover the search tree's cap arm. It once
+/// did, and the claim was false twice over: setting `SelfPlayOptions::ply_cap`
+/// moves only this loop's stop, and even moving the cap onto the config does not
+/// discriminate, because the game loop adjudicates `config.ply_cap` itself -- so
+/// the outcomes below are produced with or without `create_child`'s cap branch.
+/// Both earlier versions passed with that branch stubbed to `false`.
+///
+/// The tree's arm is covered in `tests/tree_ply_cap.rs`, which counts leaf
+/// evaluations and does fail when the branch is removed (1 vs 65). What is worth
+/// pinning here is the pairing this file owns: games stop at the config cap and
+/// are scored `Draw` there, and the option can stop a game earlier.
 #[test]
-fn the_tree_adjudicates_the_ply_cap_it_descends_into() {
-    // A cap low enough that a 64-simulation tree descends past it.
-    let out = run(SelfPlayOptions {
-        games: 4,
-        simulations: 64,
-        max_considered: 8,
-        ply_cap: 12,
-        seed_base: 4321,
-        ..SelfPlayOptions::default()
-    });
+fn games_stop_at_the_config_cap_and_are_scored_as_draws() {
+    const CAP: u64 = 12;
+    let capped = Config {
+        ply_cap: CAP,
+        ..config()
+    };
+
+    let out = run_with(
+        &capped,
+        SelfPlayOptions {
+            games: 6,
+            simulations: 64,
+            max_considered: 8,
+            ply_cap: 64, // above CAP: the config is what binds here
+            seed_base: 4321,
+            ..SelfPlayOptions::default()
+        },
+    );
     assert!(out.count > 0, "the batch recorded nothing");
 
-    // Every game stopped before the cap, and `ply` is absolute, so this also
-    // pins that the cap is not being counted from the opening.
-    let max_ply = out
-        .meta
-        .chunks_exact(RECORD_META_FIELDS)
-        .map(|chunk| chunk[1])
-        .max()
-        .expect("at least one record");
-    assert!(
-        max_ply < 12,
-        "a record exists at ply {max_ply}, at or beyond the cap of 12"
-    );
+    let mut drew_at_cap = 0;
+    for (game, (outcome, ply)) in out.outcomes.iter().zip(out.plies.iter()).enumerate() {
+        assert!(
+            *ply <= CAP,
+            "game {game} reached ply {ply}, past the config cap of {CAP}"
+        );
+        if *ply == CAP {
+            assert_eq!(
+                *outcome,
+                GameOutcome::Draw,
+                "game {game} stopped at the cap but was not scored as a draw"
+            );
+            drew_at_cap += 1;
+        }
+    }
+    assert!(drew_at_cap > 0, "no game reached the cap");
 
-    // Targets stay proper distributions right up against the cap. The arm that
-    // would degrade silently is the one scoring a capped position as ongoing.
+    // The option can only stop a game *earlier* than the config cap.
+    let short = run_with(
+        &capped,
+        SelfPlayOptions {
+            games: 6,
+            simulations: 64,
+            max_considered: 8,
+            ply_cap: 5,
+            seed_base: 4321,
+            ..SelfPlayOptions::default()
+        },
+    );
+    for (game, ply) in short.plies.iter().enumerate() {
+        assert!(
+            *ply <= 5,
+            "game {game} ran to ply {ply} against an option cap of 5"
+        );
+    }
+
     for record in out.records.chunks_exact(RECORD_FLOATS) {
         let target = &record[RECORD_FEATURES..RECORD_FEATURES + RECORD_POLICY];
         let sum: f32 = target.iter().sum();

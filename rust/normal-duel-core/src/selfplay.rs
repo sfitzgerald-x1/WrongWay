@@ -547,15 +547,22 @@ pub struct SelfPlayBatch {
     meta: Vec<i32>,
 }
 
-/// Upper bounds on the two options that drive the up-front record reservation.
+/// Bounds on the options that drive the up-front record reservation.
 ///
-/// Sized generously against real use -- the cluster runs 32 games per shard and
-/// the canonical `ply_cap` is 200 -- so these reject typos and hostile input
-/// without constraining anything a caller legitimately wants. At the maxima the
-/// reservation is 512 * 2048 * 1229 * 4 B, which is still large, but it is now a
-/// reachable ceiling rather than an unbounded multiply.
+/// The per-factor caps are cheap early rejections and are NOT the real bound:
+/// 512 games x 2048 plies x 1229 floats x 4 B is about 5.15 GB, past wasm32's
+/// entire address space, so at the top of the range those two alone still let
+/// `Vec::with_capacity` abort instead of returning a readable error -- exactly
+/// what the bound exists to prevent. [`MAX_RECORD_BYTES`] is what holds the line.
 const MAX_GAMES: usize = 512;
 const MAX_PLY_CAP: u64 = 2048;
+/// Ceiling on the up-front `records` reservation, in bytes. 256 MiB sits under
+/// the documented 512 MiB wasm memory profile with room for the trunk, the meta
+/// buffer and the JS heap. The cluster's shard shape -- 32 games at `ply_cap`
+/// 200 -- reserves about 31 MiB, so this is roughly 8x real use.
+const MAX_RECORD_BYTES: usize = 256 * 1024 * 1024;
+/// Width of a record float, for the byte bound above.
+const BYTES_PER_F32: usize = 4;
 
 impl SelfPlayBatch {
     pub fn new(config: &Config, options: SelfPlayOptions) -> Result<Self> {
@@ -575,7 +582,7 @@ impl SelfPlayBatch {
         // 64 * 4000 * 1229 * 4 B, about 1.26 GB, against a 512 MiB budget.
         // Bound them here so the failure is a string the caller can read.
         if options.games > MAX_GAMES {
-            return Err(PuctError::InvalidBufferLength);
+            return Err(PuctError::InvalidGames);
         }
         if options.ply_cap == 0 || options.ply_cap > MAX_PLY_CAP {
             return Err(PuctError::InvalidPlyCap);
@@ -623,10 +630,19 @@ impl SelfPlayBatch {
         let games = (0..options.games)
             .map(|index| Game::start(config, &options, index))
             .collect::<Result<Vec<_>>>()?;
+        // Reserve against the cap a game can actually reach. Adjudication stops
+        // at `config.ply_cap`, so an option cap above it can never be reached and
+        // reserving for it wastes memory a caller cannot use -- today by up to
+        // 10x. The bound below is then in bytes, because the per-factor caps
+        // multiply to ~5.15 GB and would abort rather than error.
+        let effective_ply_cap = options.ply_cap.min(config.ply_cap);
         let positions = options
             .games
-            .saturating_mul(usize::try_from(options.ply_cap).unwrap_or(usize::MAX));
+            .saturating_mul(usize::try_from(effective_ply_cap).unwrap_or(usize::MAX));
         let record_capacity = positions.saturating_mul(RECORD_FLOATS);
+        if record_capacity.saturating_mul(BYTES_PER_F32) > MAX_RECORD_BYTES {
+            return Err(PuctError::InvalidBufferLength);
+        }
         let meta_capacity = positions.saturating_mul(RECORD_META_FIELDS);
         Ok(Self {
             config: config.clone(),
