@@ -292,6 +292,92 @@ function resolveNodeBudget({ candidate, baseline, nodeBudget }) {
 }
 
 /**
+ * How many games of one evaluation may be in flight at once.
+ *
+ * Games were played strictly one at a time, which made every network evaluation
+ * a round trip carrying a single position: a 48-ply game at 128 simulations is
+ * ~6,144 sequential round trips, ~32s of pure latency per game against 42-55s
+ * observed. Self-play has run 32 games per worker concurrently for exactly this
+ * reason since it was written; evaluation never inherited it.
+ *
+ * 32 is that same number, so the two halves of the pipeline present the same
+ * shape of batch to the same inference server. It is a *ceiling*, clamped to the
+ * number of games, so a 4-game evaluation still starts 4 games and not 32.
+ *
+ * This is a scheduling knob and nothing else. It cannot change a result (see
+ * `evaluateCheckpoint`), so it is safe to read from the environment: a milestone
+ * that sets it differently is still comparable with one that does not.
+ */
+export const DEFAULT_GAME_CONCURRENCY = 32;
+
+function resolveConcurrency(explicit, gameCount) {
+  const source = explicit !== undefined
+    ? explicit
+    : process.env.WW_EVAL_GAME_CONCURRENCY === undefined
+      ? DEFAULT_GAME_CONCURRENCY
+      : Number(process.env.WW_EVAL_GAME_CONCURRENCY);
+  // A malformed limit is not silently rounded to 1 (which would restore the old
+  // sequential behaviour and read as "concurrency did not help") nor to the
+  // default (which would ignore what the operator asked for).
+  const limit = positiveInteger(source, 'invalid_game_concurrency');
+  return Math.min(limit, Math.max(1, gameCount));
+}
+
+/**
+ * Run `jobs` through `runMatch` with at most `concurrency` in flight, returning
+ * results indexed by job, never by completion order.
+ *
+ * `runMatch` is the audited path for legality, forfeits and adjudication, so it
+ * is called here exactly as the sequential loop called it — same arguments, same
+ * module. Nothing about a match is reimplemented; only the `await` moved.
+ *
+ * Error semantics are kept deterministic on purpose. Sequentially, the first
+ * failing game aborted the evaluation and its error was the one thrown; with
+ * games in flight several can fail and they can fail in any order. So every
+ * worker is allowed to settle and the rejection re-raised is the one belonging to
+ * the *lowest job index*, which is the game the sequential loop would have
+ * reached first. Awaiting all workers before throwing also means no in-flight
+ * match's rejection lands after the caller has moved on as an unhandled one.
+ */
+async function playGames({ jobs, config, mode, nodeBudget, concurrency }) {
+  const results = new Array(jobs.length);
+  const failures = new Array(jobs.length).fill(undefined);
+  let next = 0;
+
+  const worker = async () => {
+    for (;;) {
+      const index = next;
+      next += 1;
+      if (index >= jobs.length) return;
+      const job = jobs[index];
+      try {
+        // eslint-disable-next-line no-await-in-loop -- a worker's own games are
+        // sequential; the concurrency is across workers.
+        results[index] = await runMatch({
+          config,
+          opening: job.opening,
+          engines: job.engines,
+          contenderSide: job.contenderSide,
+          gameInPair: job.gameInPair,
+          seed: job.matchSeed,
+          mode,
+          ...(mode === REGRESSION_MODE ? { nodeBudget } : {})
+        });
+      } catch (error) {
+        failures[index] = error;
+        return;
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: concurrency }, worker));
+
+  const firstFailure = failures.findIndex((error) => error !== undefined);
+  if (firstFailure !== -1) throw failures[firstFailure];
+  return results;
+}
+
+/**
  * Play `openingLimit` book openings as *pairs*: for every opening the candidate
  * plays once as A and once as B against the same baseline, so a side bias in the
  * opening cannot be read as strength. Both games of a pair go through the
@@ -313,9 +399,25 @@ function resolveNodeBudget({ candidate, baseline, nodeBudget }) {
  * `nodeBudget` is the shared per-move budget in regression mode; see
  * `resolveNodeBudget`. Strength mode is deadline-scored and passes no node
  * budget to the harness, so none is resolved there.
+ *
+ * `concurrency` is how many of those games may be in flight at once; see
+ * `resolveConcurrency`. It changes the order games *execute* in and nothing
+ * else — every game owns its opening, its match seed and its own sessions, so
+ * no game can observe another. Results are collected by job index, not by
+ * completion order, so the summary is byte-identical at any concurrency.
+ *
+ * `collectResults`, when supplied, is handed the raw per-game harness results in
+ * canonical job order after every game has been played. It is a read-only tap for
+ * callers that shard the opening book across PROCESSES and have to merge the
+ * partials themselves: the paired-cluster interval clusters by `pairId` over the
+ * whole result set, so it cannot be reconstructed from per-shard summaries and
+ * the merging process needs the games, not the totals. It cannot change what is
+ * played or what is returned, and is never consulted by the summary below.
  */
 export async function evaluateCheckpoint({
-  config, book, candidate, baseline, openingLimit, seed, nodeBudget, mode = REGRESSION_MODE
+  config, book, candidate, baseline, openingLimit, seed, nodeBudget, concurrency,
+  collectResults,
+  mode = REGRESSION_MODE
 }) {
   const checkedConfig = canonical9x9(config);
   assertDescriptor(candidate, 'candidate');
@@ -345,32 +447,42 @@ export async function evaluateCheckpoint({
     ? resolveNodeBudget({ candidate, baseline, nodeBudget })
     : undefined;
 
-  const results = [];
-
+  // The full game list, in the canonical order the summary must see it: opening
+  // by opening, candidate as A then as B. Built before anything is played so the
+  // order is a property of the book and not of who finishes first.
+  const jobs = [];
   for (const opening of openings) {
     for (const contenderSide of ['A', 'B']) {
       const gameInPair = contenderSide === 'A' ? 0 : 1;
-      const engines = contenderSide === 'A'
-        ? { A: candidate, B: baseline }
-        : { A: baseline, B: candidate };
-      // Match seed is a pure function of (evaluation seed, opening, side): no
-      // counter, no clock, so a re-run of one opening reproduces exactly.
-      const matchSeed = seedFromDigest(
-        `${CHECKPOINT_FORMAT}|match|${seed}|${opening.id}|${contenderSide}|${gameInPair}`
-      );
-      // eslint-disable-next-line no-await-in-loop -- games are sequential by design.
-      const result = await runMatch({
-        config: checkedConfig,
+      jobs.push({
         opening,
-        engines,
         contenderSide,
         gameInPair,
-        seed: matchSeed,
-        mode,
-        ...(mode === REGRESSION_MODE ? { nodeBudget: resolvedNodeBudget } : {})
+        engines: contenderSide === 'A'
+          ? { A: candidate, B: baseline }
+          : { A: baseline, B: candidate },
+        // Match seed is a pure function of (evaluation seed, opening, side): no
+        // counter, no clock, so a re-run of one opening reproduces exactly. In
+        // particular it does not depend on the job's position in the queue, so
+        // concurrency cannot renumber a seed.
+        matchSeed: seedFromDigest(
+          `${CHECKPOINT_FORMAT}|match|${seed}|${opening.id}|${contenderSide}|${gameInPair}`
+        )
       });
-      results.push(result);
     }
+  }
+
+  const results = await playGames({
+    jobs,
+    config: checkedConfig,
+    mode,
+    nodeBudget: resolvedNodeBudget,
+    concurrency: resolveConcurrency(concurrency, jobs.length)
+  });
+
+  if (collectResults !== undefined) {
+    if (typeof collectResults !== 'function') fail('invalid_collect_results');
+    collectResults(results);
   }
 
   // Wins, losses, draws, side splits, the paired-cluster interval and the

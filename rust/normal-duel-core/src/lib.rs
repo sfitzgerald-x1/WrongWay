@@ -13,7 +13,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 
+pub mod js_math;
+pub mod mock_evaluator;
+pub mod puct;
 mod search;
+pub mod selfplay;
 
 pub use search::{search_for, search_nodes, SearchDiagnostics, SearchOptions, SearchReport};
 
@@ -395,6 +399,15 @@ impl Wall {
     }
 
     #[must_use]
+    /// The anchor square, i.e. the upper-left of the two cells the wall's
+    /// first blocked edge separates.
+    const fn coord(self) -> Coord {
+        Coord {
+            r: self.r,
+            c: self.c,
+        }
+    }
+
     fn anchor_index(self, config: &Config) -> usize {
         self.r as usize * (config.columns as usize - 1) + self.c as usize
     }
@@ -701,11 +714,42 @@ impl Board {
         board
     }
 
+    /// Rebuild the edge bitboards straight off the anchor bits. This is on the
+    /// hot path via [`Board::from_position`], so it iterates set bits rather
+    /// than materializing the wall list.
     fn rebuild_blocked_edges(&mut self, config: &Config) {
         self.blocked_down = 0;
         self.blocked_right = 0;
-        for wall in self.walls.walls(config) {
-            self.add_wall_edges(config, wall);
+        let anchor_columns = config.columns.saturating_sub(1) as usize;
+        if anchor_columns == 0 {
+            return;
+        }
+        // `walls()` only ever looked at anchors below `anchors_per_axis()`;
+        // keep ignoring any stray high bits so behaviour is unchanged.
+        let anchors = config.anchors_per_axis();
+        let valid = if anchors >= 64 {
+            u64::MAX
+        } else {
+            (1_u64 << anchors) - 1
+        };
+        for orientation in [Orientation::Horizontal, Orientation::Vertical] {
+            let mut bits = valid
+                & match orientation {
+                    Orientation::Horizontal => self.walls.horizontal,
+                    Orientation::Vertical => self.walls.vertical,
+                };
+            while bits != 0 {
+                let anchor = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                self.add_wall_edges(
+                    config,
+                    Wall {
+                        orientation,
+                        r: (anchor / anchor_columns) as u8,
+                        c: (anchor % anchor_columns) as u8,
+                    },
+                );
+            }
         }
     }
 
@@ -837,6 +881,58 @@ impl Board {
         }
     }
 
+    /// Wall-aware distance from *every* cell to `goal_row`, written into
+    /// `out[cell]`, or `None` where walls seal that cell off from the goal row
+    /// entirely.
+    ///
+    /// This is [`Board::shortest_distance`] run backwards and all at once. The
+    /// move graph is undirected — `blocked_down`/`blocked_right` cut an edge
+    /// for both of the cells it joins — so the distance from a cell to the
+    /// nearest goal-row square is exactly the depth at which a BFS seeded with
+    /// the whole goal row arrives at that cell. One sweep, rather than the 81
+    /// single-source calls the encoder would otherwise need per plane.
+    ///
+    /// The frontier expansion below is character-for-character the one in
+    /// `shortest_distance`; `goal_distance_field_agrees_with_shortest_distance`
+    /// holds the two to the same answers so they cannot drift apart.
+    fn goal_distance_field(&self, config: &Config, goal_row: u8, out: &mut [Option<u8>]) {
+        let columns = config.columns as usize;
+        let valid = (1_u128 << config.cells()) - 1;
+        let mut right_column = 0_u128;
+        for row in 0..config.rows {
+            right_column |= 1_u128
+                << square(
+                    config,
+                    Coord {
+                        r: row,
+                        c: config.columns - 1,
+                    },
+                );
+        }
+
+        out[..config.cells()].fill(None);
+        let mut frontier = ((1_u128 << columns) - 1) << (usize::from(goal_row) * columns);
+        let mut seen = frontier;
+        let mut distance = 0_u8;
+        loop {
+            let mut bits = frontier;
+            while bits != 0 {
+                out[bits.trailing_zeros() as usize] = Some(distance);
+                bits &= bits - 1;
+            }
+            let upward = (frontier >> columns) & !self.blocked_down;
+            let downward = ((frontier & !self.blocked_down) << columns) & valid;
+            let leftward = (frontier >> 1) & !right_column & !self.blocked_right;
+            let rightward = ((frontier & !right_column & !self.blocked_right) << 1) & valid;
+            frontier = (upward | downward | leftward | rightward) & !seen;
+            if frontier == 0 {
+                return;
+            }
+            seen |= frontier;
+            distance += 1;
+        }
+    }
+
     fn candidate_geometry_ok(self, config: &Config, candidate: Wall) -> bool {
         if self.walls.contains_valid(candidate, config) {
             return false;
@@ -948,7 +1044,238 @@ pub fn normalize_position(config: &Config, input: &Position) -> Result<Position>
     })
 }
 
+/// Policy codes on the canonical 9x9 board: 81 pawn squares plus 2 x 64 wall
+/// anchors. A caller buffer of this length can never be overrun by
+/// [`legal_action_codes_fast`].
+pub const MAX_POLICY_CODES: usize = 209;
+
+/// Upper bound on `Config::cells()`, fixed by the `u128` bitboards every
+/// wall/path routine here is built on. Lets the encoder hold a per-cell
+/// scratch buffer on the stack instead of allocating on the hot path.
+pub const MAX_BOARD_CELLS: usize = 128;
+
+/// Instrumentation for the shortest-path prefilter, so callers (and the
+/// benchmark) can report how much search the filter actually skipped.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FastLegalStats {
+    /// Wall anchors examined at all (0 when the mover has no stock left).
+    pub candidates: u32,
+    /// Candidates that survived the geometry test and so reached the filter.
+    pub geometry_ok: u32,
+    /// Candidates that cut at least one player's stored shortest path.
+    pub path_touching: u32,
+    /// Real `has_path` calls run, excluding the two per-node path searches.
+    pub searches: u32,
+}
+
 impl Board {
+    /// One shortest path from `from` to `goal_row`, returned as the edges it
+    /// uses in the `(down, right)` mask form [`Board::edge_blocked`] reads.
+    ///
+    /// Returns `None` when no path exists. Fixed-size stack scratch only: the
+    /// largest supported board has 81 squares.
+    fn shortest_path_edges(
+        self,
+        config: &Config,
+        from: Coord,
+        goal_row: u8,
+    ) -> Option<(u128, u128)> {
+        let columns = config.columns as usize;
+        let start = square(config, from);
+        let mut previous = [u8::MAX; 81];
+        let mut queue = [0_u8; 81];
+        let mut tail = 1_usize;
+        let mut head = 0_usize;
+        queue[0] = start as u8;
+        let mut seen = 1_u128 << start;
+        let mut reached = None;
+        while head < tail {
+            let current = usize::from(queue[head]);
+            head += 1;
+            let coord = Coord {
+                r: (current / columns) as u8,
+                c: (current % columns) as u8,
+            };
+            if coord.r == goal_row {
+                reached = Some(current);
+                break;
+            }
+            for (dr, dc) in DIRECTIONS {
+                let Some(next) = offset(coord, dr, dc) else {
+                    continue;
+                };
+                if !in_bounds(config, next) {
+                    continue;
+                }
+                let index = square(config, next);
+                if seen & (1_u128 << index) != 0 || self.edge_blocked(config, coord, next) {
+                    continue;
+                }
+                seen |= 1_u128 << index;
+                previous[index] = current as u8;
+                queue[tail] = index as u8;
+                tail += 1;
+            }
+        }
+        let mut node = reached?;
+        let (mut down, mut right) = (0_u128, 0_u128);
+        while node != start {
+            let parent = usize::from(previous[node]);
+            if node / columns == parent / columns {
+                right |= 1_u128 << node.min(parent);
+            } else {
+                down |= 1_u128 << node.min(parent);
+            }
+            node = parent;
+        }
+        Some((down, right))
+    }
+
+    /// The edges a candidate wall would block, in the same mask form
+    /// [`Board::shortest_path_edges`] returns. Mirrors [`Board::add_wall_edges`].
+    fn candidate_edge_mask(config: &Config, candidate: Wall) -> (u128, u128) {
+        match candidate.orientation {
+            Orientation::Horizontal => (
+                (1_u128 << square(config, candidate.coord()))
+                    | (1_u128
+                        << square(
+                            config,
+                            Coord {
+                                r: candidate.r,
+                                c: candidate.c + 1,
+                            },
+                        )),
+                0,
+            ),
+            Orientation::Vertical => (
+                0,
+                (1_u128 << square(config, candidate.coord()))
+                    | (1_u128
+                        << square(
+                            config,
+                            Coord {
+                                r: candidate.r + 1,
+                                c: candidate.c,
+                            },
+                        )),
+            ),
+        }
+    }
+
+    /// Write every legal policy code for this position into `out`, in
+    /// ascending code order, allocating nothing.
+    ///
+    /// The wall loop uses an exact prefilter rather than the two `has_path`
+    /// calls per candidate that [`Board::candidate_is_legal`] runs. Each
+    /// player's current shortest path is computed once; a candidate that
+    /// blocks no edge of that path leaves the path intact, so a path provably
+    /// still exists and no search is needed. Only a candidate that cuts a
+    /// stored path is searched, and only for the player whose path it cut.
+    ///
+    /// Returns the number of codes written. `out` must hold at least
+    /// `config.policy_size()` entries.
+    fn legal_codes_into(
+        self,
+        config: &Config,
+        pawns: Players<Coord>,
+        stock: Players<u64>,
+        turn: Player,
+        out: &mut [u16],
+        stats: &mut FastLegalStats,
+    ) -> usize {
+        let mut count = 0_usize;
+
+        // Pawn codes are all below `cells` and wall codes all at or above it,
+        // so emitting every pawn destination first keeps `out` ascending.
+        let mover = *pawns.get(turn);
+        let opponent = *pawns.get(turn.other());
+        let mut squares = [0_u16; 8];
+        let mut found = 0_usize;
+        for (dr, dc) in DIRECTIONS {
+            let Some(adjacent) = offset(mover, dr, dc) else {
+                continue;
+            };
+            if !in_bounds(config, adjacent) || self.edge_blocked(config, mover, adjacent) {
+                continue;
+            }
+            if adjacent != opponent {
+                squares[found] = square(config, adjacent) as u16;
+                found += 1;
+                continue;
+            }
+            for (exit_r, exit_c) in DIRECTIONS {
+                let Some(destination) = offset(opponent, exit_r, exit_c) else {
+                    continue;
+                };
+                if destination == mover
+                    || !in_bounds(config, destination)
+                    || self.edge_blocked(config, opponent, destination)
+                {
+                    continue;
+                }
+                let code = square(config, destination) as u16;
+                if !squares[..found].contains(&code) {
+                    squares[found] = code;
+                    found += 1;
+                }
+            }
+        }
+        squares[..found].sort_unstable();
+        out[..found].copy_from_slice(&squares[..found]);
+        count += found;
+
+        if *stock.get(turn) == 0 {
+            return count;
+        }
+        let (Some((down_a, right_a)), Some((down_b, right_b))) = (
+            self.shortest_path_edges(config, pawns.a, config.goal_rows.a),
+            self.shortest_path_edges(config, pawns.b, config.goal_rows.b),
+        ) else {
+            // A player is already walled in, so every candidate is illegal —
+            // the same answer `candidate_is_legal` gives.
+            return count;
+        };
+
+        // `H` anchors then `V` anchors, each row-major: already policy order.
+        for orientation in [Orientation::Horizontal, Orientation::Vertical] {
+            for r in 0..config.rows - 1 {
+                for c in 0..config.columns - 1 {
+                    let candidate = Wall { orientation, r, c };
+                    stats.candidates += 1;
+                    if !self.candidate_geometry_ok(config, candidate) {
+                        continue;
+                    }
+                    stats.geometry_ok += 1;
+                    let (down, right) = Self::candidate_edge_mask(config, candidate);
+                    let cuts_a = (down & down_a) | (right & right_a) != 0;
+                    let cuts_b = (down & down_b) | (right & right_b) != 0;
+                    if cuts_a || cuts_b {
+                        stats.path_touching += 1;
+                        let mut next = self;
+                        let inserted = next.walls.insert_valid(candidate, config);
+                        debug_assert!(inserted, "geometry-checked candidate is in bounds");
+                        next.add_wall_edges(config, candidate);
+                        if cuts_a {
+                            stats.searches += 1;
+                            if !next.has_path(config, pawns.a, config.goal_rows.a) {
+                                continue;
+                            }
+                        }
+                        if cuts_b {
+                            stats.searches += 1;
+                            if !next.has_path(config, pawns.b, config.goal_rows.b) {
+                                continue;
+                            }
+                        }
+                    }
+                    out[count] = candidate.policy_code(config) as u16;
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
     fn candidate_geometry_ok_except_self(self, config: &Config, wall: Wall) -> bool {
         let mut without = self;
         let removed = without.walls.remove_valid(wall, config);
@@ -1164,6 +1491,218 @@ pub fn legal_position_action_mask(config: &Config, position: &Position) -> Resul
         mask[code] = 1;
     }
     Ok(mask)
+}
+
+/// Allocation-free legal-action generation for an already normalized position.
+///
+/// Writes the legal policy codes into `out` in ascending code order and
+/// returns how many were written; `out` must hold at least
+/// `config.policy_size()` entries ([`MAX_POLICY_CODES`] always suffices).
+/// Nothing is heap-allocated: no wall text is formatted and no intermediate
+/// vector is built or sorted.
+///
+/// The result set is identical to [`legal_position_action_codes`]; only the
+/// amount of pathfinding differs. See [`Board::legal_codes_into`] for why the
+/// shortest-path prefilter is exact rather than a heuristic.
+///
+/// `position` is expected to already satisfy [`normalize_position`]. The
+/// configuration and buffer are still checked, and duplicate wall text is
+/// still rejected, but position invariants are not re-derived here — that is
+/// the allocation this function exists to avoid.
+pub fn legal_action_codes_fast(
+    config: &Config,
+    position: &Position,
+    out: &mut [u16],
+) -> Result<usize> {
+    Ok(legal_action_codes_fast_stats(config, position, out)?.0)
+}
+
+/// [`legal_action_codes_fast`] plus prefilter instrumentation.
+pub fn legal_action_codes_fast_stats(
+    config: &Config,
+    position: &Position,
+    out: &mut [u16],
+) -> Result<(usize, FastLegalStats)> {
+    config.validate()?;
+    if out.len() < config.policy_size() {
+        return Err(NormalDuelError::InvalidActionCode);
+    }
+    if !in_bounds(config, position.pawns.a) || !in_bounds(config, position.pawns.b) {
+        return Err(NormalDuelError::InvalidPosition);
+    }
+    let board = Board::from_position(config, position)?;
+    let mut stats = FastLegalStats::default();
+    let count = board.legal_codes_into(
+        config,
+        position.pawns,
+        position.stock,
+        position.turn,
+        out,
+        &mut stats,
+    );
+    Ok((count, stats))
+}
+
+/// Plane order of the Stage 4 network input, matching `NN_PLANE_LAYOUT` in
+/// `js/normal-duel-nn-encoding.mjs` index for index.
+pub const NN_PLANE_LAYOUT: [&str; 10] = [
+    "mover_pawn",
+    "opponent_pawn",
+    "wall_horizontal",
+    "wall_vertical",
+    "mover_stock",
+    "opponent_stock",
+    "goal_proximity",
+    "side_to_move",
+    "mover_path_distance",
+    "opponent_path_distance",
+];
+
+/// Value written into the two path-distance planes for a cell with no
+/// wall-legal route to the goal row at all.
+///
+/// Unreachable is not "very far", it is a different thing, but the planes have
+/// one channel each and every other plane lives in [0, 1], so it has to be
+/// spelled as a distance. 1.0 — the top of the range — keeps the ordering
+/// monotone: no reachable cell ever scores above it. It is not a *reserved*
+/// value; a cell at the maximum distance of `cells - 1` steps would normalise
+/// to 1.0 as well. That collision is accepted rather than engineered around,
+/// because a route that long cannot occur under the wall budget, and the two
+/// cases mean nearly the same thing to the trunk in any case.
+pub const NN_UNREACHABLE_DISTANCE: f32 = 1.0;
+
+pub const NN_INPUT_PLANES: usize = NN_PLANE_LAYOUT.len();
+
+/// Encode a game state as `NN_INPUT_PLANES * rows * columns` floats, a port of
+/// `encodeState` in `js/normal-duel-nn-encoding.mjs`.
+///
+/// Only `state.position` is read, so this is a thin wrapper over
+/// [`encode_position_into`]. Unlike the JavaScript, the state is not
+/// re-validated here: validation allocates, and this is the hot path. Callers
+/// must pass a state they already trust.
+pub fn encode_state_into(config: &Config, state: &GameState, out: &mut [f32]) -> Result<()> {
+    encode_position_into(config, &state.position, out)
+}
+
+/// The [`encode_state_into`] body, operating on the position directly.
+///
+/// The frame is absolute: every plane is indexed by engine `(r, c)` with no
+/// mirroring, because the policy codes it must line up with are absolute.
+/// Planes 0/1 and 4/5 are mover-relative only in the sense of *which* plane a
+/// value lands in — no coordinate is ever moved. See the module comment in
+/// `js/normal-duel-nn-encoding.mjs`.
+///
+/// Writes into the caller's buffer, which must be exactly
+/// `NN_INPUT_PLANES * config.cells()` long, and allocates nothing.
+pub fn encode_position_into(config: &Config, position: &Position, out: &mut [f32]) -> Result<()> {
+    config.validate()?;
+    // Stage 4's architecture was measured on the canonical 9x9 board only,
+    // matching the JS `unsupported_board` guard.
+    if config.rows != 9 || config.columns != 9 {
+        return Err(NormalDuelError::InvalidConfig);
+    }
+    let cells = config.cells();
+    if out.len() != NN_INPUT_PLANES * cells {
+        return Err(NormalDuelError::InvalidPosition);
+    }
+    if !in_bounds(config, position.pawns.a) || !in_bounds(config, position.pawns.b) {
+        return Err(NormalDuelError::InvalidPosition);
+    }
+    let board = Board::from_position(config, position)?;
+    encode_board_into(
+        config,
+        &board,
+        position.pawns,
+        position.stock,
+        position.turn,
+        out,
+    );
+    Ok(())
+}
+
+fn encode_board_into(
+    config: &Config,
+    board: &Board,
+    pawns: Players<Coord>,
+    stock: Players<u64>,
+    turn: Player,
+    out: &mut [f32],
+) {
+    let cells = config.cells();
+    let columns = config.columns as usize;
+    let opponent = turn.other();
+
+    // The four sparse planes are the caller's buffer, not a fresh array.
+    out[..4 * cells].fill(0.0);
+    out[square(config, *pawns.get(turn))] = 1.0;
+    out[cells + square(config, *pawns.get(opponent))] = 1.0;
+
+    // `blocked_down`/`blocked_right` are exactly the engine's `edgeBlocked`
+    // answers for the down and right edge of each cell, which is what the JS
+    // reads back out of the engine one edge at a time.
+    let (horizontal, vertical) = (2 * cells, 3 * cells);
+    for r in 0..config.rows {
+        for c in 0..config.columns {
+            let cell = square(config, Coord { r, c });
+            if r + 1 < config.rows && board.blocked_down & (1_u128 << cell) != 0 {
+                out[horizontal + cell] = 1.0;
+            }
+            if c + 1 < config.columns && board.blocked_right & (1_u128 << cell) != 0 {
+                out[vertical + cell] = 1.0;
+            }
+        }
+    }
+
+    // Divide in f64 and round once on store, the way a JS `Float32Array`
+    // assignment does, so the bit patterns agree exactly.
+    let scale = |player: Player| -> f32 {
+        let initial = *config.initial_stock.get(player);
+        if initial > 0 {
+            (*stock.get(player) as f64 / initial as f64) as f32
+        } else {
+            0.0
+        }
+    };
+    out[4 * cells..5 * cells].fill(scale(turn));
+    out[5 * cells..6 * cells].fill(scale(opponent));
+
+    let goal_row = *config.goal_rows.get(turn);
+    let span = f64::from(config.rows - 1);
+    let base = 6 * cells;
+    for r in 0..config.rows {
+        let value = ((span - f64::from(r.abs_diff(goal_row))) / span) as f32;
+        let row = base + usize::from(r) * columns;
+        out[row..row + columns].fill(value);
+    }
+
+    // Whose turn it is is not recoverable from an absolute frame, so state it.
+    out[7 * cells..8 * cells].fill(if turn == Player::A { 1.0 } else { 0.0 });
+
+    // Planes 8/9: the wall-aware shortest-path distance from each cell to the
+    // mover's goal row and to the opponent's, normalised by the longest path
+    // the board can hold (`cells - 1` steps) so both land in [0, 1].
+    //
+    // This is the quantity the classical eval is built out of — its shortest
+    // path term carries weight 100 against 12/6/8 for everything else — handed
+    // to the trunk directly instead of left for it to rediscover with a stack
+    // of 3x3 convolutions. Like planes 0/1 and 4/5 these are mover-relative by
+    // plane SELECTION only: no coordinate moves, so the absolute frame the
+    // action codes live in is untouched.
+    //
+    // Divided in f64 and rounded once on store, the way a JS `Float32Array`
+    // assignment does, so the bit patterns agree with `encodeState` exactly.
+    let mut field = [None::<u8>; MAX_BOARD_CELLS];
+    let longest_path = (cells - 1) as f64;
+    for (slot, player) in [turn, opponent].into_iter().enumerate() {
+        board.goal_distance_field(config, *config.goal_rows.get(player), &mut field);
+        let base = (8 + slot) * cells;
+        for cell in 0..cells {
+            out[base + cell] = match field[cell] {
+                Some(distance) => (f64::from(distance) / longest_path) as f32,
+                None => NN_UNREACHABLE_DISTANCE,
+            };
+        }
+    }
 }
 
 pub fn adjudicate(
@@ -1836,6 +2375,50 @@ impl SearchPosition {
             blocked_down: self.blocked_down,
             blocked_right: self.blocked_right,
         }
+    }
+
+    /// The fully allocation-free form of [`legal_action_codes_fast`]: this type
+    /// already holds the bitboards, so nothing is parsed or rebuilt.
+    ///
+    /// Writes ascending policy codes into `out` and returns the count. `out`
+    /// must hold at least `config.policy_size()` entries.
+    pub fn legal_action_codes_fast(&self, config: &Config, out: &mut [u16]) -> usize {
+        self.legal_action_codes_fast_stats(config, out).0
+    }
+
+    /// [`SearchPosition::legal_action_codes_fast`] plus prefilter counters.
+    pub fn legal_action_codes_fast_stats(
+        &self,
+        config: &Config,
+        out: &mut [u16],
+    ) -> (usize, FastLegalStats) {
+        let mut stats = FastLegalStats::default();
+        let count = self
+            .board()
+            .legal_codes_into(config, self.pawns, self.stock, self.turn, out, &mut stats);
+        (count, stats)
+    }
+
+    /// The fully allocation-free form of [`encode_state_into`].
+    ///
+    /// `out` must be exactly `NN_INPUT_PLANES * config.cells()` long.
+    pub fn encode_into(&self, config: &Config, out: &mut [f32]) -> Result<()> {
+        config.validate()?;
+        if config.rows != 9 || config.columns != 9 {
+            return Err(NormalDuelError::InvalidConfig);
+        }
+        if out.len() != NN_INPUT_PLANES * config.cells() {
+            return Err(NormalDuelError::InvalidPosition);
+        }
+        encode_board_into(
+            config,
+            &self.board(),
+            self.pawns,
+            self.stock,
+            self.turn,
+            out,
+        );
+        Ok(())
     }
 }
 
@@ -2862,6 +3445,123 @@ mod tests {
             ply_cap: 200,
             first_player: Player::A,
         }
+    }
+
+    /// The encoder's all-cells sweep has to answer exactly what the
+    /// single-source routine answers, cell for cell. They are two BFS
+    /// implementations over the same graph; without this they can drift, and a
+    /// drifted path plane is a silently wrong input the training run would
+    /// never flag.
+    #[test]
+    fn goal_distance_field_agrees_with_shortest_distance() {
+        let config = standard();
+        // Walls placed to make the field interesting: detours, a dead end in
+        // the corner, and enough structure that a naive flood fill would
+        // disagree with a wall-aware one.
+        let positions = [
+            vec![],
+            vec!["H-0-0".to_owned(), "H-0-2".to_owned(), "V-3-3".to_owned()],
+            vec![
+                "H-4-0".to_owned(),
+                "H-4-2".to_owned(),
+                "H-4-4".to_owned(),
+                "H-4-6".to_owned(),
+                "V-5-7".to_owned(),
+                "V-3-3".to_owned(),
+                "H-1-1".to_owned(),
+            ],
+        ];
+
+        for walls in positions {
+            let position = Position {
+                pawns: Players {
+                    a: Coord { r: 8, c: 4 },
+                    b: Coord { r: 0, c: 4 },
+                },
+                walls,
+                stock: Players { a: 4, b: 5 },
+                turn: Player::A,
+            };
+            let board = Board::from_position(&config, &position).expect("walls are legal");
+
+            for goal_row in [0_u8, 8_u8] {
+                let mut field = [None::<u8>; MAX_BOARD_CELLS];
+                board.goal_distance_field(&config, goal_row, &mut field);
+
+                for r in 0..config.rows {
+                    for c in 0..config.columns {
+                        let from = Coord { r, c };
+                        assert_eq!(
+                            field[square(&config, from)],
+                            board.shortest_distance(&config, from, goal_row),
+                            "walls {:?}, goal row {goal_row}, cell {from:?}",
+                            position.walls
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every one of the 209 policy codes must land on a distinct slot of the
+    /// convolutional policy head's three planes, and read back as the code it
+    /// started from. A transposition here would train the policy on permuted
+    /// labels and look perfectly healthy while doing it.
+    ///
+    /// The head emits a 9x9 pawn plane and two 8x8 wall planes; this is the
+    /// flattening `WrongWayNet.forward` applies, held against the engine's own
+    /// `encode_action`/`decode_action`.
+    #[test]
+    fn policy_codes_round_trip_through_the_convolutional_head_layout() {
+        let config = standard();
+        let cells = config.cells();
+        let anchors = usize::from(config.rows - 1) * usize::from(config.columns - 1);
+        assert_eq!(policy_size(&config), Ok(cells + 2 * anchors));
+
+        let mut seen = vec![None::<usize>; cells + 2 * anchors];
+        for code in 0..cells + 2 * anchors {
+            let action = decode_action(&config, code).expect("code decodes");
+            // Slot in the concatenation [pawn 9x9 | wall H 8x8 | wall V 8x8].
+            let slot = match &action {
+                Action::Pawn { to } => {
+                    usize::from(to.r) * usize::from(config.columns) + usize::from(to.c)
+                }
+                Action::Wall { wall } => {
+                    let parsed = Wall::parse(&config, wall).expect("wall parses");
+                    let plane = match parsed.orientation {
+                        Orientation::Horizontal => 0,
+                        Orientation::Vertical => 1,
+                    };
+                    cells
+                        + plane * anchors
+                        + usize::from(parsed.r) * usize::from(config.columns - 1)
+                        + usize::from(parsed.c)
+                }
+            };
+            assert!(
+                slot < cells + 2 * anchors,
+                "code {code} slot {slot} out of range"
+            );
+            assert_eq!(
+                seen[slot], None,
+                "code {code} collides with code {:?}",
+                seen[slot]
+            );
+            seen[slot] = Some(code);
+            assert_eq!(
+                encode_action(&config, &action),
+                Ok(code),
+                "code {code} does not round trip"
+            );
+            // The head's flattening is the identity on the code space: slot and
+            // code must be the same number, which is what lets the network emit
+            // planes and the search read policy codes with no permutation table.
+            assert_eq!(slot, code, "code {code} maps to head slot {slot}");
+        }
+        assert!(
+            seen.iter().all(Option::is_some),
+            "some head slot is unreachable"
+        );
     }
 
     #[test]

@@ -57,8 +57,19 @@ export const NN_PLANE_LAYOUT = Object.freeze([
   Object.freeze({ name: 'mover_stock', description: 'constant plane: mover walls remaining / initialStock[mover]' }),
   Object.freeze({ name: 'opponent_stock', description: 'constant plane: opponent walls remaining / initialStock[opponent]' }),
   Object.freeze({ name: 'goal_proximity', description: 'row gradient toward config.goalRows[mover]: 1 on the mover goal row, 0 on the far row' }),
-  Object.freeze({ name: 'side_to_move', description: 'constant plane: 1 when A is to move, 0 when B is to move' })
+  Object.freeze({ name: 'side_to_move', description: 'constant plane: 1 when A is to move, 0 when B is to move' }),
+  Object.freeze({ name: 'mover_path_distance', description: 'wall-aware shortest-path distance from (r,c) to config.goalRows[mover], divided by cells-1; 1 where unreachable' }),
+  Object.freeze({ name: 'opponent_path_distance', description: 'wall-aware shortest-path distance from (r,c) to config.goalRows[opponent], divided by cells-1; 1 where unreachable' })
 ]);
+
+/**
+ * Value written into the path-distance planes for a cell with no wall-legal
+ * route to the goal row. See `NN_UNREACHABLE_DISTANCE` in the Rust port: the
+ * planes have one channel and live in [0, 1], so "unreachable" has to be
+ * spelled as a distance, and the top of the range is the choice that leaves
+ * the ordering monotone.
+ */
+export const NN_UNREACHABLE_DISTANCE = 1;
 
 export const NN_INPUT_PLANES = Object.freeze(NN_PLANE_LAYOUT.length);
 
@@ -102,6 +113,46 @@ function writeWallPlanes(config, walls, out, offsetH, offsetV) {
 }
 
 /**
+ * Wall-aware distance from every cell to `goalRow`, as a flat row-major array
+ * of step counts with `-1` where walls seal a cell off from the goal row.
+ *
+ * One multi-source BFS seeded with the whole goal row, not 81 single-source
+ * ones: the move graph is undirected, since a wall segment cuts an edge for
+ * both cells it joins, so the distance from a cell to the nearest goal square
+ * equals the depth at which a search started from the goal row reaches it.
+ * Blockage comes from the engine's `edgeBlocked` one edge at a time, the same
+ * way `writeWallPlanes` reads wall geometry, so no rule is reimplemented here.
+ */
+function goalDistanceField(config, walls, goalRow) {
+  const { rows, columns } = config;
+  const distances = new Int32Array(rows * columns).fill(-1);
+  let frontier = [];
+  for (let c = 0; c < columns; c += 1) {
+    distances[goalRow * columns + c] = 0;
+    frontier.push({ r: goalRow, c });
+  }
+  for (let distance = 1; frontier.length > 0; distance += 1) {
+    const next = [];
+    for (const from of frontier) {
+      const neighbours = [
+        { r: from.r - 1, c: from.c }, { r: from.r + 1, c: from.c },
+        { r: from.r, c: from.c - 1 }, { r: from.r, c: from.c + 1 }
+      ];
+      for (const to of neighbours) {
+        if (to.r < 0 || to.r >= rows || to.c < 0 || to.c >= columns) continue;
+        const index = to.r * columns + to.c;
+        if (distances[index] !== -1) continue;
+        if (edgeBlocked(config, from, to, walls)) continue;
+        distances[index] = distance;
+        next.push(to);
+      }
+    }
+    frontier = next;
+  }
+  return distances;
+}
+
+/**
  * Encode a validated game state as `NN_INPUT_PLANES * rows * columns` floats,
  * planes in `NN_PLANE_LAYOUT` order, each plane row-major over absolute engine
  * coordinates, all values in [0, 1]. Neither `config` nor `state` is mutated.
@@ -142,6 +193,26 @@ export function encodeState(config, state) {
 
   // Whose turn it is is not recoverable from an absolute frame, so state it.
   out.fill(mover === 'A' ? 1 : 0, PLANE_INDEX.side_to_move * cells, (PLANE_INDEX.side_to_move + 1) * cells);
+
+  // Wall-aware shortest-path distance to each side's goal row, normalised by
+  // the longest path the board can hold (`cells - 1` steps) into [0, 1].
+  //
+  // The classical eval is dominated by exactly this quantity — weight 100
+  // against 12/6/8 for stock, tempo and robustness — so the network is handed
+  // it rather than left to rediscover BFS through a stack of 3x3 kernels.
+  // Mover-relative by plane SELECTION only, like planes 0/1 and 4/5: no
+  // coordinate is transformed, so the frame stays absolute and synchronised
+  // with the action codes.
+  const longestPath = cells - 1;
+  for (const [player, plane] of [[mover, 'mover_path_distance'], [opponent, 'opponent_path_distance']]) {
+    const distances = goalDistanceField(checked, validated.position.walls, checked.goalRows[player]);
+    const base = PLANE_INDEX[plane] * cells;
+    for (let index = 0; index < cells; index += 1) {
+      out[base + index] = distances[index] < 0
+        ? NN_UNREACHABLE_DISTANCE
+        : distances[index] / longestPath;
+    }
+  }
   return out;
 }
 

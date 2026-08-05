@@ -6,19 +6,16 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createInitialState, applyAction, legalActionCodes, policySize } from '../js/normal-duel-engine.mjs';
-import { encodeState } from '../js/normal-duel-nn-encoding.mjs';
+import { NN_PLANE_LAYOUT, encodeState, legalMaskFloat } from '../js/normal-duel-nn-encoding.mjs';
 import { gumbelRootSearch } from '../js/normal-duel-gumbel-search.mjs';
 import { createLcg32 } from '../js/lcg32.mjs';
 import {
-  NN_RUNTIME_VERSION, createNetworkEvaluator, forwardRaw, loadWeights
+  NN_RUNTIME_VERSION, createFeatureEvaluator, createNetworkEvaluator, forwardRaw, loadWeights,
+  requiredTensorShapes
 } from '../js/normal-duel-nn-runtime.mjs';
-
-const CONFIG_9X9 = Object.freeze({
-  ruleset: 'normal-duel-v1', rows: 9, columns: 9,
-  start: { A: { r: 8, c: 4 }, B: { r: 0, c: 4 } },
-  goalRows: { A: 0, B: 8 }, initialStock: { A: 10, B: 10 },
-  jumpRule: 'permissive-adjacent-exit-v1', repetitionThreshold: 3, plyCap: 200, firstPlayer: 'A'
-});
+import {
+  CONFIG_9X9, FEATURE_LEN, POLICY_SIZE, fixedState, fnv1a32, syntheticWeightSet
+} from './support/nn-runtime-fixture.mjs';
 
 const CONFIG_7X7 = Object.freeze({
   ruleset: 'normal-duel-v1', rows: 7, columns: 7,
@@ -32,26 +29,10 @@ const BLOB_PATH = path.join(TRAINING_DIR, 'weights.bin');
 const MANIFEST_PATH = path.join(TRAINING_DIR, 'weights.manifest.json');
 const PYTHON = path.join(TRAINING_DIR, '.venv/bin/python');
 
-const POLICY_SIZE = 209;
-const FEATURE_LEN = 648;
 
 /* ------------------------------------------------------------------ *
  * Fixtures
  * ------------------------------------------------------------------ */
-
-/** A fixed non-trivial position: a few pawn moves and a wall from each side. */
-function fixedState() {
-  const actions = [
-    { kind: 'pawn', to: { r: 7, c: 4 } },
-    { kind: 'pawn', to: { r: 1, c: 4 } },
-    { kind: 'wall', wall: 'H-3-3' },
-    { kind: 'pawn', to: { r: 2, c: 4 } },
-    { kind: 'pawn', to: { r: 6, c: 4 } },
-    { kind: 'wall', wall: 'V-5-5' }
-  ];
-  return actions.reduce((state, action) => applyAction(CONFIG_9X9, state, action),
-    createInitialState(CONFIG_9X9));
-}
 
 function artifactsPresent() {
   return fs.existsSync(BLOB_PATH) && fs.existsSync(MANIFEST_PATH);
@@ -65,60 +46,8 @@ function realWeights() {
   return cachedWeights;
 }
 
-/** A synthetic-but-valid weight set, so structural tests need no artifacts. */
-function syntheticWeightSet() {
-  const spec = [
-    ['stem.conv.weight', [64, 8, 3, 3]], ['stem.conv.bias', [64]]
-  ];
-  for (let i = 0; i < 6; i += 1) {
-    spec.push([`block${i}.conv1.weight`, [64, 64, 3, 3]], [`block${i}.conv1.bias`, [64]]);
-    spec.push([`block${i}.conv2.weight`, [64, 64, 3, 3]], [`block${i}.conv2.bias`, [64]]);
-  }
-  spec.push(['policy.conv.weight', [32, 64, 1, 1]], ['policy.conv.bias', [32]]);
-  spec.push(['policy.fc.weight', [209, 2592]], ['policy.fc.bias', [209]]);
-  spec.push(['value.conv.weight', [8, 64, 1, 1]], ['value.conv.bias', [8]]);
-  spec.push(['value.fc1.weight', [64, 648]], ['value.fc1.bias', [64]]);
-  spec.push(['value.fc2.weight', [1, 64]], ['value.fc2.bias', [1]]);
-
-  const tensors = [];
-  let offset = 0;
-  for (const [name, shape] of spec) {
-    const count = shape.reduce((product, dimension) => product * dimension, 1);
-    tensors.push({ name, shape, dtype: 'float32', byteOffset: offset, byteLength: count * 4, count });
-    offset += count * 4;
-  }
-  const buffer = new ArrayBuffer(offset);
-  const floats = new Float32Array(buffer);
-  // Deterministic filler: a fixed LCG, never Math.random.
-  let seed = 12345;
-  for (let i = 0; i < floats.length; i += 1) {
-    seed = (seed * 1103515245 + 12345) >>> 0;
-    floats[i] = ((seed >>> 8) / 0x1000000 - 0.5) * 0.1;
-  }
-  const manifest = {
-    formatVersion: 1, byteOrder: 'little', layout: 'C-contiguous', flattenOrder: 'CHW',
-    policySize: 209,
-    input: { planes: 8, rows: 9, columns: 9 },
-    architecture: { blocks: 6, channels: 64, policyHeadChannels: 32, valueHeadChannels: 8, valueHidden: 64 },
-    blobBytes: offset,
-    tensors
-  };
-  return { manifest, buffer };
-}
-
 const SYNTHETIC = syntheticWeightSet();
 const cloneManifest = () => JSON.parse(JSON.stringify(SYNTHETIC.manifest));
-
-/** FNV-1a over a byte range: pins the fixture to the exact blob it was made from. */
-function fnv1a32(buffer) {
-  const bytes = new Uint8Array(buffer);
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < bytes.length; i += 1) {
-    hash ^= bytes[i];
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return hash.toString(16).padStart(8, '0');
-}
 
 const GOLDEN = JSON.parse(fs.readFileSync(
   new URL('./fixtures/nn-runtime-golden-forward-v1.json', import.meta.url), 'utf8'
@@ -142,7 +71,7 @@ const GOLDEN = JSON.parse(fs.readFileSync(
  * cross-checked against the reference, and reproducing them needs neither
  * Python nor `weights.bin`. This test can never skip.
  */
-test('forwardRaw reproduces the committed PyTorch goldens (hermetic, never skips)', () => {
+test('forwardRaw reproduces the committed PyTorch goldens (hermetic, never skips)', (t) => {
   assert.equal(GOLDEN.format, 'nn-runtime-golden-forward-v1');
 
   // The goldens are only meaningful for the blob they were computed from.
@@ -173,6 +102,25 @@ test('forwardRaw reproduces the committed PyTorch goldens (hermetic, never skips
   assert.ok(maxLogitDelta < 1e-4, `policy logits differ from the golden by ${maxLogitDelta}`);
   assert.ok(valueDelta < 1e-4, `value differs from the golden by ${valueDelta}`);
 
+  // The value alone does not pin the pooling down. Measured against this blob:
+  // reordering the pooled blocks to [mean|std|max] moves the value by 1.4e-3,
+  // interleaving them per channel by 2.3e-5, and using the sample std instead of
+  // the population std by 2.3e-6 -- the last two sail through the 1e-4 above. So
+  // assert the 96-element pooled vector the reference produced, elementwise,
+  // where those same three mistakes are off by ~1e-1 in many components.
+  assert.equal(GOLDEN.valuePooled.length, actual.valuePooled.length);
+  let maxPooledDelta = 0;
+  for (let i = 0; i < GOLDEN.valuePooled.length; i += 1) {
+    maxPooledDelta = Math.max(maxPooledDelta, Math.abs(actual.valuePooled[i] - GOLDEN.valuePooled[i]));
+  }
+  assert.ok(maxPooledDelta < 1e-5, `value-head pooling differs from the golden by ${maxPooledDelta}`);
+  // Printed so margin erosion is visible rather than silent. The bound sits far
+  // below the tightest error it must catch (sample-std, 7.5e-5) and far above the
+  // measured agreement, but per-element accumulation error grows roughly as
+  // sqrt(channels), so lifting the TODO(runtime-size) pin from 64 to 128 will
+  // narrow that gap by about 1.4x. This is the number to watch when it does.
+  t.diagnostic(`maxLogitDelta=${maxLogitDelta} valueDelta=${valueDelta} maxPooledDelta=${maxPooledDelta}`);
+
   // The goldens must actually exercise the graph: an all-zero logit vector
   // would satisfy the deltas above against an all-zero golden.
   assert.ok(GOLDEN.policyLogits.some((logit) => Math.abs(logit) > 1e-6));
@@ -201,7 +149,7 @@ for entry in manifest["tensors"]:
     tensors[entry["name"]] = torch.from_numpy(raw.copy())
 
 features = np.asarray(json.loads(Path(sys.argv[2]).read_text()), dtype=np.float32)
-x = torch.from_numpy(features.reshape(1, 8, 9, 9))
+x = torch.from_numpy(features.reshape(1, manifest["input"]["planes"], 9, 9))
 logits, value = reference_forward(tensors, x, manifest["architecture"]["blocks"])
 print(json.dumps({"logits": logits[0].tolist(), "value": float(value[0])}))
 `;
@@ -413,9 +361,10 @@ test('loadWeights rejects overlapping tensors and duplicates', () => {
 
 test('loadWeights rejects a wrong shape for a required tensor and a bad format version', () => {
   const reshaped = cloneManifest();
-  const entry = reshaped.tensors.find((candidate) => candidate.name === 'policy.fc.weight');
-  entry.shape = [2592, 209];
-  assert.throws(() => loadWeights(reshaped, SYNTHETIC.buffer), /unexpected_tensor_shape:policy\.fc\.weight/);
+  const entry = reshaped.tensors.find((candidate) => candidate.name === 'value.fc1.weight');
+  assert.ok(entry, 'the manifest no longer carries value.fc1.weight; pick another required tensor');
+  entry.shape = [entry.shape[1], entry.shape[0]]; // transposed: same count, wrong shape
+  assert.throws(() => loadWeights(reshaped, SYNTHETIC.buffer), /unexpected_tensor_shape:value\.fc1\.weight/);
 
   const versioned = cloneManifest();
   versioned.formatVersion = 2;
@@ -458,4 +407,114 @@ test('a single evaluate call fits the per-turn budget', (t) => {
 
   t.diagnostic(`single evaluate: ${perCall.toFixed(2)} ms (mean of ${runs}); ~20 per 900 ms turn needs <= 45 ms`);
   assert.ok(perCall < 200, `evaluate took ${perCall} ms, far outside any plausible turn budget`);
+});
+
+/* ------------------------------------------------------------------ *
+ * Exporter drift — this one cannot skip
+ * ------------------------------------------------------------------ */
+
+/**
+ * `tests/fixtures/exporter-tensor-shapes.json` is a shape table (names and
+ * shapes, no weights) captured from a real `export_weights.py` run. Everything
+ * else guarding this module is internal to the repo: the golden is generated
+ * from a synthetic spec written here, so an exporter-side head change leaves the
+ * blob hash and the golden untouched and CI green while `loadWeights` would
+ * reject every real export. This test is the one link to the other side of the
+ * boundary, and unlike the Python parity test it needs no venv and no artifact,
+ * so it runs everywhere.
+ *
+ * Note that channels and blocks ARE compared, via the shapes -- they are
+ * exporter CLI arguments, so re-capturing the fixture is the correct response to
+ * a red result there, and the assertion message says so separately from the
+ * graph-change case. Whoever lifts the TODO(runtime-size) pin to 128 channels
+ * will trip that assertion and should re-capture, not port a graph change.
+ */
+test('the runtime demands exactly the tensors a real export produces', () => {
+  const captured = JSON.parse(fs.readFileSync(
+    new URL('./fixtures/exporter-tensor-shapes.json', import.meta.url), 'utf8'
+  ));
+  const required = requiredTensorShapes();
+
+  assert.deepEqual(
+    Object.keys(required).sort(), captured.tensors.map((t) => t.name).sort(),
+    'the runtime and the exporter disagree about which tensors exist; '
+    + 'regenerate tests/fixtures/exporter-tensor-shapes.json from a real export '
+    + 'and port the graph change into normal-duel-nn-runtime.mjs'
+  );
+
+  assert.equal(captured.input.planes, encodeState(CONFIG_9X9, fixedState()).length / 81,
+    'the exporter and the encoder disagree about the plane count');
+
+  for (const { name, shape } of captured.tensors) {
+    assert.deepEqual(
+      required[name], shape,
+      `shape drift on ${name}: if only channels or blocks moved, re-capture `
+      + 'tests/fixtures/exporter-tensor-shapes.json from a real export; if the graph '
+      + 'itself changed, port it into normal-duel-nn-runtime.mjs first'
+    );
+  }
+
+  // Shapes alone leave two drifts invisible, and both are silently wrong rather
+  // than loudly broken. If the exporter stopped cropping the wall planes to 8x8
+  // the policy would be 243 wide with every tensor shape unchanged, and
+  // readPolicyPlanes would read the wrong codes. If it permuted the input planes
+  // the count would still be 10 and encodeState would feed the trunk in the
+  // wrong order.
+  assert.equal(captured.policySize, POLICY_SIZE, 'the exporter policy size moved');
+  assert.deepEqual(
+    captured.input.planeOrder, NN_PLANE_LAYOUT.map((plane) => plane.name),
+    'the exporter and the encoder disagree about plane ORDER, not just count'
+  );
+});
+
+/* ------------------------------------------------------------------ *
+ * createFeatureEvaluator — the batched path's network side
+ * ------------------------------------------------------------------ */
+
+/**
+ * `createFeatureEvaluator` is what the native PUCT tree calls: it takes the
+ * encoded leaf and its mask directly rather than re-deriving them from a state.
+ * It had no test at all, and it must agree exactly with `createNetworkEvaluator`
+ * — the two differ only in how they are entered, so any divergence means the
+ * batched path and the reference path disagree about the same position.
+ */
+test('createFeatureEvaluator agrees exactly with createNetworkEvaluator', () => {
+  const weights = loadWeights(SYNTHETIC.manifest, SYNTHETIC.buffer);
+  const state = fixedState();
+
+  const fromState = createNetworkEvaluator(weights)(CONFIG_9X9, state);
+  const features = encodeState(CONFIG_9X9, state);
+  const mask = legalMaskFloat(CONFIG_9X9, state);
+  const policyOut = new Float32Array(POLICY_SIZE);
+  const value = createFeatureEvaluator(weights)(features, mask, policyOut);
+
+  assert.equal(value, fromState.value, 'the two entry points disagree about the value');
+  assert.deepEqual(Array.from(policyOut), Array.from(fromState.policy),
+    'the two entry points disagree about the policy');
+
+  // Illegal actions are exactly zero, not merely small.
+  const legal = new Set(legalActionCodes(CONFIG_9X9, state));
+  for (let code = 0; code < POLICY_SIZE; code += 1) {
+    if (!legal.has(code)) assert.equal(policyOut[code], 0, `code ${code} is illegal but nonzero`);
+  }
+  let sum = 0;
+  for (const p of policyOut) sum += p;
+  assert.ok(Math.abs(sum - 1) < 1e-5, `policy sums to ${sum}`);
+});
+
+/**
+ * The output buffer must be a Float32Array. `createNetworkEvaluator` rounds each
+ * exp() to f32 before the normalising divide, so a wider buffer here would skip
+ * that rounding and silently produce different priors from the same logits.
+ */
+test('createFeatureEvaluator rejects an output buffer that is not a Float32Array', () => {
+  const weights = loadWeights(SYNTHETIC.manifest, SYNTHETIC.buffer);
+  const evaluate = createFeatureEvaluator(weights);
+  const state = fixedState();
+  const features = encodeState(CONFIG_9X9, state);
+  const mask = legalMaskFloat(CONFIG_9X9, state);
+
+  assert.throws(() => evaluate(features, mask, new Float64Array(POLICY_SIZE)), /invalid_policy_out/);
+  assert.throws(() => evaluate(features, mask, new Array(POLICY_SIZE).fill(0)), /invalid_policy_out/);
+  assert.throws(() => evaluate(features, mask, new Float32Array(POLICY_SIZE - 1)), /unsupported_policy_size/);
 });

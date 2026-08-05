@@ -11,11 +11,17 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wasm_bindgen::prelude::*;
+use wrongway_normal_duel::js_math::Lcg32;
+use wrongway_normal_duel::puct::{PuctParams, PuctTreeSearch};
+use wrongway_normal_duel::selfplay::{
+    Exploration, GameOutcome, SelfPlayBatch, SelfPlayOptions, RECORD_FEATURES, RECORD_FLOATS,
+    RECORD_META_FIELDS, RECORD_POLICY,
+};
 use wrongway_normal_duel::{
     action_from_json, apply_action, create_initial_state, decode_action, game_state_from_json,
     legal_action_codes, position_from_json, position_key, search_for, search_nodes,
     validate_config_json, validate_state, Action, Config, NormalDuelError, SearchDiagnostics,
-    SearchOptions, SearchReport, MAX_JS_SAFE_INTEGER, RULESET,
+    SearchOptions, SearchReport, MAX_JS_SAFE_INTEGER, NN_INPUT_PLANES, RULESET,
 };
 
 type BoundaryResult<T> = std::result::Result<T, String>;
@@ -367,6 +373,450 @@ pub fn normal_duel_search_nodes(request_json: &str) -> std::result::Result<Strin
 #[wasm_bindgen(js_name = normalDuelSearchFor)]
 pub fn normal_duel_search_for(request_json: &str) -> std::result::Result<String, JsValue> {
     search_for_impl(request_json).map_err(js_error)
+}
+
+/// Options DTO for [`NormalDuelSelfPlayBatch`]. JSON here is fine: it is read
+/// once at construction, off the hot path.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SelfPlayOptionsDto {
+    games: usize,
+    simulations: u32,
+    max_considered: u32,
+    #[serde(default = "default_c_puct")]
+    c_puct: f64,
+    /// `"visitTemperature"` (default) or `"uniformEpsilon"`. Spelled out rather
+    /// than a bool so a third recipe does not have to break the wire format.
+    #[serde(default)]
+    exploration: ExplorationDto,
+    #[serde(default)]
+    epsilon: f64,
+    #[serde(default = "default_temperature")]
+    temperature: f64,
+    #[serde(default)]
+    temperature_moves: u64,
+    #[serde(default = "default_ply_cap")]
+    ply_cap: u64,
+    #[serde(default)]
+    seed_base: u32,
+    #[serde(default)]
+    openings: Vec<Vec<u16>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum ExplorationDto {
+    #[default]
+    VisitTemperature,
+    UniformEpsilon,
+}
+
+impl From<ExplorationDto> for Exploration {
+    fn from(dto: ExplorationDto) -> Self {
+        match dto {
+            ExplorationDto::VisitTemperature => Exploration::VisitTemperature,
+            ExplorationDto::UniformEpsilon => Exploration::UniformEpsilon,
+        }
+    }
+}
+
+fn default_temperature() -> f64 {
+    1.0
+}
+
+fn default_c_puct() -> f64 {
+    wrongway_normal_duel::puct::DEFAULT_C_PUCT
+}
+
+fn default_ply_cap() -> u64 {
+    200
+}
+
+/// Batched self-play across the wasm boundary, **without JSON on the hot path**.
+///
+/// The per-step protocol is
+///
+/// ```text
+/// const n = batch.collect();      // features[0..n) are filled
+/// // read features through a Float32Array over wasm memory, run the network,
+/// // write logits into policy[0..n) and values into value[0..n)
+/// batch.submit(n);
+/// ```
+///
+/// # The wasm-memory-growth hazard
+///
+/// A JS `Float32Array` built over `WebAssembly.Memory.buffer` **detaches** the
+/// moment the wasm heap grows: the old `ArrayBuffer` is replaced, and the stale
+/// view reads as length 0 or throws. Detached-view reads do not surface as a
+/// crash in this pipeline — they surface as all-zero features and all-zero
+/// policy targets, i.e. silently corrupt training data. Two defences, both
+/// required:
+///
+/// 1. **Here:** every buffer the hot path touches is allocated at its final
+///    size in [`NormalDuelSelfPlayBatch::new`] and never resized —
+///    `features` (`games * 810` f32), `policy` (`games * 209` f32), `value`
+///    (`games` f32), plus the record and metadata sinks reserved to their
+///    worst case (`games * plyCap` records). Nothing on the steady-state path
+///    asks the allocator for more pages.
+/// 2. **On the JS side:** `memory.buffer` identity is compared before every
+///    access and the views are rebuilt when it changes. The tree arenas still
+///    allocate as a search deepens, so defence 1 shrinks the window rather than
+///    closing it; defence 2 is what actually closes it.
+#[wasm_bindgen(js_name = NormalDuelSelfPlayBatch)]
+pub struct NormalDuelSelfPlayBatch {
+    inner: SelfPlayBatch,
+}
+
+#[wasm_bindgen(js_class = NormalDuelSelfPlayBatch)]
+impl NormalDuelSelfPlayBatch {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        config_json: &str,
+        options_json: &str,
+    ) -> std::result::Result<NormalDuelSelfPlayBatch, JsValue> {
+        let config = parse_config(config_json).map_err(js_error)?;
+        let dto: SelfPlayOptionsDto = serde_json::from_str(options_json)
+            .map_err(|_| js_error("invalid_options".to_owned()))?;
+        let options = SelfPlayOptions {
+            games: dto.games,
+            simulations: dto.simulations,
+            max_considered: dto.max_considered,
+            c_puct: dto.c_puct,
+            exploration: dto.exploration.into(),
+            epsilon: dto.epsilon,
+            temperature: dto.temperature,
+            temperature_moves: dto.temperature_moves,
+            ply_cap: dto.ply_cap,
+            seed_base: dto.seed_base,
+            openings: dto.openings,
+        };
+        let inner =
+            SelfPlayBatch::new(&config, options).map_err(|error| js_error(error.to_string()))?;
+        Ok(Self { inner })
+    }
+
+    /// Advance every unfinished game to its next leaf. Returns the number of
+    /// filled feature slots; `0` means the batch is finished.
+    pub fn collect(&mut self) -> std::result::Result<usize, JsValue> {
+        self.inner
+            .collect()
+            .map_err(|error| js_error(error.to_string()))
+    }
+
+    /// Feed back `n` evaluations written into the policy and value buffers.
+    pub fn submit(&mut self, n: usize) -> std::result::Result<(), JsValue> {
+        self.inner
+            .submit(n)
+            .map_err(|error| js_error(error.to_string()))
+    }
+
+    #[wasm_bindgen(js_name = isDone)]
+    #[must_use]
+    pub fn is_done(&self) -> bool {
+        self.inner.done()
+    }
+
+    /// Drain finished games into the record sink; returns the record count.
+    #[wasm_bindgen(js_name = takeRecords)]
+    pub fn take_records(&mut self) -> usize {
+        self.inner.take_records()
+    }
+
+    // --- Buffer addresses. Byte offsets into `WebAssembly.Memory.buffer`. ---
+    //
+    // Re-read these after *every* call into wasm: a moved buffer and a grown
+    // heap are indistinguishable from JS otherwise.
+
+    #[wasm_bindgen(js_name = featuresPtr)]
+    #[must_use]
+    pub fn features_ptr(&self) -> u32 {
+        self.inner.features().as_ptr() as u32
+    }
+
+    #[wasm_bindgen(js_name = legalMaskPtr)]
+    #[must_use]
+    pub fn legal_mask_ptr(&self) -> u32 {
+        self.inner.legal_mask().as_ptr() as u32
+    }
+
+    #[wasm_bindgen(js_name = policyPtr)]
+    #[must_use]
+    pub fn policy_ptr(&mut self) -> u32 {
+        self.inner.policy_mut().as_ptr() as u32
+    }
+
+    #[wasm_bindgen(js_name = valuePtr)]
+    #[must_use]
+    pub fn value_ptr(&mut self) -> u32 {
+        self.inner.value_mut().as_ptr() as u32
+    }
+
+    #[wasm_bindgen(js_name = recordsPtr)]
+    #[must_use]
+    pub fn records_ptr(&self) -> u32 {
+        self.inner.records().as_ptr() as u32
+    }
+
+    #[wasm_bindgen(js_name = recordMetaPtr)]
+    #[must_use]
+    pub fn record_meta_ptr(&self) -> u32 {
+        self.inner.record_meta().as_ptr() as u32
+    }
+
+    // --- Lengths, in elements. ---
+
+    #[wasm_bindgen(js_name = featuresLen)]
+    #[must_use]
+    pub fn features_len(&self) -> usize {
+        self.inner.features().len()
+    }
+
+    #[wasm_bindgen(js_name = policyLen)]
+    #[must_use]
+    pub fn policy_len(&mut self) -> usize {
+        self.inner.policy_mut().len()
+    }
+
+    #[wasm_bindgen(js_name = valueLen)]
+    #[must_use]
+    pub fn value_len(&mut self) -> usize {
+        self.inner.value_mut().len()
+    }
+
+    #[wasm_bindgen(js_name = recordsLen)]
+    #[must_use]
+    pub fn records_len(&self) -> usize {
+        self.inner.records().len()
+    }
+
+    #[wasm_bindgen(js_name = recordMetaLen)]
+    #[must_use]
+    pub fn record_meta_len(&self) -> usize {
+        self.inner.record_meta().len()
+    }
+
+    // --- Run summary. Cold path; JSON is fine. ---
+
+    /// `-1` B win, `0` draw, `1` A win, `2` ongoing, one per game.
+    ///
+    /// Ongoing is its own code rather than being folded into draw. A game that
+    /// stops because it hit the shard's ply cap is *unfinished*, which is what
+    /// the incumbent shard worker reports it as (`outcomes: {ongoing: 1}`);
+    /// mapping it to `0` made the two workers' shard stats disagree about what
+    /// had happened — one calling a truncated game a draw, the other calling it
+    /// ongoing — even when the records themselves were identical. `z` is 0
+    /// either way, so this never affected training, only the reporting that
+    /// would have to be trusted to notice if it had.
+    #[must_use]
+    pub fn outcomes(&self) -> Vec<i32> {
+        self.inner
+            .outcomes()
+            .into_iter()
+            .map(|outcome| match outcome {
+                GameOutcome::Win(wrongway_normal_duel::Player::A) => 1,
+                GameOutcome::Win(wrongway_normal_duel::Player::B) => -1,
+                GameOutcome::Draw => 0,
+                GameOutcome::Ongoing => 2,
+            })
+            .collect()
+    }
+
+    #[wasm_bindgen(js_name = pliesPlayed)]
+    #[must_use]
+    pub fn plies_played(&self) -> Vec<u32> {
+        self.inner
+            .plies_played()
+            .into_iter()
+            .map(|plies| u32::try_from(plies).unwrap_or(u32::MAX))
+            .collect()
+    }
+}
+
+/// One search-to-move over the native PUCT tree, with the network evaluated by
+/// the caller.
+///
+/// `NormalDuelSelfPlayBatch` cannot serve matchplay: it owns the game loop and
+/// picks its own moves, so it has no way to play an externally chosen opponent
+/// reply. This wrapper exposes the single-search coroutine instead — the caller
+/// supplies the root state, pumps one leaf at a time, and reads the chosen
+/// action. That is one boundary crossing per NODE, but the crossing itself is
+/// nanoseconds; what it removes is the JS tree's ~4 ms/simulation of move
+/// generation. The network round trip is paid identically by both paths.
+///
+/// The per-move protocol is
+///
+/// ```text
+/// const s = new NormalDuelSearch(configJson, stateJson, optionsJson);
+/// while (s.nextLeaf()) {                // features[0..featuresLen) filled
+///   s.pendingLeafMask();                // mask[0..policyLen)  filled
+///   // run the network, write probabilities into policy[0..policyLen)
+///   s.submit(value);
+/// }
+/// const chosen = s.actionCode();
+/// ```
+///
+/// The same wasm-memory-growth hazard documented on `NormalDuelSelfPlayBatch`
+/// applies: the tree arenas grow as a search deepens, so the JS side MUST
+/// compare `memory.buffer` identity before every access and rebuild its views.
+#[wasm_bindgen(js_name = NormalDuelSearch)]
+pub struct NormalDuelSearch {
+    config: Config,
+    inner: PuctTreeSearch,
+    features: Vec<f32>,
+    policy: Vec<f32>,
+    mask: Vec<f32>,
+}
+
+/// Options DTO for [`NormalDuelSearch`]. Read once at construction.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchOptionsDto {
+    simulations: u32,
+    max_considered: u32,
+    #[serde(default = "default_c_puct")]
+    c_puct: f64,
+    /// The JS reference drives one search from `createLcg32(seed)`; the same
+    /// seed here is what makes the two trees choose the same move.
+    seed: u32,
+}
+
+#[wasm_bindgen(js_class = NormalDuelSearch)]
+impl NormalDuelSearch {
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        config_json: &str,
+        state_json: &str,
+        options_json: &str,
+    ) -> std::result::Result<NormalDuelSearch, JsValue> {
+        let config = parse_config(config_json).map_err(js_error)?;
+        let state_value = parse_value(state_json, "invalid_state").map_err(js_error)?;
+        // Same validation the other search entry points use: decode, then check
+        // the state against this config, so a state from a different board
+        // cannot reach the tree.
+        let state = validated_search_state(&config, &state_value).map_err(js_error)?;
+        let dto: SearchOptionsDto = serde_json::from_str(options_json)
+            .map_err(|_| js_error("invalid_options".to_owned()))?;
+        let params = PuctParams {
+            simulations: dto.simulations,
+            max_considered: dto.max_considered,
+            c_puct: dto.c_puct,
+        };
+        let inner = PuctTreeSearch::from_state(&config, &state, params, Lcg32::new(dto.seed))
+            .map_err(|error| js_error(error.reason().to_owned()))?;
+        let features = vec![0.0; NN_INPUT_PLANES * config.cells()];
+        let policy = vec![0.0; config.policy_size()];
+        let mask = vec![0.0; config.policy_size()];
+        Ok(Self {
+            config,
+            inner,
+            features,
+            policy,
+            mask,
+        })
+    }
+
+    /// Advance to the next leaf awaiting evaluation, filling `features`.
+    /// Returns `false` when the search is finished.
+    #[wasm_bindgen(js_name = nextLeaf)]
+    pub fn next_leaf(&mut self) -> std::result::Result<bool, JsValue> {
+        self.inner
+            .next_leaf(&self.config, &mut self.features)
+            .map_err(|error| js_error(error.reason().to_owned()))
+    }
+
+    /// Fill `mask` with the pending leaf's legal-action mask.
+    #[wasm_bindgen(js_name = pendingLeafMask)]
+    pub fn pending_leaf_mask(&mut self) -> std::result::Result<(), JsValue> {
+        self.inner
+            .pending_leaf_mask(&self.config, &mut self.mask)
+            .map_err(|error| js_error(error.reason().to_owned()))
+    }
+
+    /// Hand the pending leaf's evaluation back to the tree. The caller has
+    /// already written probabilities into `policy[0..policyLen)`.
+    pub fn submit(&mut self, value: f64) -> std::result::Result<(), JsValue> {
+        let policy = std::mem::take(&mut self.policy);
+        let outcome = self.inner.submit(&self.config, &policy, value);
+        self.policy = policy;
+        outcome.map_err(|error| js_error(error.reason().to_owned()))
+    }
+
+    #[wasm_bindgen(js_name = isDone)]
+    #[must_use]
+    pub fn is_done(&self) -> bool {
+        self.inner.is_done()
+    }
+
+    /// The chosen action code. Only meaningful once the search is done.
+    #[wasm_bindgen(js_name = actionCode)]
+    #[must_use]
+    pub fn action_code(&self) -> u16 {
+        self.inner.result().action_code
+    }
+
+    /// `simulationsUsed`, for the harness's node-budget check.
+    #[wasm_bindgen(js_name = simulationsUsed)]
+    #[must_use]
+    pub fn simulations_used(&self) -> u32 {
+        self.inner.result().simulations_used
+    }
+
+    #[wasm_bindgen(js_name = rootValue)]
+    #[must_use]
+    pub fn root_value(&self) -> f64 {
+        self.inner.result().root_value
+    }
+
+    /// `(code, visits)` pairs flattened, ascending by code — the parity surface.
+    #[wasm_bindgen(js_name = visitCounts)]
+    #[must_use]
+    pub fn visit_counts(&self) -> Vec<u32> {
+        self.inner
+            .result()
+            .visit_counts
+            .into_iter()
+            .flat_map(|(code, visits)| [u32::from(code), visits])
+            .collect()
+    }
+
+    #[wasm_bindgen(js_name = featuresPtr)]
+    #[must_use]
+    pub fn features_ptr(&self) -> u32 {
+        self.features.as_ptr() as u32
+    }
+
+    #[wasm_bindgen(js_name = featuresLen)]
+    #[must_use]
+    pub fn features_len(&self) -> usize {
+        self.features.len()
+    }
+
+    #[wasm_bindgen(js_name = policyPtr)]
+    #[must_use]
+    pub fn policy_ptr(&self) -> u32 {
+        self.policy.as_ptr() as u32
+    }
+
+    #[wasm_bindgen(js_name = policyLen)]
+    #[must_use]
+    pub fn policy_len(&self) -> usize {
+        self.policy.len()
+    }
+
+    #[wasm_bindgen(js_name = maskPtr)]
+    #[must_use]
+    pub fn mask_ptr(&self) -> u32 {
+        self.mask.as_ptr() as u32
+    }
+}
+
+/// Record layout constants, so the JS driver never hard-codes a stride.
+#[wasm_bindgen(js_name = normalDuelSelfPlayLayout)]
+#[must_use]
+pub fn normal_duel_self_play_layout() -> String {
+    format!(
+        r#"{{"features":{RECORD_FEATURES},"policy":{RECORD_POLICY},"recordFloats":{RECORD_FLOATS},"metaFields":{RECORD_META_FIELDS}}}"#
+    )
 }
 
 #[cfg(test)]

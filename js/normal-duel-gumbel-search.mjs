@@ -284,7 +284,7 @@ export function gumbelRootSearch({ config, state, evaluate, simulations, maxCons
   const validated = validateState(checked, state);
   if (typeof evaluate !== 'function') fail('invalid_evaluator');
   if (typeof random !== 'function') fail('invalid_random');
-  nonNegativeInteger(simulations, 'invalid_simulations');
+  positiveInteger(simulations, 'invalid_simulations');
   positiveInteger(maxConsidered, 'invalid_max_considered');
   if (validated.outcome.kind !== 'ongoing') fail('terminal_state');
 
@@ -386,7 +386,7 @@ export function selfPlayGame({ config, evaluate, simulations, maxConsidered, see
   const checked = canonical9x9(config);
   const evaluator = evaluate ?? uniformStubEvaluator;
   if (typeof evaluator !== 'function') fail('invalid_evaluator');
-  nonNegativeInteger(simulations, 'invalid_simulations');
+  positiveInteger(simulations, 'invalid_simulations');
   positiveInteger(maxConsidered, 'invalid_max_considered');
   const cap = plyCap === undefined ? checked.plyCap : positiveInteger(plyCap, 'invalid_ply_cap');
   const random = createLcg32(seed); // throws on a non-uint32 seed

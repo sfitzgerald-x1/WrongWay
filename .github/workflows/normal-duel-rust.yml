@@ -61,6 +61,15 @@ jobs:
         run: npm run check:normal-duel-wasm
       - name: Build and verify hermetic search candidate
         run: npm run check:normal-duel-wasm-candidate
+      # The candidate exists only in this job -- rust/target is gitignored, so
+      # the verify job that runs `npm test` always skips the wasm parity tests.
+      # Without this step nothing in CI drives NormalDuelSearch, PuctTreeSearch
+      # or NormalDuelSelfPlayBatch across the JS boundary: a renamed DTO field or
+      # a changed slot stride would leave cargo test green (native path), npm
+      # test green (skipped) and the candidate check green (it drives the
+      # classical normalDuelSearchNodes entry point instead).
+      - name: Run the JS suite against the built candidate
+        run: npm test
 
   msrv:
     name: Rust 1.77 minimum version
