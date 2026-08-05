@@ -9,14 +9,23 @@
 //! how many feature vectors the network sees per call.
 //!
 //! One qualification on "bit-identical": the value channel is `f32`, so a leaf
-//! value is rounded to single precision on the way in. That is the contract, not
-//! an oversight — the values come from the network, which produces `f32` — but a
-//! caller computing values in `f64` (`createNetworkEvaluator` returns an `f64`
-//! `tanh`) hands over ~29 bits fewer than it holds, and two PUCT edges within
-//! ~6e-8 of each other could then order differently than in an `f64` serial run.
-//! `NormalDuelSearch`, the matchplay path, takes `f64` and has no such step.
-//! Note that the mock evaluator is deliberately `f32`-exact, so the driver
-//! parity check cannot observe this either way.
+//! value is rounded to single precision on the way in. For the production path
+//! that is lossless, and measurably so rather than by assumption. The GPU
+//! inference server runs `WW_DTYPE=bf16` (the default, and what the live
+//! deployment sets), so the network computes in bfloat16 and only widens to
+//! `f32` for the wire. Probing the live server with a 16-position batch, all
+//! 16 values and all 3344 policy logits came back with the low 16 mantissa bits
+//! zero — every number it returns is a bf16 value in an `f32` box. bf16 carries
+//! 8 mantissa bits; `f32` carries 24. The buffer holds 16 bits more than the
+//! data ever contains.
+//!
+//! Where it would not be lossless is a caller computing values in `f64` —
+//! `createNetworkEvaluator` returns an `f64` `tanh` — which hands over ~29 bits
+//! fewer than it holds; two PUCT edges within ~6e-8 could then order differently
+//! than in an `f64` serial run. That path does not feed this type in production.
+//! `NormalDuelSearch`, the matchplay path, takes `f64` and has no such step, and
+//! the mock evaluator is deliberately `f32`-exact, so the driver parity check
+//! cannot observe the narrowing either way.
 //!
 //! The loop is:
 //!
@@ -522,7 +531,8 @@ impl Game {
 /// batch cannot promise never to grow the heap — the tree arenas and the record
 /// buffer both allocate as a run proceeds — so the wasm wrapper documents the
 /// only safe rule: **rebuild every view after every call into wasm.** See
-/// `rust/normal-duel-wasm/src/lib.rs` and `js/normal-duel-selfplay-batch.mjs`.
+/// `rust/normal-duel-wasm/src/lib.rs`, and `scripts/diagnose-selfplay-driver-parity.mjs`
+/// for a driver that follows the rule.
 #[derive(Debug)]
 pub struct SelfPlayBatch {
     config: Config,

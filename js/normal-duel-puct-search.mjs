@@ -321,7 +321,16 @@ export function puctSearch({ config, state, evaluate, simulations, cPuct, random
   const validated = validateState(checked, state);
   if (typeof evaluate !== 'function') fail('invalid_evaluator');
   if (typeof random !== 'function') fail('invalid_random');
-  nonNegativeInteger(simulations, 'invalid_simulations');
+  // Positive, not merely non-negative. With no simulations every search returns
+  // empty visit counts, `effectiveVisitCounts` falls back to a one-hot of the
+  // played action, and the recorded policy target becomes one-hot at a position
+  // with ~130 legal codes -- silently, at full record count. That degenerate
+  // target removes AlphaZero's improvement ratchet and is what cost an earlier
+  // run 114 flat iterations. `maxConsidered` was already required to be
+  // positive, so accepting 0 here was an asymmetry rather than a decision, and
+  // this is the driver that produced the bad records: the Rust port guards it,
+  // but the JS shard worker is the incumbent.
+  positiveInteger(simulations, 'invalid_simulations');
   positiveInteger(maxConsidered, 'invalid_max_considered');
   const exploration = cPuct === undefined ? DEFAULT_C_PUCT : positiveFinite(cPuct, 'invalid_c_puct');
   if (validated.outcome.kind !== 'ongoing') fail('terminal_state');
@@ -433,7 +442,16 @@ export function puctSearch({ config, state, evaluate, simulations, cPuct, random
 export function selfPlayGamePuct({ config, evaluate, simulations, cPuct, maxConsidered, seed, plyCap }) {
   const checked = canonical9x9(config);
   if (typeof evaluate !== 'function') fail('invalid_evaluator');
-  nonNegativeInteger(simulations, 'invalid_simulations');
+  // Positive, not merely non-negative. With no simulations every search returns
+  // empty visit counts, `effectiveVisitCounts` falls back to a one-hot of the
+  // played action, and the recorded policy target becomes one-hot at a position
+  // with ~130 legal codes -- silently, at full record count. That degenerate
+  // target removes AlphaZero's improvement ratchet and is what cost an earlier
+  // run 114 flat iterations. `maxConsidered` was already required to be
+  // positive, so accepting 0 here was an asymmetry rather than a decision, and
+  // this is the driver that produced the bad records: the Rust port guards it,
+  // but the JS shard worker is the incumbent.
+  positiveInteger(simulations, 'invalid_simulations');
   positiveInteger(maxConsidered, 'invalid_max_considered');
   const exploration = cPuct === undefined ? DEFAULT_C_PUCT : positiveFinite(cPuct, 'invalid_c_puct');
   const cap = plyCap === undefined ? checked.plyCap : positiveInteger(plyCap, 'invalid_ply_cap');

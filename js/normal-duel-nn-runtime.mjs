@@ -71,6 +71,13 @@ const CELLS = ROWS * COLUMNS;          // 81
 // with no signal beyond that one test.
 const INPUT_PLANES = NN_INPUT_PLANES;
 const FEATURE_LEN = INPUT_PLANES * CELLS;
+// TODO(runtime-size): pinned to the exporter's defaults, while the live run
+// trains at 128 channels / 15 blocks -- so this module cannot load the model
+// currently being produced. It fails closed rather than silently: with an
+// `architecture` block `checkArchitecture` returns `unsupported_channels` /
+// `unsupported_blocks`, and without one the `stem.conv.weight` shape check in
+// `REQUIRED_TENSORS` rejects it first. Lifting this means reading both from the
+// manifest and sizing the scratch buffers per weight set instead of per module.
 const CHANNELS = 64;
 const BLOCKS = 6;
 // The policy head is fully convolutional: 3 planes out of a 1x1 conv, no
@@ -521,18 +528,6 @@ export function forwardRaw(weights, features) {
  * ------------------------------------------------------------------ */
 
 /**
- * Build an evaluator with the same signature and return shape as
- * `uniformStubEvaluator` in `normal-duel-gumbel-search.mjs`, so
- * `gumbelRootSearch` and `selfPlayGame` take it unchanged:
- *
- *     evaluate(config, state) -> { policy: Float32Array(209), value: number }
- *
- * The legal mask is applied to the logits *before* the softmax, so illegal
- * actions come out at exactly zero rather than merely small. Scratch is
- * allocated here, once; each call returns a fresh policy array because that
- * array belongs to the caller.
- */
-/**
  * The same forward-plus-mask-plus-softmax as `createNetworkEvaluator`, but
  * entered from a feature vector and a legal mask the caller already holds
  * rather than from a state.
@@ -554,6 +549,13 @@ export function createFeatureEvaluator(weights) {
     if (mask.length !== POLICY_SIZE || policyOut.length !== POLICY_SIZE) {
       fail('unsupported_policy_size');
     }
+    // Float32Array specifically, not any length-209 view. `createNetworkEvaluator`
+    // writes each exp() into a Float32Array before the normalising divide, so
+    // every weight is rounded to f32 first. A Float64Array or plain Array here
+    // would skip that rounding and yield different priors from identical logits
+    // -- the two evaluators must not disagree, and the intended target is a view
+    // into wasm memory, which is always Float32Array.
+    if (!(policyOut instanceof Float32Array)) fail('invalid_policy_out');
     const value = forwardInto(checked, features, scratch);
 
     const logits = scratch.logits;
@@ -580,6 +582,18 @@ export function createFeatureEvaluator(weights) {
   };
 }
 
+/**
+ * Build an evaluator with the same signature and return shape as
+ * `uniformStubEvaluator` in `normal-duel-gumbel-search.mjs`, so
+ * `gumbelRootSearch` and `selfPlayGame` take it unchanged:
+ *
+ *     evaluate(config, state) -> { policy: Float32Array(209), value: number }
+ *
+ * The legal mask is applied to the logits *before* the softmax, so illegal
+ * actions come out at exactly zero rather than merely small. Scratch is
+ * allocated here, once; each call returns a fresh policy array because that
+ * array belongs to the caller.
+ */
 export function createNetworkEvaluator(weights) {
   const checked = checkWeights(weights);
   const scratch = createScratch();

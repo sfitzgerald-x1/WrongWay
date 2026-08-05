@@ -6,11 +6,12 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { createInitialState, applyAction, legalActionCodes, policySize } from '../js/normal-duel-engine.mjs';
-import { encodeState } from '../js/normal-duel-nn-encoding.mjs';
+import { encodeState, legalMaskFloat } from '../js/normal-duel-nn-encoding.mjs';
 import { gumbelRootSearch } from '../js/normal-duel-gumbel-search.mjs';
 import { createLcg32 } from '../js/lcg32.mjs';
 import {
-  NN_RUNTIME_VERSION, createNetworkEvaluator, forwardRaw, loadWeights, requiredTensorShapes
+  NN_RUNTIME_VERSION, createFeatureEvaluator, createNetworkEvaluator, forwardRaw, loadWeights,
+  requiredTensorShapes
 } from '../js/normal-duel-nn-runtime.mjs';
 import {
   CONFIG_9X9, FEATURE_LEN, POLICY_SIZE, fixedState, fnv1a32, syntheticWeightSet
@@ -438,4 +439,56 @@ test('the runtime demands exactly the tensors a real export produces', () => {
   for (const { name, shape } of captured.tensors) {
     assert.deepEqual(required[name], shape, `shape drift on ${name}`);
   }
+});
+
+/* ------------------------------------------------------------------ *
+ * createFeatureEvaluator — the batched path's network side
+ * ------------------------------------------------------------------ */
+
+/**
+ * `createFeatureEvaluator` is what the native PUCT tree calls: it takes the
+ * encoded leaf and its mask directly rather than re-deriving them from a state.
+ * It had no test at all, and it must agree exactly with `createNetworkEvaluator`
+ * — the two differ only in how they are entered, so any divergence means the
+ * batched path and the reference path disagree about the same position.
+ */
+test('createFeatureEvaluator agrees exactly with createNetworkEvaluator', () => {
+  const weights = loadWeights(SYNTHETIC.manifest, SYNTHETIC.buffer);
+  const state = fixedState();
+
+  const fromState = createNetworkEvaluator(weights)(CONFIG_9X9, state);
+  const features = encodeState(CONFIG_9X9, state);
+  const mask = legalMaskFloat(CONFIG_9X9, state);
+  const policyOut = new Float32Array(POLICY_SIZE);
+  const value = createFeatureEvaluator(weights)(features, mask, policyOut);
+
+  assert.equal(value, fromState.value, 'the two entry points disagree about the value');
+  assert.deepEqual(Array.from(policyOut), Array.from(fromState.policy),
+    'the two entry points disagree about the policy');
+
+  // Illegal actions are exactly zero, not merely small.
+  const legal = new Set(legalActionCodes(CONFIG_9X9, state));
+  for (let code = 0; code < POLICY_SIZE; code += 1) {
+    if (!legal.has(code)) assert.equal(policyOut[code], 0, `code ${code} is illegal but nonzero`);
+  }
+  let sum = 0;
+  for (const p of policyOut) sum += p;
+  assert.ok(Math.abs(sum - 1) < 1e-5, `policy sums to ${sum}`);
+});
+
+/**
+ * The output buffer must be a Float32Array. `createNetworkEvaluator` rounds each
+ * exp() to f32 before the normalising divide, so a wider buffer here would skip
+ * that rounding and silently produce different priors from the same logits.
+ */
+test('createFeatureEvaluator rejects an output buffer that is not a Float32Array', () => {
+  const weights = loadWeights(SYNTHETIC.manifest, SYNTHETIC.buffer);
+  const evaluate = createFeatureEvaluator(weights);
+  const state = fixedState();
+  const features = encodeState(CONFIG_9X9, state);
+  const mask = legalMaskFloat(CONFIG_9X9, state);
+
+  assert.throws(() => evaluate(features, mask, new Float64Array(POLICY_SIZE)), /invalid_policy_out/);
+  assert.throws(() => evaluate(features, mask, new Array(POLICY_SIZE).fill(0)), /invalid_policy_out/);
+  assert.throws(() => evaluate(features, mask, new Float32Array(POLICY_SIZE - 1)), /unsupported_policy_size/);
 });

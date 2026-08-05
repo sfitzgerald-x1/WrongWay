@@ -10,7 +10,7 @@
 use wrongway_normal_duel::mock_evaluator;
 use wrongway_normal_duel::selfplay::{
     sample_visit_temperature, Exploration, SelfPlayBatch, SelfPlayOptions, RECORD_FEATURES,
-    RECORD_FLOATS, RECORD_POLICY,
+    RECORD_FLOATS, RECORD_META_FIELDS, RECORD_POLICY,
 };
 use wrongway_normal_duel::{Config, Coord, Player, Players, JUMP_RULE, RULESET};
 
@@ -355,4 +355,49 @@ fn oversized_games_and_ply_cap_are_rejected_rather_than_reserving_unboundedly() 
         ..SelfPlayOptions::default()
     };
     assert!(SelfPlayBatch::new(&config, ok).is_ok());
+}
+
+/// The search tree re-derives adjudication itself (goal, then repetition, then
+/// ply cap) rather than asking the engine. The JS parity grid samples states at
+/// plies 4-44 with at most 48 simulations, so a tree rooted there cannot descend
+/// to `ply_cap = 200`: the cap arm is never executed in that grid, and a missed
+/// cap is silent -- the game just keeps being scored as a continuation.
+///
+/// Rooting a batch at a `ply_cap` the tree reaches during descent exercises it.
+#[test]
+fn the_tree_adjudicates_the_ply_cap_it_descends_into() {
+    // A cap low enough that a 64-simulation tree descends past it.
+    let out = run(SelfPlayOptions {
+        games: 4,
+        simulations: 64,
+        max_considered: 8,
+        ply_cap: 12,
+        seed_base: 4321,
+        ..SelfPlayOptions::default()
+    });
+    assert!(out.count > 0, "the batch recorded nothing");
+
+    // Every game stopped before the cap, and `ply` is absolute, so this also
+    // pins that the cap is not being counted from the opening.
+    let max_ply = out
+        .meta
+        .chunks_exact(RECORD_META_FIELDS)
+        .map(|chunk| chunk[1])
+        .max()
+        .expect("at least one record");
+    assert!(
+        max_ply < 12,
+        "a record exists at ply {max_ply}, at or beyond the cap of 12"
+    );
+
+    // Targets stay proper distributions right up against the cap. The arm that
+    // would degrade silently is the one scoring a capped position as ongoing.
+    for record in out.records.chunks_exact(RECORD_FLOATS) {
+        let target = &record[RECORD_FEATURES..RECORD_FEATURES + RECORD_POLICY];
+        let sum: f32 = target.iter().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-3,
+            "policy target sums to {sum}, not 1"
+        );
+    }
 }

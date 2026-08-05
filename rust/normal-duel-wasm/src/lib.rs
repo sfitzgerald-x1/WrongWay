@@ -454,7 +454,7 @@ fn default_ply_cap() -> u64 {
 ///
 /// 1. **Here:** every buffer the hot path touches is allocated at its final
 ///    size in [`NormalDuelSelfPlayBatch::new`] and never resized —
-///    `features` (`games * 648` f32), `policy` (`games * 209` f32), `value`
+///    `features` (`games * 810` f32), `policy` (`games * 209` f32), `value`
 ///    (`games` f32), plus the record and metadata sinks reserved to their
 ///    worst case (`games * plyCap` records). Nothing on the steady-state path
 ///    asks the allocator for more pages.

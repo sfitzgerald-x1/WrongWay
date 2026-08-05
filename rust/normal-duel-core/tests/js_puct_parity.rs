@@ -41,11 +41,17 @@ struct Case {
 }
 
 /// Spans the schedule's shapes: a budget below one visit per candidate, a
-/// budget that halves several times, the single-candidate drain, and a zero
-/// budget where the winner is decided by halving alone.
+/// budget that halves several times, and the single-candidate drain.
+///
+/// There is no zero-budget case. There used to be, covering the winner being
+/// decided by halving alone, but `puctSearch` now rejects `simulations: 0` --
+/// with no simulations the visit counts are empty and `effectiveVisitCounts`
+/// returns a one-hot, which the cluster shard worker would record as a policy
+/// target. Parity over an input the JS side refuses is not meaningful, so the
+/// case is a budget of 1 at the same `max_considered` instead.
 const CASES: [Case; 6] = [
     Case {
-        simulations: 0,
+        simulations: 1,
         max_considered: 4,
         c_puct: 1.25,
         seed: 11,

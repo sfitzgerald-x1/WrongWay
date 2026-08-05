@@ -342,7 +342,7 @@ test('a terminal root state is rejected rather than searched', () => {
 /* --- budget ---------------------------------------------------------- */
 
 test('simulationsUsed never exceeds the budget and visit totals reconcile', () => {
-  for (const simulations of [0, 1, 2, 3, 5, 8, 32, 64]) {
+  for (const simulations of [1, 2, 3, 5, 8, 32, 64]) {
     const result = search({ simulations });
     assert.ok(result.simulationsUsed <= simulations, `used ${result.simulationsUsed} of ${simulations}`);
     assert.equal(totalVisits(result.visitCounts), result.simulationsUsed);
@@ -350,7 +350,7 @@ test('simulationsUsed never exceeds the budget and visit totals reconcile', () =
 });
 
 test('leaf evaluations never exceed the simulation budget', () => {
-  for (const simulations of [0, 1, 4, 32]) {
+  for (const simulations of [1, 4, 32]) {
     const evaluate = counted(uniformStubEvaluator);
     const result = search({ simulations, evaluate });
     // The single root evaluation produces the priors and is outside the budget.
@@ -359,10 +359,27 @@ test('leaf evaluations never exceed the simulation budget', () => {
   }
 });
 
-test('a zero budget still returns a legal action and a normalised policy', () => {
-  const result = search({ simulations: 0 });
-  assert.equal(result.simulationsUsed, 0);
-  assert.equal(result.maxDepthReached, 0);
+/**
+ * A zero budget used to be accepted here and returned a legal action with a
+ * normalised policy, which reads as graceful degradation and is not: with no
+ * simulations the visit counts are empty, `effectiveVisitCounts` falls back to a
+ * one-hot of the played action, and a self-play driver records that one-hot as
+ * the policy target at a position with ~130 legal codes. Full record count, no
+ * warning, and the improvement ratchet gone -- an earlier run spent 114 flat
+ * iterations that way.
+ *
+ * `createGumbelAgent` already rejected `simulations: 0` and `maxConsidered` was
+ * already required to be positive, so accepting it here was an inconsistency
+ * rather than a considered choice.
+ */
+test('a zero simulation budget is rejected rather than yielding a one-hot target', () => {
+  assert.throws(() => search({ simulations: 0 }), /invalid_simulations/);
+  assert.throws(() => selfPlayGamePuct({
+    config: CONFIG_9X9, evaluate: uniformStubEvaluator, simulations: 0, maxConsidered: 4, seed: 1
+  }), /invalid_simulations/);
+
+  // A budget of one still works: the guard is on zero, not on "small".
+  const result = search({ simulations: 1 });
   assert.ok(legalActionCodes(CONFIG_9X9, MID_GAME).includes(result.actionCode));
   let sum = 0;
   for (const p of result.improvedPolicy) sum += p;
