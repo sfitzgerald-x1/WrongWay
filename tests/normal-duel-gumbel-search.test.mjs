@@ -147,7 +147,7 @@ test('termination: the game ends terminally or exactly at plyCap', () => {
 test('budget: simulationsUsed never exceeds simulations', () => {
   const state = play(CONFIG_9X9, [pawn(7, 4)]);
   const combinations = [
-    [0, 1], [0, 8], [1, 4], [3, 8], [4, 4], [16, 8], [7, 16], [2, 32],
+    [1, 1], [1, 8], [1, 4], [3, 8], [4, 4], [16, 8], [7, 16], [2, 32],
     [64, 400], [5, 209], [32, 1]
   ];
   for (const [simulations, maxConsidered] of combinations) {
@@ -197,7 +197,7 @@ test('single legal action: chosen without spending the budget', () => {
 test('improvedPolicy: sums to 1, zero off-legal, argmax legal', () => {
   const state = play(CONFIG_9X9, [pawn(7, 4), wall('H-3-3')]);
   const legal = new Set(legalActionCodes(CONFIG_9X9, state));
-  for (const [simulations, maxConsidered] of [[0, 4], [1, 3], [16, 8], [48, 12]]) {
+  for (const [simulations, maxConsidered] of [[1, 4], [1, 3], [16, 8], [48, 12]]) {
     const result = gumbelRootSearch({
       config: CONFIG_9X9, state, evaluate: uniformStubEvaluator,
       simulations, maxConsidered, random: createLcg32(77)
@@ -337,4 +337,25 @@ test('search never returns a code outside the legal set, across many positions',
     }
     state = applyAction(CONFIG_9X9, state, decodeAction(CONFIG_9X9, record.actionCode));
   }
+});
+
+/**
+ * A zero budget is rejected rather than returning a one-hot. This module's
+ * `effectiveVisitCounts` falls back to a one-hot of the played action when the
+ * visit counts are empty, which is right for a position with one legal move and
+ * wrong for a zero budget — there it becomes a policy target at a position with
+ * ~130 legal codes, which is the degenerate label that cost an earlier run 114
+ * flat iterations. `puctSearch` and `PuctTreeSearch::new` already guard it; this
+ * module is the milestone-4 path and was the last place still accepting it.
+ */
+test('a zero simulation budget is rejected by both entry points', () => {
+  const state = play(CONFIG_9X9, [pawn(7, 4)]);
+  assert.throws(() => gumbelRootSearch({
+    config: CONFIG_9X9, state, evaluate: uniformStubEvaluator,
+    simulations: 0, maxConsidered: 8, random: createLcg32(1)
+  }), /invalid_simulations/);
+  assert.throws(() => selfPlayGame({
+    config: CONFIG_9X9, evaluate: uniformStubEvaluator,
+    simulations: 0, maxConsidered: 8, seed: 1
+  }), /invalid_simulations/);
 });

@@ -571,7 +571,7 @@ impl SelfPlayBatch {
             return Err(PuctError::UnsupportedBoard);
         }
         if options.games == 0 {
-            return Err(PuctError::InvalidBufferLength);
+            return Err(PuctError::InvalidGames);
         }
         // `games` and `ply_cap` arrive from JSON and are multiplied into an
         // up-front `Vec::with_capacity` below. Unbounded, they abort rather than
