@@ -8,11 +8,15 @@
  * runs a BN — every convolution carries a bias and is followed by ReLU (or, in
  * the residual second conv, by the skip add and then ReLU).
  *
- *     input  (8, 9, 9)  planes in `NN_PLANE_LAYOUT` order, absolute engine (r, c)
+ *     input  (10, 9, 9) planes in `NN_PLANE_LAYOUT` order, absolute engine (r, c)
  *     stem   conv3x3 -> 64ch, ReLU
  *     6x     [conv3x3 + ReLU, conv3x3, + skip, ReLU]
- *     policy conv1x1 -> 32ch, ReLU, flatten CHW (2592), FC -> 209 logits
- *     value  conv1x1 ->  8ch, ReLU, flatten CHW (648), FC -> 64, ReLU, FC -> 1, tanh
+ *     policy conv1x1 -> 3ch, no activation, read as [pawn 9x9 | H 8x8 | V 8x8]
+ *     value  conv1x1 -> 32ch, ReLU, mean/max/std pool (96), FC -> 64, ReLU, FC -> 1, tanh
+ *
+ * The heads are the fully-convolutional policy and globally-pooled value of the
+ * current `model.py`; the dense `policy.fc` and the flattened value head that
+ * preceded them are gone, and weight sets carrying those tensors are rejected.
  *
  * Nothing mirrors, rotates or otherwise transforms coordinates: the planes and
  * the action codes are both engine-absolute, and they stay that way.
@@ -43,7 +47,7 @@
  */
 
 import { policySize, validateConfig } from './normal-duel-engine.mjs';
-import { encodeState, legalMaskFloat } from './normal-duel-nn-encoding.mjs';
+import { encodeState, legalMaskFloat, NN_INPUT_PLANES } from './normal-duel-nn-encoding.mjs';
 
 /** Frozen identifier for this runtime and the weight format it accepts. */
 export const NN_RUNTIME_VERSION = 'nn-runtime-forward-v1';
@@ -61,12 +65,25 @@ function fail(reason) { throw new NormalDuelRuntimeError(reason); }
 const ROWS = 9;
 const COLUMNS = 9;
 const CELLS = ROWS * COLUMNS;          // 81
-const INPUT_PLANES = 8;
-const FEATURE_LEN = INPUT_PLANES * CELLS; // 648
+// Taken from the encoder rather than restated. This was a literal 8 while the
+// encoder grew to 10 planes, and the two only disagreed inside a golden fixture
+// -- the stem convolution would have read a feature vector of the wrong length
+// with no signal beyond that one test.
+const INPUT_PLANES = NN_INPUT_PLANES;
+const FEATURE_LEN = INPUT_PLANES * CELLS;
 const CHANNELS = 64;
 const BLOCKS = 6;
-const POLICY_CHANNELS = 32;
-const VALUE_CHANNELS = 8;
+// The policy head is fully convolutional: 3 planes out of a 1x1 conv, no
+// activation, read out as [pawn 9x9 | wall H 8x8 | wall V 8x8] = 209. The wall
+// planes are cropped to their top-left 8x8, which is where the anchors live.
+const POLICY_CHANNELS = 3;
+const WALL_ROWS = 8;
+const WALL_COLUMNS = 8;
+const VALUE_CHANNELS = 32;
+// The value head pools each channel to mean/max/std over the 81 cells rather
+// than flattening them, so fc1 reads 3 numbers per channel and the head no
+// longer scales with board area.
+const VALUE_POOLS = 3;
 const VALUE_HIDDEN = 64;
 const POLICY_SIZE = 209;
 const FORMAT_VERSION = 1;
@@ -89,11 +106,9 @@ const REQUIRED_TENSORS = (() => {
   }
   spec.push(['policy.conv.weight', [POLICY_CHANNELS, CHANNELS, 1, 1]]);
   spec.push(['policy.conv.bias', [POLICY_CHANNELS]]);
-  spec.push(['policy.fc.weight', [POLICY_SIZE, POLICY_CHANNELS * CELLS]]);
-  spec.push(['policy.fc.bias', [POLICY_SIZE]]);
   spec.push(['value.conv.weight', [VALUE_CHANNELS, CHANNELS, 1, 1]]);
   spec.push(['value.conv.bias', [VALUE_CHANNELS]]);
-  spec.push(['value.fc1.weight', [VALUE_HIDDEN, VALUE_CHANNELS * CELLS]]);
+  spec.push(['value.fc1.weight', [VALUE_HIDDEN, VALUE_POOLS * VALUE_CHANNELS]]);
   spec.push(['value.fc1.bias', [VALUE_HIDDEN]]);
   spec.push(['value.fc2.weight', [1, VALUE_HIDDEN]]);
   spec.push(['value.fc2.bias', [1]]);
@@ -295,7 +310,67 @@ function conv3x3(input, inChannels, weight, bias, output, outChannels, acc) {
   }
 }
 
-/** 1x1 convolution followed by ReLU — the shape both heads start with. */
+/** 1x1 convolution, no activation — what the policy head takes. */
+function conv1x1(input, inChannels, weight, bias, output, outChannels, acc) {
+  for (let oc = 0; oc < outChannels; oc += 1) {
+    acc.fill(bias[oc]);
+    const weightBase = oc * inChannels;
+    for (let ic = 0; ic < inChannels; ic += 1) {
+      const w = weight[weightBase + ic];
+      const inputBase = ic * CELLS;
+      for (let i = 0; i < CELLS; i += 1) acc[i] += w * input[inputBase + i];
+    }
+    const outputBase = oc * CELLS;
+    for (let i = 0; i < CELLS; i += 1) output[outputBase + i] = acc[i];
+  }
+}
+
+/**
+ * Flatten the three policy planes into the 209 codes: the pawn plane entire,
+ * then each wall plane cropped to its top-left 8x8. The crop is a row-stride
+ * read, not a contiguous slice — the plane is 9 wide, so row r of the crop
+ * starts at r * 9 and the ninth column of every row is skipped.
+ */
+function readPolicyPlanes(planes, logits) {
+  for (let i = 0; i < CELLS; i += 1) logits[i] = planes[i];
+  let out = CELLS;
+  for (let plane = 1; plane <= 2; plane += 1) {
+    const base = plane * CELLS;
+    for (let r = 0; r < WALL_ROWS; r += 1) {
+      const rowBase = base + r * COLUMNS;
+      for (let c = 0; c < WALL_COLUMNS; c += 1) logits[out++] = planes[rowBase + c];
+    }
+  }
+}
+
+/**
+ * Global mean/max/std per channel, laid out as the reference concatenates them:
+ * all the means, then all the maxima, then all the standard deviations. The std
+ * is the population form (`unbiased=False`), so it divides by 81 and not 80.
+ */
+function poolValuePlanes(planes, pooled) {
+  for (let ch = 0; ch < VALUE_CHANNELS; ch += 1) {
+    const base = ch * CELLS;
+    let sum = 0;
+    let max = -Infinity;
+    for (let i = 0; i < CELLS; i += 1) {
+      const value = planes[base + i];
+      sum += value;
+      if (value > max) max = value;
+    }
+    const mean = sum / CELLS;
+    let variance = 0;
+    for (let i = 0; i < CELLS; i += 1) {
+      const delta = planes[base + i] - mean;
+      variance += delta * delta;
+    }
+    pooled[ch] = mean;
+    pooled[VALUE_CHANNELS + ch] = max;
+    pooled[2 * VALUE_CHANNELS + ch] = Math.sqrt(variance / CELLS);
+  }
+}
+
+/** 1x1 convolution followed by ReLU — what the value head takes. */
 function conv1x1Relu(input, inChannels, weight, bias, output, outChannels, acc) {
   for (let oc = 0; oc < outChannels; oc += 1) {
     acc.fill(bias[oc]);
@@ -340,6 +415,7 @@ function createScratch() {
     t2: new Float32Array(CHANNELS * CELLS),
     policyPlanes: new Float32Array(POLICY_CHANNELS * CELLS),
     valuePlanes: new Float32Array(VALUE_CHANNELS * CELLS),
+    pooled: new Float32Array(VALUE_POOLS * VALUE_CHANNELS),
     valueHidden: new Float32Array(VALUE_HIDDEN),
     valueOut: new Float32Array(1),
     logits: new Float32Array(POLICY_SIZE)
@@ -383,14 +459,16 @@ function forwardInto(weights, features, scratch) {
     }
   }
 
-  conv1x1Relu(h, CHANNELS, weights.get('policy.conv.weight'), weights.get('policy.conv.bias'),
+  // Policy: no activation on the conv, then the 209 codes are read straight out
+  // of the three planes -- the pawn plane whole, the wall planes cropped.
+  conv1x1(h, CHANNELS, weights.get('policy.conv.weight'), weights.get('policy.conv.bias'),
     scratch.policyPlanes, POLICY_CHANNELS, acc);
-  linear(scratch.policyPlanes, POLICY_CHANNELS * CELLS,
-    weights.get('policy.fc.weight'), weights.get('policy.fc.bias'), scratch.logits, POLICY_SIZE);
+  readPolicyPlanes(scratch.policyPlanes, scratch.logits);
 
   conv1x1Relu(h, CHANNELS, weights.get('value.conv.weight'), weights.get('value.conv.bias'),
     scratch.valuePlanes, VALUE_CHANNELS, acc);
-  linear(scratch.valuePlanes, VALUE_CHANNELS * CELLS,
+  poolValuePlanes(scratch.valuePlanes, scratch.pooled);
+  linear(scratch.pooled, VALUE_POOLS * VALUE_CHANNELS,
     weights.get('value.fc1.weight'), weights.get('value.fc1.bias'), scratch.valueHidden, VALUE_HIDDEN);
   reluInPlace(scratch.valueHidden);
   linear(scratch.valueHidden, VALUE_HIDDEN,

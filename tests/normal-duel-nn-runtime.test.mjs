@@ -12,13 +12,9 @@ import { createLcg32 } from '../js/lcg32.mjs';
 import {
   NN_RUNTIME_VERSION, createNetworkEvaluator, forwardRaw, loadWeights
 } from '../js/normal-duel-nn-runtime.mjs';
-
-const CONFIG_9X9 = Object.freeze({
-  ruleset: 'normal-duel-v1', rows: 9, columns: 9,
-  start: { A: { r: 8, c: 4 }, B: { r: 0, c: 4 } },
-  goalRows: { A: 0, B: 8 }, initialStock: { A: 10, B: 10 },
-  jumpRule: 'permissive-adjacent-exit-v1', repetitionThreshold: 3, plyCap: 200, firstPlayer: 'A'
-});
+import {
+  CONFIG_9X9, FEATURE_LEN, POLICY_SIZE, fixedState, fnv1a32, syntheticWeightSet
+} from './support/nn-runtime-fixture.mjs';
 
 const CONFIG_7X7 = Object.freeze({
   ruleset: 'normal-duel-v1', rows: 7, columns: 7,
@@ -32,26 +28,10 @@ const BLOB_PATH = path.join(TRAINING_DIR, 'weights.bin');
 const MANIFEST_PATH = path.join(TRAINING_DIR, 'weights.manifest.json');
 const PYTHON = path.join(TRAINING_DIR, '.venv/bin/python');
 
-const POLICY_SIZE = 209;
-const FEATURE_LEN = 648;
 
 /* ------------------------------------------------------------------ *
  * Fixtures
  * ------------------------------------------------------------------ */
-
-/** A fixed non-trivial position: a few pawn moves and a wall from each side. */
-function fixedState() {
-  const actions = [
-    { kind: 'pawn', to: { r: 7, c: 4 } },
-    { kind: 'pawn', to: { r: 1, c: 4 } },
-    { kind: 'wall', wall: 'H-3-3' },
-    { kind: 'pawn', to: { r: 2, c: 4 } },
-    { kind: 'pawn', to: { r: 6, c: 4 } },
-    { kind: 'wall', wall: 'V-5-5' }
-  ];
-  return actions.reduce((state, action) => applyAction(CONFIG_9X9, state, action),
-    createInitialState(CONFIG_9X9));
-}
 
 function artifactsPresent() {
   return fs.existsSync(BLOB_PATH) && fs.existsSync(MANIFEST_PATH);
@@ -65,60 +45,8 @@ function realWeights() {
   return cachedWeights;
 }
 
-/** A synthetic-but-valid weight set, so structural tests need no artifacts. */
-function syntheticWeightSet() {
-  const spec = [
-    ['stem.conv.weight', [64, 8, 3, 3]], ['stem.conv.bias', [64]]
-  ];
-  for (let i = 0; i < 6; i += 1) {
-    spec.push([`block${i}.conv1.weight`, [64, 64, 3, 3]], [`block${i}.conv1.bias`, [64]]);
-    spec.push([`block${i}.conv2.weight`, [64, 64, 3, 3]], [`block${i}.conv2.bias`, [64]]);
-  }
-  spec.push(['policy.conv.weight', [32, 64, 1, 1]], ['policy.conv.bias', [32]]);
-  spec.push(['policy.fc.weight', [209, 2592]], ['policy.fc.bias', [209]]);
-  spec.push(['value.conv.weight', [8, 64, 1, 1]], ['value.conv.bias', [8]]);
-  spec.push(['value.fc1.weight', [64, 648]], ['value.fc1.bias', [64]]);
-  spec.push(['value.fc2.weight', [1, 64]], ['value.fc2.bias', [1]]);
-
-  const tensors = [];
-  let offset = 0;
-  for (const [name, shape] of spec) {
-    const count = shape.reduce((product, dimension) => product * dimension, 1);
-    tensors.push({ name, shape, dtype: 'float32', byteOffset: offset, byteLength: count * 4, count });
-    offset += count * 4;
-  }
-  const buffer = new ArrayBuffer(offset);
-  const floats = new Float32Array(buffer);
-  // Deterministic filler: a fixed LCG, never Math.random.
-  let seed = 12345;
-  for (let i = 0; i < floats.length; i += 1) {
-    seed = (seed * 1103515245 + 12345) >>> 0;
-    floats[i] = ((seed >>> 8) / 0x1000000 - 0.5) * 0.1;
-  }
-  const manifest = {
-    formatVersion: 1, byteOrder: 'little', layout: 'C-contiguous', flattenOrder: 'CHW',
-    policySize: 209,
-    input: { planes: 8, rows: 9, columns: 9 },
-    architecture: { blocks: 6, channels: 64, policyHeadChannels: 32, valueHeadChannels: 8, valueHidden: 64 },
-    blobBytes: offset,
-    tensors
-  };
-  return { manifest, buffer };
-}
-
 const SYNTHETIC = syntheticWeightSet();
 const cloneManifest = () => JSON.parse(JSON.stringify(SYNTHETIC.manifest));
-
-/** FNV-1a over a byte range: pins the fixture to the exact blob it was made from. */
-function fnv1a32(buffer) {
-  const bytes = new Uint8Array(buffer);
-  let hash = 0x811c9dc5;
-  for (let i = 0; i < bytes.length; i += 1) {
-    hash ^= bytes[i];
-    hash = Math.imul(hash, 0x01000193) >>> 0;
-  }
-  return hash.toString(16).padStart(8, '0');
-}
 
 const GOLDEN = JSON.parse(fs.readFileSync(
   new URL('./fixtures/nn-runtime-golden-forward-v1.json', import.meta.url), 'utf8'
@@ -201,7 +129,7 @@ for entry in manifest["tensors"]:
     tensors[entry["name"]] = torch.from_numpy(raw.copy())
 
 features = np.asarray(json.loads(Path(sys.argv[2]).read_text()), dtype=np.float32)
-x = torch.from_numpy(features.reshape(1, 8, 9, 9))
+x = torch.from_numpy(features.reshape(1, manifest["input"]["planes"], 9, 9))
 logits, value = reference_forward(tensors, x, manifest["architecture"]["blocks"])
 print(json.dumps({"logits": logits[0].tolist(), "value": float(value[0])}))
 `;
@@ -413,9 +341,10 @@ test('loadWeights rejects overlapping tensors and duplicates', () => {
 
 test('loadWeights rejects a wrong shape for a required tensor and a bad format version', () => {
   const reshaped = cloneManifest();
-  const entry = reshaped.tensors.find((candidate) => candidate.name === 'policy.fc.weight');
-  entry.shape = [2592, 209];
-  assert.throws(() => loadWeights(reshaped, SYNTHETIC.buffer), /unexpected_tensor_shape:policy\.fc\.weight/);
+  const entry = reshaped.tensors.find((candidate) => candidate.name === 'value.fc1.weight');
+  assert.ok(entry, 'the manifest no longer carries value.fc1.weight; pick another required tensor');
+  entry.shape = [entry.shape[1], entry.shape[0]]; // transposed: same count, wrong shape
+  assert.throws(() => loadWeights(reshaped, SYNTHETIC.buffer), /unexpected_tensor_shape:value\.fc1\.weight/);
 
   const versioned = cloneManifest();
   versioned.formatVersion = 2;
