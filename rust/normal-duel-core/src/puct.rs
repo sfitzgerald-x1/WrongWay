@@ -196,7 +196,7 @@ fn completed_q(edge: &Edge, root_value: f64) -> f64 {
 /// The Gumbel improved policy over `edges`, which must be one node's whole edge
 /// list: `pi'(a) ∝ exp(logit(a) + sigma(completedQ(a)))`.
 ///
-/// Three details are load-bearing.
+/// Four details are load-bearing.
 ///
 /// `logit(a)` is `js_log(prior.max(POLICY_FLOOR))`, the same expression
 /// `seed_candidates` uses to rank the Gumbel draws — the improved policy and the
@@ -211,7 +211,8 @@ fn completed_q(edge: &Edge, root_value: f64) -> f64 {
 /// infinity and the normalisation would return NaN. After the subtraction the
 /// largest term is exactly `1.0`, so the total is in `[1, edges.len()]` and can
 /// neither overflow nor be zero.
-/// Note on `sigma`'s scale, because it now does a second job.
+///
+/// And `sigma`'s scale now does a second job.
 ///
 /// In sequential halving `sigma` is only ever a RANKING term: it is strictly
 /// increasing in `q`, so its magnitude is irrelevant there and only the induced
