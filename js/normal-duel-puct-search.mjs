@@ -51,7 +51,24 @@ import {
 import { encodePolicyTarget, encodeState, encodeLegalPolicyTarget } from './normal-duel-nn-encoding.mjs';
 import { createLcg32 } from './lcg32.mjs';
 
-/** Frozen identifier for this search + self-play record format. */
+/**
+ * Frozen identifier for this search + self-play record format.
+ *
+ * Deliberately still `v1`. The Rust port moved to `puct-az-tree-v2`, whose
+ * `policyTarget` is the Gumbel improved policy over every legal root action
+ * rather than the considered set's normalised visit counts; this module keeps
+ * recording visit counts. That divergence is a decision, not drift — see
+ * `JS_REFERENCE_SEARCH_VERSION` in `rust/normal-duel-core/src/puct.rs` for why
+ * (in short: cross-checking an improved policy would mean comparing `Math.exp`
+ * to Rust's `exp` bit for bit, and production self-play runs the Rust/wasm
+ * batch, not this driver).
+ *
+ * What this module still is: the parity oracle for every search *decision* —
+ * visit counts, chosen action, root value, simulations spent, considered set.
+ * None of those moved, and `rust/normal-duel-core/tests/js_puct_parity.rs`
+ * compares all of them exactly, plus this string, so changing it fails the Rust
+ * suite rather than quietly desynchronising the two engines.
+ */
 export const PUCT_SEARCH_VERSION = 'puct-az-tree-v1';
 
 export class PuctSearchError extends Error {

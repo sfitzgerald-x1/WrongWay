@@ -171,6 +171,126 @@ fn visit_temperature_keeps_policy_targets_as_full_distributions() {
     assert!(argmax_multi * 10 > argmax.count * 9);
 }
 
+/// The v2 record format's own acceptance criterion, where it can fail the build.
+///
+/// The visit-count target had two measurable defects on live shards: it put mass
+/// on 8.2 codes out of 40.4 legal ones, and its top two entries were
+/// *bit-identical* in 75.5% of positions because sequential halving hands both
+/// finalists the same visit count whoever won. The improved policy is a softmax
+/// over every legal root action, so both numbers should move decisively, and it
+/// must still be exactly zero everywhere the mask says illegal.
+///
+/// This runs at the production search shape (128 simulations, 16 considered),
+/// which is the shape the ladder degeneracy was measured at.
+#[test]
+fn improved_policy_targets_cover_the_legal_moves_and_separate_the_top_two() {
+    let out = run(SelfPlayOptions {
+        games: 3,
+        simulations: 128,
+        max_considered: 16,
+        ply_cap: 24,
+        seed_base: 20_260_808,
+        temperature: 1.0,
+        temperature_moves: 12,
+        ..SelfPlayOptions::default()
+    });
+    assert!(out.count > 0, "the batch recorded nothing");
+
+    let mut legal_total = 0_usize;
+    let mut nonzero_total = 0_usize;
+    let mut tied_top_two = 0_usize;
+    let mut entropies: Vec<f64> = Vec::with_capacity(out.count);
+
+    for i in 0..out.count {
+        let base = i * RECORD_FLOATS + RECORD_FEATURES;
+        let target = &out.records[base..base + RECORD_POLICY];
+        let mask = &out.records[base + RECORD_POLICY..base + 2 * RECORD_POLICY];
+
+        let mut mass = 0.0_f64;
+        let mut entropy = 0.0_f64;
+        let mut top = [0.0_f32; 2];
+        let mut legal = 0_usize;
+        let mut nonzero = 0_usize;
+        for (code, (&p, &m)) in target.iter().zip(mask.iter()).enumerate() {
+            if m == 1.0 {
+                legal += 1;
+            } else {
+                // The trainer's contract: not "small", exactly zero.
+                assert_eq!(
+                    p, 0.0,
+                    "record {i}: illegal code {code} carries {p} of the target"
+                );
+            }
+            if p > 0.0 {
+                nonzero += 1;
+                mass += f64::from(p);
+                entropy -= f64::from(p) * f64::from(p).ln();
+                if p > top[0] {
+                    top[1] = top[0];
+                    top[0] = p;
+                } else if p > top[1] {
+                    top[1] = p;
+                }
+            }
+        }
+        assert!(
+            (mass - 1.0).abs() < 1e-3,
+            "record {i}: target sums to {mass}, outside the loader's 1e-3 band"
+        );
+        assert!(
+            nonzero <= legal,
+            "record {i}: {nonzero} nonzero entries against {legal} legal codes"
+        );
+        if legal > 1 && top[0] == top[1] {
+            tied_top_two += 1;
+        }
+        legal_total += legal;
+        nonzero_total += nonzero;
+        entropies.push(entropy);
+    }
+
+    let mean_legal = legal_total as f64 / out.count as f64;
+    let mean_nonzero = nonzero_total as f64 / out.count as f64;
+    let tied = tied_top_two as f64 / out.count as f64;
+    let mean_entropy = entropies.iter().sum::<f64>() / out.count as f64;
+    let distinct_entropies = {
+        let mut bits: Vec<u64> = entropies.iter().map(|h| h.to_bits()).collect();
+        bits.sort_unstable();
+        bits.dedup();
+        bits.len()
+    };
+    println!(
+        "v2 targets over {} records: mean legal {mean_legal:.1}, mean nonzero {mean_nonzero:.1}, \
+         top1==top2 {:.1}%, mean entropy {mean_entropy:.3} nats over {distinct_entropies} \
+         distinct values",
+        out.count,
+        tied * 100.0
+    );
+
+    // The visit target put mass on ~20% of the legal moves. A softmax puts mass
+    // on all of them, less the tail that underflows f32 at a large sigma gap.
+    assert!(
+        mean_nonzero > 0.9 * mean_legal,
+        "mean nonzero {mean_nonzero:.1} against mean legal {mean_legal:.1}: the target is still \
+         concentrated on a subset of the legal moves"
+    );
+    // 75.5% under the ladder. Exact f32 ties are essentially impossible under a
+    // softmax over distinct scores.
+    assert!(
+        tied < 0.05,
+        "top1 == top2 in {:.1}% of records, the ladder signature",
+        tied * 100.0
+    );
+    // The ladder made entropy a function of the candidate count alone, so it
+    // clustered on a handful of constants. Position-dependent entropy is the
+    // signal the policy loss was missing.
+    assert!(
+        distinct_entropies * 2 > out.count,
+        "only {distinct_entropies} distinct target entropies across {} records",
+        out.count
+    );
+}
+
 /// A sampled move is not the argmax move, at least sometimes. Without this the
 /// test above would also pass on a temperature phase that silently did nothing.
 #[test]
@@ -286,11 +406,15 @@ fn invalid_temperature_is_rejected() {
     .is_ok());
 }
 
-/// `simulations == 0` must be refused. With no simulations the search returns
-/// empty visit counts, `effective_visit_counts` falls back to a one-hot, and
-/// every recorded policy target becomes one-hot at a position with ~130 legal
-/// codes -- the degenerate target that cost an earlier run 114 flat iterations,
-/// emitted silently at full record count.
+/// `simulations == 0` must be refused. Under the v1 record format it produced
+/// the degenerate target directly: the search returned empty visit counts,
+/// `effective_visit_counts` fell back to a one-hot, and every recorded policy
+/// target became one-hot at a position with ~130 legal codes -- silently, at
+/// full record count, which cost an earlier run 114 flat iterations. The v2
+/// improved-policy target cannot degenerate that way, but a search that runs no
+/// simulations visits nothing, so every completed Q is the root value and the
+/// target is just the network's own prior read back. Still worth nothing, still
+/// refused.
 #[test]
 fn zero_simulations_is_rejected_rather_than_emitting_one_hot_targets() {
     let cfg = config();

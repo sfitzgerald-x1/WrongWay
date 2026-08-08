@@ -13,6 +13,15 @@
 // epsilon draws. A divergence in draw count is the signature of an RNG-stream
 // fork; a divergence in ply count with matching draws is a termination-rule
 // difference.
+//
+// SINCE `puct-az-tree-v2`, READ `firstLine` WITH THAT IN MIND. Driver B records
+// the Gumbel improved policy as `policyTarget`; driver A is the frozen JS
+// reference and still records normalised visit counts. The shard LINES
+// therefore differ by construction and `firstLine` is expected to be 0 — that
+// is a deliberate format divergence, not the fork this script hunts. The signal
+// that still means what it always meant is the ply trace: `firstPly`, the draw
+// counts and the per-game ply counts, none of which read the policy target
+// under `uniformEpsilon`.
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';

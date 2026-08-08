@@ -50,9 +50,35 @@ use crate::{
     MAX_POLICY_CODES, NN_INPUT_PLANES,
 };
 
-/// Frozen identifier for this search + self-play record format, matching
-/// `PUCT_SEARCH_VERSION` in the JavaScript.
-pub const PUCT_SEARCH_VERSION: &str = "puct-az-tree-v1";
+/// Frozen identifier for this search + self-play record format.
+///
+/// `v2` is the completed-Q policy target: the recorded `policyTarget` is the
+/// Gumbel improved policy over every legal root action
+/// ([`PuctResult::improved_policy`]) instead of the normalised visit counts of
+/// the considered set. Nothing about which move the search *plays* changed, so
+/// the version bump names a record-format change, not a search change.
+pub const PUCT_SEARCH_VERSION: &str = "puct-az-tree-v2";
+
+/// The version the JavaScript reference search is frozen at.
+///
+/// `js/normal-duel-puct-search.mjs` deliberately stays on `v1`. It is the parity
+/// oracle for the *search decisions* — visit counts, chosen action, root value,
+/// simulations spent, considered set — and every one of those is unchanged by
+/// the improved policy, so `tests/js_puct_parity.rs` still compares exactly what
+/// it always compared, at full strength.
+///
+/// Porting the improved policy to the JavaScript would mean comparing
+/// `Math.exp` against [`f64::exp`] bit for bit. `exp` is not an IEEE-754
+/// operation, which is why [`crate::js_math::js_log`] exists at all; there is no
+/// `js_exp`, and writing one to cross-check a training target would be a far
+/// larger correctness surface than the target itself. The production self-play
+/// driver is the Rust/wasm [`crate::selfplay::SelfPlayBatch`], not the
+/// JavaScript reference, so the reference is frozen and the divergence is named
+/// here rather than left to be discovered.
+///
+/// `tests/js_puct_parity.rs` asserts the JavaScript still reports this string,
+/// so the freeze cannot drift silently in either direction.
+pub const JS_REFERENCE_SEARCH_VERSION: &str = "puct-az-tree-v1";
 
 /// Floor applied inside the logit so a legal action the policy assigns exactly
 /// zero probability is merely very unlikely, not `-Infinity`.
@@ -145,6 +171,72 @@ fn clamp_value(value: f64) -> f64 {
 /// Strictly increasing in `q`, so it never reorders two candidates by value.
 fn sigma(q: f64, max_visits: u32) -> f64 {
     f64::from(C_VISIT + max_visits) * C_SCALE * q
+}
+
+/// The paper's `completedQ`: a visited root action is worth what the tree
+/// measured, an unvisited one is worth the root's own value.
+///
+/// This is the completion the halving already used to rank survivors, lifted
+/// into one function so the improved policy and the schedule cannot drift apart.
+///
+/// Danihelka et al. refine the unvisited case to `v_mix`, a prior-weighted blend
+/// of the root value and the visited children's Q. That is a possible future
+/// swap and this function is the single place it would happen; it is
+/// deliberately not implemented here, because `v_mix` changes the halving
+/// ranking too and therefore the search's decisions, which this change does not
+/// touch.
+fn completed_q(edge: &Edge, root_value: f64) -> f64 {
+    if edge.visits > 0 {
+        edge.value_sum / f64::from(edge.visits)
+    } else {
+        root_value
+    }
+}
+
+/// The Gumbel improved policy over `edges`, which must be one node's whole edge
+/// list: `pi'(a) ∝ exp(logit(a) + sigma(completedQ(a)))`.
+///
+/// Three details are load-bearing.
+///
+/// `logit(a)` is `js_log(prior.max(POLICY_FLOOR))`, the same expression
+/// `seed_candidates` uses to rank the Gumbel draws — the improved policy and the
+/// considered set read the prior through the same floor.
+///
+/// `max_visits` is the maximum over *all* the node's edges, not over the
+/// halving's surviving set, because the policy covers actions halving discarded.
+///
+/// The softmax subtracts the maximum score before exponentiating. That is not
+/// tidiness: `sigma` spans roughly `±(C_VISIT + max_visits)`, so at a
+/// four-figure simulation budget the raw exponentials would overflow to
+/// infinity and the normalisation would return NaN. After the subtraction the
+/// largest term is exactly `1.0`, so the total is in `[1, edges.len()]` and can
+/// neither overflow nor be zero.
+fn improved_policy(edges: &[Edge], root_value: f64) -> Vec<(u16, f64)> {
+    let max_visits = edges.iter().map(|edge| edge.visits).max().unwrap_or(0);
+
+    let mut scored: Vec<(u16, f64)> = Vec::with_capacity(edges.len());
+    let mut highest = f64::NEG_INFINITY;
+    for edge in edges {
+        let logit = js_log(edge.prior.max(POLICY_FLOOR));
+        let score = logit + sigma(completed_q(edge, root_value), max_visits);
+        if score > highest {
+            highest = score;
+        }
+        scored.push((edge.code, score));
+    }
+    if scored.is_empty() {
+        return scored;
+    }
+
+    let mut total = 0.0_f64;
+    for (_, score) in &mut scored {
+        *score = (*score - highest).exp();
+        total += *score;
+    }
+    for (_, weight) in &mut scored {
+        *weight /= total;
+    }
+    scored
 }
 
 /// `Math.ceil(Math.log2(Math.max(m, 2)))` without a logarithm: the smallest
@@ -377,6 +469,19 @@ pub struct PuctResult {
     pub action_code: u16,
     /// `(code, visits)` for every considered candidate, ascending by code.
     pub visit_counts: Vec<(u16, u32)>,
+    /// `(code, pi')` for every **legal root action**, ascending by code: the
+    /// Gumbel improved policy, and what self-play records as `policyTarget`.
+    ///
+    /// This is what the visit counts above cannot be. Under sequential halving
+    /// the counts are the *schedule*: at 128 simulations over 16 candidates both
+    /// finalists take exactly 30 visits whichever one won and by whatever
+    /// margin, and every legal action outside the considered set takes zero. The
+    /// improved policy reads each action's completed Q instead, so it separates
+    /// the finalists and it covers actions the Gumbel draw never considered.
+    ///
+    /// Ascending by code, and normalised in that order, so the float rounding a
+    /// consumer sees does not depend on iteration order.
+    pub improved_policy: Vec<(u16, f64)>,
     pub root_value: f64,
     pub simulations_used: u32,
     pub max_depth_reached: u32,
@@ -388,6 +493,13 @@ impl PuctResult {
     /// simulations, so the raw counts sum to zero and cannot be normalised; the
     /// played action then carries the whole target. That is correct only because
     /// there was one action to choose.
+    ///
+    /// **No longer the self-play target.** Since the record format moved to
+    /// `puct-az-tree-v2` the policy target is [`Self::improved_policy`], which
+    /// needs no such fallback: a root with one legal action has one edge, and
+    /// the softmax over one element is exactly `1.0`. This is kept because it
+    /// mirrors `effectiveVisitCounts` in the frozen JavaScript reference, which
+    /// still uses it — see [`JS_REFERENCE_SEARCH_VERSION`].
     ///
     /// A zero *budget* used to reach this fallback too, which made the same
     /// one-hot the policy target at a position with ~130 legal codes. It can no
@@ -700,6 +812,13 @@ impl PuctTreeSearch {
             .survivors
             .first()
             .map_or(0, |index| self.candidates[*index].code);
+        // The root's edge list is every legal root action, in the ascending code
+        // order `legal_action_codes_fast` produced, so slicing it is already the
+        // improved policy's domain and ordering. An unexpanded root has no edges
+        // and yields an empty policy.
+        let root = self.nodes[0];
+        let root_edges =
+            &self.edges[root.edges_start as usize..(root.edges_start + root.edges_len) as usize];
         PuctResult {
             action_code: winner,
             visit_counts: self
@@ -707,6 +826,7 @@ impl PuctTreeSearch {
                 .iter()
                 .map(|candidate| (candidate.code, self.edges[candidate.edge as usize].visits))
                 .collect(),
+            improved_policy: improved_policy(root_edges, self.root_value),
             root_value: self.root_value,
             simulations_used: self.used,
             max_depth_reached: self.max_depth,
@@ -826,11 +946,7 @@ impl PuctTreeSearch {
         for index in &self.survivors {
             let candidate = self.candidates[*index];
             let edge = self.edges[candidate.edge as usize];
-            let qhat = if edge.visits > 0 {
-                edge.value_sum / f64::from(edge.visits)
-            } else {
-                self.root_value
-            };
+            let qhat = completed_q(&edge, self.root_value);
             self.ranking
                 .push((*index, candidate.score + sigma(qhat, max_visits)));
         }
@@ -1148,6 +1264,132 @@ mod tests {
     fn sigma_is_strictly_increasing_in_q() {
         assert!(sigma(0.1, 4) < sigma(0.2, 4));
         assert_eq!(sigma(0.5, 0), 25.0);
+    }
+
+    /// An edge with `visits` visits averaging `q`, so `completed_q` reads back
+    /// exactly `q` when `visits > 0` and the root value when it is 0.
+    fn edge(code: u16, prior: f64, visits: u32, q: f64) -> Edge {
+        Edge {
+            code,
+            prior,
+            visits,
+            value_sum: f64::from(visits) * q,
+            child: NO_CHILD,
+        }
+    }
+
+    fn mass(policy: &[(u16, f64)], code: u16) -> f64 {
+        policy
+            .iter()
+            .find(|(candidate, _)| *candidate == code)
+            .unwrap_or_else(|| panic!("code {code} is missing from the improved policy"))
+            .1
+    }
+
+    #[test]
+    fn improved_policy_is_a_distribution_over_exactly_the_edges_given() {
+        let edges = [
+            edge(3, 0.5, 12, 0.2),
+            edge(11, 0.25, 6, -0.1),
+            edge(40, 0.2, 0, 0.0),
+            // A legal action the network gave literally zero prior: floored, so
+            // it is very unlikely rather than impossible.
+            edge(97, 0.0, 0, 0.0),
+        ];
+        let policy = improved_policy(&edges, 0.05);
+
+        assert_eq!(
+            policy.iter().map(|(code, _)| *code).collect::<Vec<_>>(),
+            vec![3, 11, 40, 97],
+            "the improved policy must cover exactly the edges, ascending by code"
+        );
+        let total: f64 = policy.iter().map(|(_, p)| *p).sum();
+        assert!(
+            (total - 1.0).abs() < 1e-12,
+            "improved policy sums to {total}, not 1"
+        );
+        for (code, probability) in &policy {
+            assert!(
+                probability.is_finite() && *probability > 0.0,
+                "code {code} carries {probability}"
+            );
+        }
+    }
+
+    /// The property the visit distribution could not express.
+    ///
+    /// Both finalists of a sequential-halving round hold *identical* visit
+    /// counts — that is the schedule, not a judgement — so the old target gave
+    /// them identical mass however far apart their values were. The improved
+    /// policy separates them by exactly `exp(sigma(dq))`.
+    #[test]
+    fn a_better_completed_q_takes_strictly_more_mass_at_equal_visits() {
+        let good = edge(5, 0.25, 30, 0.4);
+        let bad = edge(9, 0.25, 30, -0.2);
+        assert_eq!(good.visits, bad.visits);
+        assert_eq!(good.prior, bad.prior);
+
+        let policy = improved_policy(&[good, bad], 0.0);
+        let (good_mass, bad_mass) = (mass(&policy, 5), mass(&policy, 9));
+        assert!(
+            good_mass > bad_mass,
+            "Q = 0.4 took {good_mass}, Q = -0.2 took {bad_mass}"
+        );
+        // Equal priors cancel, so the ratio is the sigma gap alone.
+        let expected = sigma(0.6, 30).exp();
+        assert!(
+            ((good_mass / bad_mass) / expected - 1.0).abs() < 1e-9,
+            "mass ratio {} is not exp(sigma(0.6, 30)) = {expected}",
+            good_mass / bad_mass
+        );
+    }
+
+    /// An action the halving never visited is completed with the root value, so
+    /// two unvisited actions are separated by their priors alone — which is how
+    /// the improved policy covers moves the considered set skipped instead of
+    /// targeting them to zero.
+    #[test]
+    fn unvisited_actions_are_completed_with_the_root_value() {
+        let policy = improved_policy(&[edge(2, 0.6, 0, 0.0), edge(8, 0.15, 0, 0.0)], -0.3);
+        assert!(
+            (mass(&policy, 2) / mass(&policy, 8) - 4.0).abs() < 1e-9,
+            "equal completions must leave the prior ratio intact"
+        );
+        // And a visited action beating the root value outranks a better-priored
+        // unvisited one, which no visit-count target could say either.
+        let policy = improved_policy(&[edge(2, 0.9, 0, 0.0), edge(8, 0.1, 4, 0.5)], -0.3);
+        assert!(mass(&policy, 8) > mass(&policy, 2));
+    }
+
+    #[test]
+    fn a_single_legal_action_gives_a_one_hot() {
+        let policy = improved_policy(&[edge(17, 1.0, 3, -0.75)], -0.75);
+        assert_eq!(policy, vec![(17, 1.0)]);
+        // Exactly 1.0 in f32 too: this is the target a forced move records.
+        assert_eq!(policy[0].1 as f32, 1.0_f32);
+    }
+
+    /// `sigma` grows with the visit budget, so without the max-subtraction the
+    /// exponentials overflow to infinity and every probability comes back NaN.
+    /// 100k visits puts the raw exponent past 100050, far beyond `f64::MAX`.
+    #[test]
+    fn the_softmax_does_not_overflow_at_a_large_visit_budget() {
+        let policy = improved_policy(
+            &[edge(1, 0.5, 100_000, 1.0), edge(2, 0.5, 100_000, -1.0)],
+            0.0,
+        );
+        let total: f64 = policy.iter().map(|(_, p)| *p).sum();
+        assert!(
+            (total - 1.0).abs() < 1e-12,
+            "improved policy sums to {total}, not 1"
+        );
+        assert_eq!(mass(&policy, 1), 1.0, "the winner should hold all the mass");
+        assert_eq!(mass(&policy, 2), 0.0, "the loser underflows, not NaNs");
+    }
+
+    #[test]
+    fn an_unexpanded_root_yields_an_empty_improved_policy() {
+        assert!(improved_policy(&[], 0.0).is_empty());
     }
 
     #[test]

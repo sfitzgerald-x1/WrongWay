@@ -49,10 +49,22 @@
 //! [`RECORD_FLOATS`]: `features` (810), `policyTarget` (209), `legalMask`
 //! (209), `z` (1).
 //!
-//! `policyTarget` is the **visit distribution** from `effectiveVisitCounts`,
-//! never a one-hot — a one-hot would throw away everything the tree computed
-//! and is only correct for a search that had nothing to decide, which is the
-//! case `effectiveVisitCounts` already handles.
+//! `policyTarget` is the **Gumbel improved policy** over every legal root
+//! action — `PuctResult::improved_policy`, `pi'(a) ∝ exp(logit(a) +
+//! sigma(completedQ(a)))` — never a one-hot, and never the visit distribution.
+//!
+//! It used to be the visit distribution, and that was the defect: under
+//! sequential halving the visit counts are the schedule rather than the search's
+//! opinion. At 128 simulations over 16 candidates the rounds spend 16x2, 8x4,
+//! 4x8, 2x16, so both finalists end on exactly 30 visits no matter which one won
+//! or by how much, and every legal action outside the considered set is targeted
+//! to exactly zero. Measured on a live shard: the top two target entries were
+//! *bit-identical* in 75.5% of positions, and 8.2 codes carried mass against
+//! 40.4 legal ones. Cross-entropy against that target is pinned at the ladder's
+//! own entropy, so the policy head had almost nothing left to learn from. The
+//! improved policy reads each action's completed Q, which separates the
+//! finalists, and covers every legal action, which stops targeting unexamined
+//! moves to zero.
 //!
 //! Exploration records the *search's* target for the state actually visited
 //! even when the played move is not the search's argmax. The label answers
@@ -87,13 +99,20 @@ pub enum GameOutcome {
 
 /// How the played move is chosen once a search finishes.
 ///
-/// Both modes leave the recorded policy target alone: it is the search's full
-/// visit distribution for the state actually visited, always.
+/// Both modes leave the recorded policy target alone: it is the search's
+/// improved policy for the state actually visited, always.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Exploration {
     /// AlphaZero's recipe. For the first [`SelfPlayOptions::temperature_moves`]
-    /// plies, sample the played move from `visits^(1/T)` over the search's own
-    /// visit counts; after that play the argmax.
+    /// plies, sample the played move from `target^(1/T)` over the search's own
+    /// recorded policy target; after that play the argmax.
+    ///
+    /// That target is now the improved policy rather than the visit ladder, so
+    /// the sampling phase draws over every legal action instead of only the
+    /// considered set. This is the paper's own recommendation for the played
+    /// move at low budgets and it is accepted deliberately: the *mechanism* —
+    /// one draw per ply inside the phase, argmax outside it — is unchanged, only
+    /// the distribution it reads.
     ///
     /// This explores only among moves the search already rated plausible, and
     /// it tapers by construction: the sampling stops when the opening does, so
@@ -168,7 +187,7 @@ impl Default for SelfPlayOptions {
 }
 
 /// Sample an action code from `target^(1/temperature)`, where `target` is the
-/// normalised visit distribution already written as the policy target.
+/// normalised improved policy already written as the policy target.
 ///
 /// Sampling from the *target* rather than from the raw `(code, visits)` pairs is
 /// deliberate on two counts. It reuses the exact f32 values that went to disk,
@@ -415,17 +434,27 @@ impl Game {
             legal_mask[usize::from(*code)] = 1.0;
         }
 
-        // `encodePolicyTarget`: normalise the visit distribution over the codes
-        // it names, writing in ascending code order so the float rounding does
-        // not depend on iteration order.
-        let effective = result.effective_visit_counts();
-        let total: u64 = effective.iter().map(|(_, visits)| u64::from(*visits)).sum();
+        // `encodePolicyTarget`: the Gumbel improved policy, already normalised
+        // over every legal root action and already ascending by code, narrowed
+        // to f32. Ascending order is the contract, not a coincidence: it fixes
+        // the rounding a consumer sees regardless of iteration order.
+        //
+        // The improved policy's domain is the root's edge list and this mask is
+        // built from the same position's legal codes, so the two agree by
+        // construction. Both halves of that are checked rather than assumed: a
+        // count mismatch or a code outside the mask means the search and the
+        // record disagree about the position, and a malformed target is worse
+        // than a loud failure.
+        let improved = &result.improved_policy;
+        if improved.len() != count {
+            return Err(PuctError::InvalidActionCode);
+        }
         let mut policy_target = vec![0.0_f32; RECORD_POLICY];
-        for (code, visits) in &effective {
+        for (code, probability) in improved {
             if legal_mask[usize::from(*code)] != 1.0 {
                 return Err(PuctError::InvalidActionCode);
             }
-            policy_target[usize::from(*code)] = (f64::from(*visits) / total as f64) as f32;
+            policy_target[usize::from(*code)] = *probability as f32;
         }
 
         // Exploration. Every draw below comes from the same per-game `Lcg32`
@@ -587,16 +616,22 @@ impl SelfPlayBatch {
         if options.ply_cap == 0 || options.ply_cap > MAX_PLY_CAP {
             return Err(PuctError::InvalidPlyCap);
         }
-        // `simulations == 0` must be rejected, not tolerated. With no
-        // simulations every search returns empty visit counts, so
-        // `effective_visit_counts` falls back to a one-hot of the chosen action
-        // and the recorded policy target becomes one-hot at a position with ~130
-        // legal codes -- silently, at full record count. That is precisely the
-        // degenerate target that removes AlphaZero's improvement ratchet and cost
-        // an earlier run 114 flat iterations. `max_considered == 0` was already
-        // rejected, so this was an asymmetry rather than a decision, and the
-        // trigger is mundane: `Number('')` is 0, so any driver resolving its sim
-        // count from an unset environment variable sends it.
+        // `simulations == 0` must be rejected, not tolerated. Under the v1 record
+        // format it was catastrophic: every search returned empty visit counts,
+        // `effective_visit_counts` fell back to a one-hot of the chosen action,
+        // and the recorded policy target became one-hot at a position with ~130
+        // legal codes -- silently, at full record count. That degenerate target
+        // removes AlphaZero's improvement ratchet and cost an earlier run 114
+        // flat iterations. The v2 target cannot produce that one-hot (the
+        // improved policy is a distribution over every legal action however the
+        // budget was spent), but a search that runs no simulations still has no
+        // opinion to record: with nothing visited, every completed Q is the root
+        // value and the target collapses to the network's own prior, which
+        // teaches the policy head only what it already said. `max_considered ==
+        // 0` was already rejected, so accepting this was an asymmetry rather than
+        // a decision, and the trigger is mundane: `Number('')` is 0, so any
+        // driver resolving its sim count from an unset environment variable
+        // sends it.
         if options.simulations == 0 {
             return Err(PuctError::InvalidSimulations);
         }
