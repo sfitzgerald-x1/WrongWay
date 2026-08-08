@@ -16,6 +16,26 @@
 //! margin protecting the one quantity that is not bit-reproducible by
 //! construction — see `src/js_math.rs` — and printing it turns "no ordering
 //! flipped" into a number.
+//!
+//! What this file does NOT compare, and why
+//! ----------------------------------------
+//! `PuctResult::improved_policy` — the completed-Q policy target self-play
+//! records since `puct-az-tree-v2` — has no reference answer here. The
+//! JavaScript is deliberately frozen at `v1` and still records normalised visit
+//! counts; comparing an improved policy across the two engines would mean
+//! comparing `Math.exp` to `f64::exp` bit for bit, and `exp` is not an IEEE-754
+//! operation any more than `Math.log` is (which is the entire reason
+//! `src/js_math.rs` exists). Writing a `js_exp` to cross-check a training target
+//! is a larger correctness surface than the target itself, and the production
+//! self-play driver is the Rust/wasm `SelfPlayBatch`, not this reference.
+//!
+//! So the split is: everything the two engines *decide* is compared here, at
+//! full strength and unchanged by the v2 target — the improved policy is a
+//! read-out of the finished tree and moves no search decision. The improved
+//! policy itself is pinned by `src/puct.rs`'s unit tests and by
+//! `tests/selfplay_exploration.rs`. To keep the divergence from going silent,
+//! `the_javascript_reference_is_frozen_at_its_own_version` asserts the version
+//! string the reference reports.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -23,7 +43,9 @@ use std::process::Command;
 use serde_json::{json, Value};
 use wrongway_normal_duel::js_math::Lcg32;
 use wrongway_normal_duel::mock_evaluator;
-use wrongway_normal_duel::puct::{PuctParams, PuctResult, PuctTreeSearch};
+use wrongway_normal_duel::puct::{
+    PuctParams, PuctResult, PuctTreeSearch, JS_REFERENCE_SEARCH_VERSION, PUCT_SEARCH_VERSION,
+};
 use wrongway_normal_duel::{Config, GameState, NN_INPUT_PLANES};
 
 #[path = "common/state_pool.rs"]
@@ -113,11 +135,17 @@ fn double_bits(value: &Value) -> u64 {
     .expect("16 hex digits")
 }
 
-/// Run the JavaScript search over the whole (state, case) grid.
-fn javascript_reference(config: &Config, states: &[GameState]) -> Vec<Value> {
+/// Run the JavaScript search over the whole (state, case) grid, returning the
+/// harness's whole output: `{ version, results }`.
+///
+/// `label` keeps two tests in the same process off each other's scratch files;
+/// cargo runs them on separate threads and the pid alone would collide.
+fn javascript_reference(config: &Config, states: &[GameState], label: &str) -> Value {
     let root = repository_root();
-    let directory =
-        std::env::temp_dir().join(format!("normal-duel-puct-parity-{}", std::process::id()));
+    let directory = std::env::temp_dir().join(format!(
+        "normal-duel-puct-parity-{}-{label}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&directory).expect("temp directory is creatable");
     let input = directory.join("input.json");
     let output = directory.join("results.json");
@@ -159,13 +187,37 @@ fn javascript_reference(config: &Config, states: &[GameState]) -> Vec<Value> {
         String::from_utf8_lossy(&run.stderr)
     );
 
-    let parsed: Value =
-        serde_json::from_slice(&std::fs::read(&output).expect("harness wrote the results file"))
-            .expect("results file is JSON");
-    parsed["results"]
-        .as_array()
-        .expect("results is an array")
-        .clone()
+    serde_json::from_slice(&std::fs::read(&output).expect("harness wrote the results file"))
+        .expect("results file is JSON")
+}
+
+/// The freeze, asserted rather than asserted-in-a-comment.
+///
+/// The Rust search + record format moved to `puct-az-tree-v2` when the policy
+/// target became the completed-Q improved policy. The JavaScript reference did
+/// not move with it, on purpose (see the module docs). Both halves are pinned
+/// here: the reference must still report the version this crate believes it is
+/// frozen at, and the Rust side must still be on a different one — so neither a
+/// silent JS bump nor a silent revert of the target can pass.
+///
+/// Runs the harness over an empty grid, so it costs one node start and no
+/// searches.
+#[test]
+fn the_javascript_reference_is_frozen_at_its_own_version() {
+    let config = state_pool::canonical_config();
+    let reported = javascript_reference(&config, &[], "version");
+    assert_eq!(
+        reported["version"].as_str(),
+        Some(JS_REFERENCE_SEARCH_VERSION),
+        "js/normal-duel-puct-search.mjs reports a version this crate does not expect; if the \
+         reference was deliberately moved, move JS_REFERENCE_SEARCH_VERSION with it and say what \
+         the parity suite now covers"
+    );
+    assert_ne!(
+        PUCT_SEARCH_VERSION, JS_REFERENCE_SEARCH_VERSION,
+        "the Rust record format is back on the reference's version; the two are only allowed to \
+         agree once the improved policy exists in both engines"
+    );
 }
 
 /// Drive one Rust search to completion against the mock evaluator.
@@ -216,7 +268,11 @@ fn rust_batched_puct_matches_the_javascript_search_exactly() {
     );
     states.truncate(STATES);
 
-    let reference = javascript_reference(&config, &states);
+    let reference = javascript_reference(&config, &states, "grid");
+    let reference = reference["results"]
+        .as_array()
+        .expect("results is an array")
+        .clone();
     assert_eq!(reference.len(), states.len() * CASES.len());
 
     let mut compared = 0_usize;

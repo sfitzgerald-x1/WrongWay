@@ -7,8 +7,16 @@
  * shared deterministic mock evaluator and a fresh `createLcg32(case.seed)`,
  * writing what the Rust test compares against:
  *
- *   { "results": [ { actionCode, visitCounts, rootValueBits, simulationsUsed,
+ *   { "version": PUCT_SEARCH_VERSION,
+ *     "results": [ { actionCode, visitCounts, rootValueBits, simulationsUsed,
  *                    maxDepthReached, considered, scoreBits } ] }
+ *
+ * `version` is the reference's own `PUCT_SEARCH_VERSION`. The Rust side has
+ * moved to `puct-az-tree-v2` (completed-Q policy targets) while this reference
+ * stays frozen at `v1`; the Rust test asserts this string against
+ * `JS_REFERENCE_SEARCH_VERSION` so that freeze is a checked fact rather than a
+ * comment. What the two engines still agree on exactly — every field in
+ * `results` — is unchanged by the target change.
  *
  * Doubles cross as their IEEE-754 bit patterns in hex, never as JSON numbers.
  * Decimal is a lossy channel for this comparison in practice: serde_json 1.0.151
@@ -27,7 +35,7 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 
 import { createLcg32 } from '../js/lcg32.mjs';
-import { puctSearch } from '../js/normal-duel-puct-search.mjs';
+import { PUCT_SEARCH_VERSION, puctSearch } from '../js/normal-duel-puct-search.mjs';
 import { mockEvaluator } from '../js/normal-duel-mock-evaluator.mjs';
 
 const [inputPath, outputPath] = process.argv.slice(2);
@@ -101,4 +109,4 @@ for (const state of states) {
   }
 }
 
-writeFileSync(outputPath, JSON.stringify({ results }));
+writeFileSync(outputPath, JSON.stringify({ version: PUCT_SEARCH_VERSION, results }));
