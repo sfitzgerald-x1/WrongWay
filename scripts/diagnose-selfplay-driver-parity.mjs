@@ -14,14 +14,18 @@
 // fork; a divergence in ply count with matching draws is a termination-rule
 // difference.
 //
-// SINCE `puct-az-tree-v2`, READ `firstLine` WITH THAT IN MIND. Driver B records
-// the Gumbel improved policy as `policyTarget`; driver A is the frozen JS
-// reference and still records normalised visit counts. The shard LINES
-// therefore differ by construction and `firstLine` is expected to be 0 — that
-// is a deliberate format divergence, not the fork this script hunts. The signal
-// that still means what it always meant is the ply trace: `firstPly`, the draw
-// counts and the per-game ply counts, none of which read the policy target
-// under `uniformEpsilon`.
+// SINCE `puct-az-tree-v2` THE TWO DRIVERS RECORD DIFFERENT POLICY TARGETS BY
+// DESIGN: driver B records the Gumbel improved policy, driver A is the frozen
+// JS reference and still records normalised visit counts. That is a deliberate
+// format divergence, not the fork this script hunts.
+//
+// So `policyTarget` is compared SEPARATELY and does not affect the verdict.
+// Folding it into the line comparison would have pinned `firstLine` at 0 and
+// the exit code at 1 forever, which destroys the tool: its own target condition
+// would no longer be distinguishable from its steady state, and a permanently
+// red check is one nobody reads. What still means what it always meant —
+// identical positions, identical legality, identical outcomes and an identical
+// ply trace — is what `identical` is now computed from.
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -84,6 +88,7 @@ const evaluate = (config, state) => mockEvaluator(config, state);
  * ---------------------------------------------------------------- */
 function runJs() {
   const lines = [];
+  const targets = [];
   const trace = [];
   const outcomes = {};
   let plyTotal = 0;
@@ -139,11 +144,12 @@ function runJs() {
     for (const rec of pending) {
       const z = o.kind === 'win' ? (rec.turn === o.winner ? 1 : -1) : 0;
       lines.push(JSON.stringify({
-        features: rec.features, policyTarget: rec.policyTarget, legalMask: rec.legalMask, z
+        features: rec.features, legalMask: rec.legalMask, z
       }));
+      targets.push(JSON.stringify(rec.policyTarget));
     }
   }
-  return { lines, trace, outcomes, plyTotal };
+  return { lines, targets, trace, outcomes, plyTotal };
 }
 
 /* ---------------------------------------------------------------- *
@@ -206,21 +212,22 @@ async function runRust() {
 
   const { features: F, recordFloats: R } = layout;
   const lines = [];
+  const targets = [];
   const trace = [];
   for (let i = 0; i < count; i += 1) {
     const base = i * R;
     lines.push(JSON.stringify({
       features: Array.from(records.subarray(base, base + F)),
-      policyTarget: Array.from(records.subarray(base + F, base + F + P)),
       legalMask: Array.from(records.subarray(base + F + P, base + F + 2 * P)),
       z: records[base + F + 2 * P]
     }));
+    targets.push(JSON.stringify(Array.from(records.subarray(base + F, base + F + P))));
     trace.push({
       game: meta[i * 4], absPly: meta[i * 4 + 1],
       turn: meta[i * 4 + 2], playedCode: meta[i * 4 + 3]
     });
   }
-  return { lines, trace, outcomes, plies, count };
+  return { lines, targets, trace, outcomes, plies, count };
 }
 
 const js = runJs();
@@ -250,9 +257,23 @@ const report = {
   openingLengths: OPENINGS.map((o) => o.length),
   js: { records: js.lines.length, outcomes: js.outcomes, perGame: perGameJs },
   rust: { records: rust.lines.length, outcomes: rust.outcomes, plies: rust.plies, perGame: perGameRust },
-  identical: firstLine === -1 && js.lines.length === rust.lines.length,
+  // The verdict deliberately excludes `policyTarget` (see the header) and
+  // deliberately includes `firstPly`: a fork that produced the same number of
+  // identical-looking records but a different ply trace is exactly the failure
+  // this script exists to catch, and leaving it out of the verdict would have
+  // let it pass green.
+  identical: firstLine === -1 && firstPly === -1 && js.lines.length === rust.lines.length,
   firstDifferingLine: firstLine,
   firstDifferingPly: firstPly,
+  // Informational: expected to be 0 since `puct-az-tree-v2`, because the two
+  // drivers record different targets on purpose. A -1 here would mean the JS
+  // reference had been changed to match, which is a decision, not an accident.
+  firstDifferingTarget: (() => {
+    for (let i = 0; i < Math.max(js.targets.length, rust.targets.length); i += 1) {
+      if (js.targets[i] !== rust.targets[i]) return i;
+    }
+    return -1;
+  })(),
   jsPlyAt: firstPly >= 0 ? js.trace[firstPly] : null,
   rustPlyAt: firstPly >= 0 ? rust.trace[firstPly] : null,
   jsTailTrace: js.trace.slice(Math.max(0, firstPly - 2), firstPly + 3),

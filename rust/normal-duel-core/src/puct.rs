@@ -211,6 +211,24 @@ fn completed_q(edge: &Edge, root_value: f64) -> f64 {
 /// infinity and the normalisation would return NaN. After the subtraction the
 /// largest term is exactly `1.0`, so the total is in `[1, edges.len()]` and can
 /// neither overflow nor be zero.
+/// Note on `sigma`'s scale, because it now does a second job.
+///
+/// In sequential halving `sigma` is only ever a RANKING term: it is strictly
+/// increasing in `q`, so its magnitude is irrelevant there and only the induced
+/// order matters. Here it is inside a softmax, where the magnitude IS the
+/// temperature. With `C_VISIT = 50`, `C_SCALE = 1.0` and completed-Q left in
+/// `[-1, 1]`, the score span is `2 * (50 + max_visits)` -- about 160 at 128
+/// simulations over 16 candidates -- so a 0.1 difference in Q is a factor of
+/// e^8 in probability. The published implementations reach a much gentler
+/// distribution by min-max normalising completed-Q to `[0, 1]` and using
+/// `c_scale ~ 0.1`.
+///
+/// Reusing this project's own `sigma` unchanged is deliberate: it is what keeps
+/// the halving ranking and the recorded target derived from ONE expression, so
+/// they cannot drift apart. But it means the target's entropy is set by a
+/// constant that was only ever tuned for an ordering. If the first long run
+/// wants a softer target, THIS is the knob -- normalise the Q range or scale
+/// `C_SCALE` for the policy only -- not the simulation budget.
 fn improved_policy(edges: &[Edge], root_value: f64) -> Vec<(u16, f64)> {
     let max_visits = edges.iter().map(|edge| edge.visits).max().unwrap_or(0);
 

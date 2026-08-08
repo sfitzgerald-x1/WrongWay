@@ -2,8 +2,9 @@
 //!
 //! The load-bearing claim is the one that cost an earlier run 114 iterations:
 //! changing *which move is played* must not change *what is recorded*. The
-//! recorded policy target stays the search's full visit distribution for the
-//! state actually visited, whichever recipe chose the move. `meanTargetEntropy`
+//! recorded policy target stays the search's full distribution over the state
+//! actually visited, whichever recipe chose the move — the improved policy
+//! since `puct-az-tree-v2`, the visit distribution before it. `meanTargetEntropy`
 //! in the shard workers is the production form of this check; these tests are
 //! the same assertion where it can fail the build.
 
@@ -141,7 +142,7 @@ fn target_stats(run: &Run) -> (f64, usize) {
 }
 
 /// The invariant. Sampling the played move must leave the recorded target a full
-/// visit distribution, exactly as argmax play does.
+/// distribution over the legal actions, exactly as argmax play does.
 #[test]
 fn visit_temperature_keeps_policy_targets_as_full_distributions() {
     let sampled = run(temperature_options());

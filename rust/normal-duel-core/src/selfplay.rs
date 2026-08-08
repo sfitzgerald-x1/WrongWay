@@ -141,10 +141,16 @@ pub struct SelfPlayOptions {
     /// recorded target is unaffected.
     pub epsilon: f64,
     /// Softmax temperature for [`Exploration::VisitTemperature`]. `1.0` samples
-    /// straight from the visit distribution; `-> 0` approaches argmax; `> 1`
+    /// straight from the recorded target; `-> 0` approaches argmax; `> 1`
     /// flattens it.
+    ///
+    /// Since `puct-az-tree-v2` that target is the improved policy, not the
+    /// visit ladder, so this samples over every legal action rather than the
+    /// considered set. That is the paper's own recommendation at low budgets,
+    /// but it is a REAL behaviour change: at `temperature_moves > 0` the same
+    /// seed no longer reproduces the same game.
     pub temperature: f64,
-    /// Number of **absolute** plies sampled from the visit distribution before
+    /// Number of **absolute** plies sampled from the recorded target before
     /// switching to argmax. Absolute for the same reason [`Self::ply_cap`] is:
     /// `ply` counts the forced opening, whose plies no search produced.
     ///
