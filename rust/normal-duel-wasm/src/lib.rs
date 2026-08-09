@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wasm_bindgen::prelude::*;
 use wrongway_normal_duel::js_math::Lcg32;
-use wrongway_normal_duel::puct::{PuctParams, PuctTreeSearch};
+use wrongway_normal_duel::puct::{PuctParams, PuctTreeSearch, RootMode};
 use wrongway_normal_duel::selfplay::{
     Exploration, GameOutcome, SelfPlayBatch, SelfPlayOptions, RECORD_FEATURES, RECORD_FLOATS,
     RECORD_META_FIELDS, RECORD_POLICY,
@@ -385,6 +385,11 @@ struct SelfPlayOptionsDto {
     max_considered: u32,
     #[serde(default = "default_c_puct")]
     c_puct: f64,
+    /// `"gumbel"` (default) or `"classic"`. Absent means Gumbel, so a driver
+    /// that predates the classic arm sends the same wire format and gets the
+    /// same search.
+    #[serde(default)]
+    root_mode: RootModeDto,
     /// `"visitTemperature"` (default) or `"uniformEpsilon"`. Spelled out rather
     /// than a bool so a third recipe does not have to break the wire format.
     #[serde(default)]
@@ -401,6 +406,23 @@ struct SelfPlayOptionsDto {
     seed_base: u32,
     #[serde(default)]
     openings: Vec<Vec<u16>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum RootModeDto {
+    #[default]
+    Gumbel,
+    Classic,
+}
+
+impl From<RootModeDto> for RootMode {
+    fn from(dto: RootModeDto) -> Self {
+        match dto {
+            RootModeDto::Gumbel => RootMode::Gumbel,
+            RootModeDto::Classic => RootMode::Classic,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -482,6 +504,7 @@ impl NormalDuelSelfPlayBatch {
             simulations: dto.simulations,
             max_considered: dto.max_considered,
             c_puct: dto.c_puct,
+            root_mode: dto.root_mode.into(),
             exploration: dto.exploration.into(),
             epsilon: dto.epsilon,
             temperature: dto.temperature,
@@ -700,6 +723,14 @@ impl NormalDuelSearch {
             simulations: dto.simulations,
             max_considered: dto.max_considered,
             c_puct: dto.c_puct,
+            // Not an option here, deliberately. `NormalDuelSearch` is the
+            // matchplay/parity entry point: it is what
+            // `tests/normal-duel-wasm-search-wrapper-parity.test.mjs` compares
+            // against the frozen JavaScript reference, which has one root
+            // algorithm. The classic arm is a *training* control and reaches the
+            // engine through `NormalDuelSelfPlayBatch`, which is the only driver
+            // that produces records.
+            root_mode: RootMode::Gumbel,
         };
         let inner = PuctTreeSearch::from_state(&config, &state, params, Lcg32::new(dto.seed))
             .map_err(|error| js_error(error.reason().to_owned()))?;
