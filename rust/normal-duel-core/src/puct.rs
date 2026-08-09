@@ -52,41 +52,75 @@ use crate::{
 
 /// Frozen identifier for this search + self-play record format.
 ///
-/// `v2` is the completed-Q policy target: the recorded `policyTarget` is the
-/// Gumbel improved policy over every legal root action
+/// `v2` was the completed-Q policy target: the recorded `policyTarget` became
+/// the Gumbel improved policy over every legal root action
 /// ([`PuctResult::improved_policy`]) instead of the normalised visit counts of
-/// the considered set. Nothing about which move the search *plays* changed, so
-/// the version bump names a record-format change, not a search change.
-pub const PUCT_SEARCH_VERSION: &str = "puct-az-tree-v2";
+/// the considered set. Nothing about which move the search *played* changed, so
+/// that bump named a record-format change only.
+///
+/// `v3` is different in kind. It replaces this project's own `sigma` — raw
+/// completed-Q scaled by `(50 + maxN) * 1.0` — with the reference qtransform,
+/// `mctx`'s [`qtransform_completed_by_mix_value`]: completed-Q is min-max
+/// rescaled to `[0, 1]` per node and scaled by `(50 + maxN) * 0.1`, and the
+/// completion for an unvisited action is `v_mix` rather than the raw root
+/// value. That expression is used in BOTH places the old one was — the
+/// sequential-halving ranking and the improved policy — so **`v3` changes
+/// search decisions, not just the recorded target**. There is no bit-parity
+/// bridge from `v2`, by design; the correctness anchor is
+/// `tests/qtransform_goldens.rs` (identical to `mctx`) plus
+/// `tests/qtransform_properties.rs`, not identity with the old behaviour.
+pub const PUCT_SEARCH_VERSION: &str = "puct-az-tree-v3";
 
 /// The version the JavaScript reference search is frozen at.
 ///
-/// `js/normal-duel-puct-search.mjs` deliberately stays on `v1`. It is the parity
-/// oracle for the *search decisions* — visit counts, chosen action, root value,
-/// simulations spent, considered set — and every one of those is unchanged by
-/// the improved policy, so `tests/js_puct_parity.rs` still compares exactly what
-/// it always compared, at full strength.
+/// `js/normal-duel-puct-search.mjs` deliberately stays on `v1`. Through `v2` it
+/// was the parity oracle for every *search decision* — visit counts, chosen
+/// action, root value, simulations spent, considered set — because the improved
+/// policy was a read-out of a finished tree and moved nothing.
 ///
-/// Porting the improved policy to the JavaScript would mean comparing
-/// `Math.exp` against [`f64::exp`] bit for bit. `exp` is not an IEEE-754
-/// operation, which is why [`crate::js_math::js_log`] exists at all; there is no
-/// `js_exp`, and writing one to cross-check a training target would be a far
-/// larger correctness surface than the target itself. The production self-play
-/// driver is the Rust/wasm [`crate::selfplay::SelfPlayBatch`], not the
-/// JavaScript reference, so the reference is frozen and the divergence is named
-/// here rather than left to be discovered.
+/// `v3` ends that. The qtransform sits inside the sequential-halving ranking, so
+/// a `v1` tree and a `v3` tree visit different children and can finish on
+/// different actions. `tests/js_puct_parity.rs` therefore splits: the quantities
+/// the qtransform provably cannot reach are still compared exactly across both
+/// engines (the Gumbel considered set, the root value, the budget accounting,
+/// and — at `max_considered = 1`, where halving never runs — the whole descent,
+/// backup, repetition and terminality path at full strength), while the
+/// halving-dependent quantities are compared separately and reported as the
+/// by-design divergence they are. See that file's module docs for the split.
 ///
-/// `tests/js_puct_parity.rs` asserts the JavaScript still reports this string,
-/// so the freeze cannot drift silently in either direction.
+/// Porting `v3` to the JavaScript would not fix this: the reference is the
+/// oracle precisely because it did not change, and the production self-play
+/// driver is the Rust/wasm [`crate::selfplay::SelfPlayBatch`] anyway. The
+/// improved policy could never be compared there in the first place — it needs
+/// `Math.exp` against [`f64::exp`] bit for bit, and `exp` is not an IEEE-754
+/// operation any more than [`crate::js_math::js_log`]'s `Math.log` is.
+///
+/// `tests/js_puct_parity.rs` asserts the JavaScript still reports this string
+/// and that the Rust side is on neither `v1` nor `v2`, so neither a silent JS
+/// bump nor a silent revert of the qtransform can pass.
 pub const JS_REFERENCE_SEARCH_VERSION: &str = "puct-az-tree-v1";
+
+/// The record format `v3` replaced, named so the freeze test can assert the
+/// Rust side has not silently reverted to it.
+pub const SUPERSEDED_SEARCH_VERSION: &str = "puct-az-tree-v2";
 
 /// Floor applied inside the logit so a legal action the policy assigns exactly
 /// zero probability is merely very unlikely, not `-Infinity`.
 const POLICY_FLOOR: f64 = 1e-9;
 
-/// Gumbel-MuZero sigma constants.
-const C_VISIT: u32 = 50;
-const C_SCALE: f64 = 1.0;
+/// Gumbel-MuZero qtransform constants: the defaults of `mctx`'s
+/// `qtransform_completed_by_mix_value`, which
+/// `tests/fixtures/qtransform-mctx-goldens.json` was generated with.
+///
+/// `MAXVISIT_INIT` is the paper's `c_visit`, `VALUE_SCALE` its `c_scale`, and
+/// `RESCALE_EPSILON` the floor on the min-max denominator. The pairing matters
+/// more than either constant: `value_scale = 0.1` is only gentle *because* the
+/// completed Q-values it multiplies have been rescaled into `[0, 1]` first. Used
+/// on raw completed-Q in `[-1, 1]` it would be a 20x sharper target than `v2`'s,
+/// not 20x softer.
+const MAXVISIT_INIT: f64 = 50.0;
+const VALUE_SCALE: f64 = 0.1;
+const RESCALE_EPSILON: f64 = 1e-8;
 
 /// Default exploration constant if the caller does not supply one.
 pub const DEFAULT_C_PUCT: f64 = 1.25;
@@ -168,76 +202,170 @@ fn clamp_value(value: f64) -> f64 {
     value
 }
 
-/// Strictly increasing in `q`, so it never reorders two candidates by value.
-fn sigma(q: f64, max_visits: u32) -> f64 {
-    f64::from(C_VISIT + max_visits) * C_SCALE * q
+/// The prior as the qtransform reads it: [`POLICY_FLOOR`] applied, so a legal
+/// action the network priced at exactly zero contributes a vanishing weight to
+/// `v_mix` instead of turning its denominator into `0 / 0`, and a finite logit
+/// to the improved policy instead of `-Infinity`.
+///
+/// `mctx` floors in the same two places, with `finfo(dtype).tiny` rather than
+/// `1e-9`. The two agree for every prior at or above `1e-9`, which is every
+/// prior this engine produces that is not exactly zero after the legal-mask
+/// renormalisation. Where they could differ, the goldens are generated *through
+/// this floor* (`scripts/gen-qtransform-goldens.py` hands `mctx` the logits
+/// `log(max(p, 1e-9))`), so the fixtures pin the engine's own convention. That
+/// is sound because both consumers are invariant to a positive rescaling of the
+/// prior: the improved policy is a softmax, where a constant logit shift
+/// cancels, and `v_mix` divides by the sum of the visited priors, where a
+/// constant factor cancels.
+fn effective_prior(prior: f64) -> f64 {
+    prior.max(POLICY_FLOOR)
 }
 
-/// The paper's `completedQ`: a visited root action is worth what the tree
-/// measured, an unvisited one is worth the root's own value.
+/// `v_mix` from Appendix D of *Policy improvement by planning with Gumbel*: the
+/// node's own value interpolated with the prior-weighted mean of the Q-values
+/// the tree actually measured.
 ///
-/// This is the completion the halving already used to rank survivors, lifted
-/// into one function so the improved policy and the schedule cannot drift apart.
+/// ```text
+/// v_mix = (v_raw + N * (sum_visited p(a) q(a) / sum_visited p(a))) / (1 + N)
+/// ```
 ///
-/// Danihelka et al. refine the unvisited case to `v_mix`, a prior-weighted blend
-/// of the root value and the visited children's Q. That is a possible future
-/// swap and this function is the single place it would happen; it is
-/// deliberately not implemented here, because `v_mix` changes the halving
-/// ranking too and therefore the search's decisions, which this change does not
-/// touch.
-fn completed_q(edge: &Edge, root_value: f64) -> f64 {
+/// `N` is the total number of CHILD visits, so `N = 0` returns `v_raw`
+/// unchanged, and a deep search converges on the weighted mean. `v_raw` is the
+/// network's own value for the node — not `value_sum / visits`, which is the
+/// search's refinement of it; `mctx` reads `tree.raw_values` here and the
+/// distinction is pinned by a fixture whose `node_values` deliberately differs.
+///
+/// The denominator sums only the VISITED actions' priors, which is where
+/// [`effective_prior`] earns its keep: a search that only ever visited actions
+/// the network priced at exactly zero would otherwise divide zero by zero.
+///
+/// Each term is divided by that denominator before being summed, rather than
+/// the sum being divided once, because that is the association `mctx` uses and
+/// the goldens are compared at 1e-6 against it.
+fn mixed_value(edges: &[Edge], raw_value: f64) -> f64 {
+    let mut visits = 0_u64;
+    let mut prior_mass = 0.0_f64;
+    for edge in edges {
+        if edge.visits > 0 {
+            visits += u64::from(edge.visits);
+            prior_mass += effective_prior(edge.prior);
+        }
+    }
+    if visits == 0 {
+        return raw_value;
+    }
+    // `mctx` guards the same division; with the floor above, `prior_mass` is
+    // only ever zero when nothing was visited, which returned already.
+    let denominator = if prior_mass > 0.0 { prior_mass } else { 1.0 };
+    let mut weighted_q = 0.0_f64;
+    for edge in edges {
+        if edge.visits > 0 {
+            let q = edge.value_sum / f64::from(edge.visits);
+            weighted_q += effective_prior(edge.prior) * q / denominator;
+        }
+    }
+    let visits = visits as f64;
+    (raw_value + visits * weighted_q) / (visits + 1.0)
+}
+
+/// `completedQ`: a visited root action is worth what the tree measured, an
+/// unvisited one is worth `mixed` — [`mixed_value`]'s `v_mix`.
+///
+/// Through `v2` the unvisited case was the raw root value. That biased the
+/// completion for every action the search never touched — at 128 simulations
+/// over 16 candidates on a 40-move board, most of them — in whichever direction
+/// the value head happened to run relative to the Q-values the tree had
+/// actually measured. `v_mix` interpolates between the two instead, and this is
+/// the one place the substitution happens.
+fn completed_q(edge: &Edge, mixed: f64) -> f64 {
     if edge.visits > 0 {
         edge.value_sum / f64::from(edge.visits)
     } else {
-        root_value
+        mixed
     }
 }
 
-/// The Gumbel improved policy over `edges`, which must be one node's whole edge
-/// list: `pi'(a) ∝ exp(logit(a) + sigma(completedQ(a)))`.
+/// `mctx`'s `qtransform_completed_by_mix_value` over one node's whole edge list:
+/// the completed Q-values, min-max rescaled to `[0, 1]` across the node, times
+/// `(50 + maxN) * 0.1`.
 ///
-/// Four details are load-bearing.
+/// This is the ONE expression both the sequential-halving ranking
+/// ([`PuctTreeSearch::halve`]) and the improved policy ([`improved_policy`])
+/// score with, so the schedule and the recorded target cannot drift apart — the
+/// property `v2` had and `v3` keeps. What changed is what the expression *is*.
 ///
-/// `logit(a)` is `js_log(prior.max(POLICY_FLOOR))`, the same expression
-/// `seed_candidates` uses to rank the Gumbel draws — the improved policy and the
-/// considered set read the prior through the same floor.
+/// Three details are load-bearing.
 ///
-/// `max_visits` is the maximum over *all* the node's edges, not over the
-/// halving's surviving set, because the policy covers actions halving discarded.
+/// The rescale is over the COMPLETED values, `v_mix` included, not over the
+/// measured ones — an unvisited action can therefore set the minimum or the
+/// maximum. And it is over the node's whole edge list, not the halving's
+/// surviving subset, because the improved policy has to cover the actions
+/// halving discarded and both readers must see the same numbers.
 ///
-/// The softmax subtracts the maximum score before exponentiating. That is not
-/// tidiness: `sigma` spans roughly `±(C_VISIT + max_visits)`, so at a
-/// four-figure simulation budget the raw exponentials would overflow to
-/// infinity and the normalisation would return NaN. After the subtraction the
-/// largest term is exactly `1.0`, so the total is in `[1, edges.len()]` and can
-/// neither overflow nor be zero.
+/// `RESCALE_EPSILON` floors the denominator. Its job is not overflow, it is
+/// meaning: when every completed value is equal the search has learned nothing
+/// about the ordering, `(c - min)` is exactly `0` for every action, and dividing
+/// by the floor keeps it exactly `0` — a flat boost, and therefore an improved
+/// policy that is exactly the renormalised prior. A search that learned nothing
+/// sharpens nothing. `tests/qtransform_properties.rs` holds this to it.
 ///
-/// And `sigma`'s scale now does a second job.
-///
-/// In sequential halving `sigma` is only ever a RANKING term: it is strictly
-/// increasing in `q`, so its magnitude is irrelevant there and only the induced
-/// order matters. Here it is inside a softmax, where the magnitude IS the
-/// temperature. With `C_VISIT = 50`, `C_SCALE = 1.0` and completed-Q left in
-/// `[-1, 1]`, the score span is `2 * (50 + max_visits)` -- about 160 at 128
-/// simulations over 16 candidates -- so a 0.1 difference in Q is a factor of
-/// e^8 in probability. The published implementations reach a much gentler
-/// distribution by min-max normalising completed-Q to `[0, 1]` and using
-/// `c_scale ~ 0.1`.
-///
-/// Reusing this project's own `sigma` unchanged is deliberate: it is what keeps
-/// the halving ranking and the recorded target derived from ONE expression, so
-/// they cannot drift apart. But it means the target's entropy is set by a
-/// constant that was only ever tuned for an ordering. If the first long run
-/// wants a softer target, THIS is the knob -- normalise the Q range or scale
-/// `C_SCALE` for the policy only -- not the simulation budget.
-fn improved_policy(edges: &[Edge], root_value: f64) -> Vec<(u16, f64)> {
+/// The output is bounded: every entry lies in `[0, (50 + maxN) * 0.1]`. That is
+/// the whole point of D1. The `v2` expression put it in `[-(50 + maxN), (50 +
+/// maxN)]`, a span twenty times wider and centred differently, which is a
+/// factor of `e^160` rather than `e^8` between the best and worst action at 128
+/// simulations.
+fn qtransform_completed_by_mix_value(edges: &[Edge], raw_value: f64) -> Vec<f64> {
+    let mixed = mixed_value(edges, raw_value);
+    let mut values: Vec<f64> = edges.iter().map(|edge| completed_q(edge, mixed)).collect();
+    if values.is_empty() {
+        return values;
+    }
+
+    let mut lowest = f64::INFINITY;
+    let mut highest = f64::NEG_INFINITY;
+    for value in &values {
+        if *value < lowest {
+            lowest = *value;
+        }
+        if *value > highest {
+            highest = *value;
+        }
+    }
+    let span = (highest - lowest).max(RESCALE_EPSILON);
     let max_visits = edges.iter().map(|edge| edge.visits).max().unwrap_or(0);
+    let scale = (MAXVISIT_INIT + f64::from(max_visits)) * VALUE_SCALE;
+    for value in &mut values {
+        *value = scale * ((*value - lowest) / span);
+    }
+    values
+}
+
+/// The Gumbel improved policy over `edges`, which must be one node's whole edge
+/// list: `pi'(a) ∝ exp(logit(a) + qtransform(a))`.
+///
+/// This is `mctx`'s `gumbel_muzero_policy` `action_weights`, restricted to the
+/// legal actions — which is exactly the domain of an edge list, so there is no
+/// `invalid_actions` mask to apply; illegal codes never enter and the recorder
+/// writes them as exact `0.0`.
+///
+/// `logit(a)` is `js_log(effective_prior(a))`, the same expression
+/// `seed_candidates` uses to rank the Gumbel draws, so the improved policy and
+/// the considered set read the prior through one floor.
+///
+/// The softmax subtracts the maximum score before exponentiating. The
+/// qtransform's `[0, (50 + maxN) * 0.1]` range makes overflow far less likely
+/// than it was under `v2`, but not impossible — at a six-figure visit count the
+/// scale alone is five figures — and the subtraction also keeps the largest
+/// term exactly `1.0`, so the total is in `[1, edges.len()]` and can neither
+/// overflow nor be zero.
+fn improved_policy(edges: &[Edge], root_value: f64) -> Vec<(u16, f64)> {
+    let boosts = qtransform_completed_by_mix_value(edges, root_value);
 
     let mut scored: Vec<(u16, f64)> = Vec::with_capacity(edges.len());
     let mut highest = f64::NEG_INFINITY;
-    for edge in edges {
-        let logit = js_log(edge.prior.max(POLICY_FLOOR));
-        let score = logit + sigma(completed_q(edge, root_value), max_visits);
+    for (edge, boost) in edges.iter().zip(boosts) {
+        let logit = js_log(effective_prior(edge.prior));
+        let score = logit + boost;
         if score > highest {
             highest = score;
         }
@@ -256,6 +384,75 @@ fn improved_policy(edges: &[Edge], root_value: f64) -> Vec<(u16, f64)> {
         *weight /= total;
     }
     scored
+}
+
+/// One root action's search statistics, as the qtransform reads them.
+///
+/// The engine's own [`Edge`] carries a code and a child pointer the transform
+/// has no use for, and a `value_sum` rather than a mean; this is the same data
+/// in the shape `mctx` states it in, so a fixture can be fed to both.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActionStats {
+    /// The network's prior for this action, masked to the legal set and
+    /// renormalised: a probability, not a logit.
+    pub prior: f64,
+    pub visits: u32,
+    /// The action's mean value from the tree. Undefined when `visits == 0`, and
+    /// never read in that case — the completion replaces it.
+    pub qvalue: f64,
+}
+
+/// Every stage of the Gumbel-MuZero qtransform, kept separate.
+///
+/// A cross-implementation fixture that only compared the final weights could
+/// say two implementations disagree but not where; these four fields are
+/// exactly what `tests/fixtures/qtransform-mctx-goldens.json` records from
+/// `mctx`, so a mismatch names its own stage.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RootQtransform {
+    /// `v_mix`: the completion used for every unvisited action.
+    pub mixed_value: f64,
+    /// Completed Q-values, before the rescale.
+    pub completed: Vec<f64>,
+    /// Completed, min-max rescaled and visit-scaled: the boost added to the
+    /// logit in both the halving ranking and the improved policy.
+    pub transformed: Vec<f64>,
+    /// The improved policy `pi'`, in the order `stats` was given.
+    pub action_weights: Vec<f64>,
+}
+
+/// Run the qtransform the search itself uses over raw statistics.
+///
+/// This exists so `tests/qtransform_goldens.rs` and
+/// `tests/qtransform_properties.rs` can address the transform directly instead
+/// of reaching it through a whole 9x9 search, and it deliberately calls the
+/// same private functions the search does: there is no second implementation
+/// here to drift from the first.
+#[must_use]
+pub fn root_qtransform(stats: &[ActionStats], raw_value: f64) -> RootQtransform {
+    let edges: Vec<Edge> = stats
+        .iter()
+        .enumerate()
+        .map(|(index, stat)| Edge {
+            // Synthetic, and only ever passed back out again: the transform
+            // reads the prior, the visits and the value sum.
+            code: index as u16,
+            prior: stat.prior,
+            visits: stat.visits,
+            value_sum: f64::from(stat.visits) * stat.qvalue,
+            child: NO_CHILD,
+        })
+        .collect();
+    let mixed = mixed_value(&edges, raw_value);
+    RootQtransform {
+        mixed_value: mixed,
+        completed: edges.iter().map(|edge| completed_q(edge, mixed)).collect(),
+        transformed: qtransform_completed_by_mix_value(&edges, raw_value),
+        action_weights: improved_policy(&edges, raw_value)
+            .into_iter()
+            .map(|(_, weight)| weight)
+            .collect(),
+    }
 }
 
 /// `Math.ceil(Math.log2(Math.max(m, 2)))` without a logarithm: the smallest
@@ -952,22 +1149,27 @@ impl PuctTreeSearch {
         }
     }
 
-    /// Keep the top `ceil(k / 2)` by `g + logit + sigma(qhat)`.
+    /// Keep the top `ceil(k / 2)` by `g + logit + qtransform(a)`.
+    ///
+    /// The qtransform is evaluated over the ROOT's whole edge list, not over the
+    /// surviving subset, for two reasons. It is what `mctx` does — its
+    /// `seq_halving.score_considered` is handed the same `completed_qvalues`
+    /// vector `action_weights` is built from, computed once over the root. And
+    /// it is what makes "one shared expression" true rather than nearly true:
+    /// under `v2` this ranking took `max_visits` over the survivors while the
+    /// improved policy took it over every edge, so the two already disagreed on
+    /// the scale factor. Now they cannot.
     fn halve(&mut self) {
-        let max_visits = self
-            .survivors
-            .iter()
-            .map(|index| self.edges[self.candidates[*index].edge as usize].visits)
-            .max()
-            .unwrap_or(0);
+        let root = self.nodes[0];
+        let start = root.edges_start as usize;
+        let end = start + root.edges_len as usize;
+        let boosts = qtransform_completed_by_mix_value(&self.edges[start..end], self.root_value);
 
         self.ranking.clear();
         for index in &self.survivors {
             let candidate = self.candidates[*index];
-            let edge = self.edges[candidate.edge as usize];
-            let qhat = completed_q(&edge, self.root_value);
-            self.ranking
-                .push((*index, candidate.score + sigma(qhat, max_visits)));
+            let boost = boosts[candidate.edge as usize - start];
+            self.ranking.push((*index, candidate.score + boost));
         }
         let codes = &self.candidates;
         self.ranking.sort_by(|left, right| {
@@ -1279,10 +1481,31 @@ mod tests {
         }
     }
 
+    /// The ranking property `sigma` was originally chosen for, restated for the
+    /// transform that replaced it: it is still strictly increasing in `q`, so it
+    /// still never reorders two candidates by value. What changed is the range.
     #[test]
-    fn sigma_is_strictly_increasing_in_q() {
-        assert!(sigma(0.1, 4) < sigma(0.2, 4));
-        assert_eq!(sigma(0.5, 0), 25.0);
+    fn the_qtransform_is_strictly_increasing_in_q_and_bounded() {
+        let boosts = qtransform_completed_by_mix_value(
+            &[
+                edge(1, 0.25, 4, -0.5),
+                edge(2, 0.25, 4, 0.1),
+                edge(3, 0.25, 4, 0.2),
+                edge(4, 0.25, 4, 0.9),
+            ],
+            0.0,
+        );
+        for pair in boosts.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "boosts are not increasing in q: {boosts:?}"
+            );
+        }
+        // Min-max rescaling pins the ends, whatever the Q values were.
+        assert_eq!(boosts[0], 0.0);
+        assert_eq!(boosts[3], (MAXVISIT_INIT + 4.0) * VALUE_SCALE);
+        // The `v2` expression would have put the span at 2 * (50 + 4) = 108.
+        assert!((boosts[3] - boosts[0] - 5.4).abs() < 1e-12);
     }
 
     /// An edge with `visits` visits averaging `q`, so `completed_q` reads back
@@ -1354,30 +1577,91 @@ mod tests {
             good_mass > bad_mass,
             "Q = 0.4 took {good_mass}, Q = -0.2 took {bad_mass}"
         );
-        // Equal priors cancel, so the ratio is the sigma gap alone.
-        let expected = sigma(0.6, 30).exp();
+        // Equal priors cancel, so the ratio is the qtransform gap alone. Under
+        // the min-max rescale that gap is the full scale factor whatever the Q
+        // values were -- `exp(8)`, where `v2` charged `exp(sigma(0.6, 30))`,
+        // which is `exp(48)`.
+        let expected = ((MAXVISIT_INIT + 30.0) * VALUE_SCALE).exp();
         assert!(
             ((good_mass / bad_mass) / expected - 1.0).abs() < 1e-9,
-            "mass ratio {} is not exp(sigma(0.6, 30)) = {expected}",
+            "mass ratio {} is not exp((50 + 30) * 0.1) = {expected}",
             good_mass / bad_mass
+        );
+        assert!(
+            expected < (0.6_f64 * 80.0).exp(),
+            "the v3 ratio must be far below the v2 one"
         );
     }
 
-    /// An action the halving never visited is completed with the root value, so
-    /// two unvisited actions are separated by their priors alone — which is how
-    /// the improved policy covers moves the considered set skipped instead of
+    /// An action the halving never visited is completed with `v_mix`, so two
+    /// unvisited actions are separated by their priors alone — which is how the
+    /// improved policy covers moves the considered set skipped instead of
     /// targeting them to zero.
     #[test]
-    fn unvisited_actions_are_completed_with_the_root_value() {
+    fn unvisited_actions_are_completed_with_the_mixed_value() {
         let policy = improved_policy(&[edge(2, 0.6, 0, 0.0), edge(8, 0.15, 0, 0.0)], -0.3);
         assert!(
             (mass(&policy, 2) / mass(&policy, 8) - 4.0).abs() < 1e-9,
             "equal completions must leave the prior ratio intact"
         );
-        // And a visited action beating the root value outranks a better-priored
+        // And a visited action beating the completion outranks a better-priored
         // unvisited one, which no visit-count target could say either.
         let policy = improved_policy(&[edge(2, 0.9, 0, 0.0), edge(8, 0.1, 4, 0.5)], -0.3);
         assert!(mass(&policy, 8) > mass(&policy, 2));
+    }
+
+    /// The `v2` completion and the `v3` one, on the configuration that made the
+    /// difference matter: a value head running cold against a tree that has
+    /// found something.
+    ///
+    /// `v_mix = (-1.0 + 4 * 0.9) / 5 = 0.52`, so the unvisited action is
+    /// completed near the visited one rather than a full point below it. Under
+    /// `v2`'s raw root value the unvisited action would have been completed at
+    /// `-1.0` — the bottom of the range — and crushed.
+    #[test]
+    fn mixed_value_lifts_the_unvisited_set_off_a_cold_root_value() {
+        let edges = [edge(1, 0.5, 4, 0.9), edge(2, 0.5, 0, 0.0)];
+        assert!((mixed_value(&edges, -1.0) - 0.52).abs() < 1e-12);
+
+        let boosts = qtransform_completed_by_mix_value(&edges, -1.0);
+        let span = boosts[0] - boosts[1];
+        assert!((span - (MAXVISIT_INIT + 4.0) * VALUE_SCALE).abs() < 1e-12);
+
+        // The unvisited action keeps a real share of the mass: `exp(-5.4)`
+        // relative to the visited one, not `exp(-108)`.
+        let policy = improved_policy(&edges, -1.0);
+        assert!(
+            mass(&policy, 2) > 4e-3,
+            "the unvisited action took {}",
+            mass(&policy, 2)
+        );
+    }
+
+    /// `v_mix` interpolates: `N = 0` is the raw value, and a large `N` converges
+    /// on the prior-weighted mean of the visited Q-values.
+    #[test]
+    fn mixed_value_interpolates_between_the_raw_value_and_the_visited_mean() {
+        let unvisited = [edge(1, 0.7, 0, 0.0), edge(2, 0.3, 0, 0.0)];
+        assert_eq!(mixed_value(&unvisited, 0.25), 0.25);
+
+        // Weighted mean of the visited pair: (0.2 * 0.5 + 0.6 * -0.5) / 0.8.
+        let weighted = (0.2 * 0.5 + 0.6 * -0.5) / 0.8;
+        let mut previous = f64::INFINITY;
+        for visits in [1_u32, 4, 64, 4096] {
+            let edges = [
+                edge(1, 0.2, visits, 0.5),
+                edge(2, 0.6, visits, -0.5),
+                edge(3, 0.2, 0, 0.0),
+            ];
+            let mixed = mixed_value(&edges, 1.0);
+            assert!(
+                mixed > weighted && mixed < 1.0,
+                "v_mix {mixed} left the interval [{weighted}, 1.0]"
+            );
+            assert!(mixed < previous, "v_mix must approach the weighted mean");
+            previous = mixed;
+        }
+        assert!((previous - weighted).abs() < 1e-3);
     }
 
     #[test]
