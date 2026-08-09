@@ -408,6 +408,32 @@ struct SelfPlayOptionsDto {
     openings: Vec<Vec<u16>>,
 }
 
+/// Kept as a `From` rather than inlined into the constructor so the wire
+/// format's *meaning* can be tested natively: [`NormalDuelSelfPlayBatch::new`]
+/// returns a `JsValue`, which is not constructible off wasm32, so a test that
+/// went through the constructor could not run under `cargo test`. An option the
+/// boundary parses and then drops is the failure `contradictory_exploration`
+/// exists for, and this one would not be visible from the JS side either -- the
+/// batch would simply run the wrong arm and report nothing unusual.
+impl From<SelfPlayOptionsDto> for SelfPlayOptions {
+    fn from(dto: SelfPlayOptionsDto) -> Self {
+        Self {
+            games: dto.games,
+            simulations: dto.simulations,
+            max_considered: dto.max_considered,
+            c_puct: dto.c_puct,
+            root_mode: dto.root_mode.into(),
+            exploration: dto.exploration.into(),
+            epsilon: dto.epsilon,
+            temperature: dto.temperature,
+            temperature_moves: dto.temperature_moves,
+            ply_cap: dto.ply_cap,
+            seed_base: dto.seed_base,
+            openings: dto.openings,
+        }
+    }
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum RootModeDto {
@@ -499,22 +525,8 @@ impl NormalDuelSelfPlayBatch {
         let config = parse_config(config_json).map_err(js_error)?;
         let dto: SelfPlayOptionsDto = serde_json::from_str(options_json)
             .map_err(|_| js_error("invalid_options".to_owned()))?;
-        let options = SelfPlayOptions {
-            games: dto.games,
-            simulations: dto.simulations,
-            max_considered: dto.max_considered,
-            c_puct: dto.c_puct,
-            root_mode: dto.root_mode.into(),
-            exploration: dto.exploration.into(),
-            epsilon: dto.epsilon,
-            temperature: dto.temperature,
-            temperature_moves: dto.temperature_moves,
-            ply_cap: dto.ply_cap,
-            seed_base: dto.seed_base,
-            openings: dto.openings,
-        };
         let inner =
-            SelfPlayBatch::new(&config, options).map_err(|error| js_error(error.to_string()))?;
+            SelfPlayBatch::new(&config, dto.into()).map_err(|error| js_error(error.to_string()))?;
         Ok(Self { inner })
     }
 
@@ -1199,5 +1211,50 @@ mod tests {
             search_for_impl(&invalid_deadline.to_string()),
             Err("invalid_search_budget".into())
         );
+    }
+
+    /// The classic arm's only switch is this JSON key, and a boundary that
+    /// parsed it into nothing would run the Gumbel arm under the classic arm's
+    /// name -- a clean-looking run answering the wrong question.
+    #[test]
+    fn self_play_options_carry_the_root_mode_across_the_json_boundary() {
+        let base = json!({"games": 2, "simulations": 8, "maxConsidered": 4});
+        let decode = |value: &Value| -> std::result::Result<SelfPlayOptions, ()> {
+            serde_json::from_value::<SelfPlayOptionsDto>(value.clone())
+                .map(Into::into)
+                .map_err(|_| ())
+        };
+
+        // Absent means Gumbel: a driver that predates the arm is unaffected.
+        assert_eq!(
+            decode(&base).expect("defaults parse").root_mode,
+            RootMode::Gumbel
+        );
+
+        let mut classic = base.clone();
+        classic["rootMode"] = json!("classic");
+        assert_eq!(
+            decode(&classic).expect("classic parses").root_mode,
+            RootMode::Classic
+        );
+
+        let mut gumbel = base.clone();
+        gumbel["rootMode"] = json!("gumbel");
+        assert_eq!(
+            decode(&gumbel).expect("gumbel parses").root_mode,
+            RootMode::Gumbel
+        );
+
+        // A misspelling is refused, not defaulted. `invalid_options` at
+        // construction is a driver bug an operator can see; silently running the
+        // other arm is not.
+        for spelling in ["Classic", "az-classic", "", "puct"] {
+            let mut bogus = base.clone();
+            bogus["rootMode"] = json!(spelling);
+            assert!(
+                decode(&bogus).is_err(),
+                "rootMode {spelling:?} should be refused"
+            );
+        }
     }
 }
