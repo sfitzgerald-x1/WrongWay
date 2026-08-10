@@ -126,6 +126,254 @@ const RESCALE_EPSILON: f64 = 1e-8;
 /// Default exploration constant if the caller does not supply one.
 pub const DEFAULT_C_PUCT: f64 = 1.25;
 
+/// The Dirichlet root floor's mixing weight, as `TRAINING-DESIGN-FIX.md` (D3)
+/// specifies it: `P'(a) = (1 - eps) * P(a) + eps * eta_a`, root only. This is
+/// AlphaZero's own 0.25 and it is **not** the default any option struct uses —
+/// [`PuctParams::dirichlet_epsilon`] defaults to `0.0`, which is off. It is the
+/// value the b2 arm is specified to run.
+pub const DEFAULT_DIRICHLET_EPSILON: f64 = 0.25;
+
+/// The Dirichlet concentration D3 specifies, `10 / mean_legal`, which the plan
+/// writes as "~0.15 on this board".
+///
+/// **Which mean, and why it is not the whole-game one.** This board has no
+/// single branching factor, so `10 / b` needs the phase named or it is not
+/// defined. Measured over a 32-game mock-network run (1362 recorded positions),
+/// the legal count falls *linearly* from 131 at ply 0 to 66.6 at ply 19 — each
+/// wall placed removes about three anchors from the legal set — and then falls
+/// off a cliff: 23.0 at ply 20, 4.7 at ply 22, and 2.5-3.0 from ply 24 to the
+/// end. That cliff is the `10 + 10` wall stock being spent. Twenty plies of wall
+/// placements exhaust it, after which only pawn moves are legal and the position
+/// has two or three of them.
+///
+/// So the distribution is bimodal, with modes near 100 and near 3, and its
+/// **median is 4**. The whole-game mean is 48.7 in that run and 44.5 in another,
+/// but it is an average across the cliff rather than a branching factor: it
+/// mostly measures how many near-terminal plies the sample happened to contain,
+/// and it moves with game length rather than with the game. Deriving `10 / b`
+/// from it would pick an arbitrary point on a wide range.
+///
+/// Over the phase where the search actually has a choice to make — before the
+/// stock runs out, plus the handful of plies after it — the mean is stable:
+/// **68.4 over `ply < 30`**, and `10 / 68.4 = 0.146`. That is the plan's 0.15,
+/// and `~67` is exactly the branching factor it implies. AlphaZero's `10 / b`
+/// heuristic is about typical-game branching, which is this number and not the
+/// resign-length average.
+///
+/// The value is still an option so the range can be swept; see
+/// [`MIN_DIRICHLET_ALPHA`] for the bottom of the range and why it exists.
+pub const DEFAULT_DIRICHLET_ALPHA: f64 = 0.15;
+
+/// The smallest concentration the sampler can honour, below which it silently
+/// means the OPPOSITE of what it says.
+///
+/// [`sample_gamma_below_one`] computes `x = p^(1 / alpha)`, so a component
+/// underflows to exactly `0.0` when `p < 10^(-308 * alpha)` — a probability of
+/// `10^(-308 * alpha)` per component. When *every* component underflows the sum
+/// is zero and [`root_dirichlet`] falls back to the uniform vector, which is the
+/// flattest noise there is: a caller reaching for a sparser floor gets a flatter
+/// one, and gets it on some fraction of roots rather than all of them, so the
+/// arm is quietly a mixture of two different experiments.
+///
+/// Measured, 4000 keys per cell, as the fraction of draws that come back
+/// uniform:
+///
+/// ```text
+/// alpha    count 2     count 40    count 131
+/// 2e-2     0           0           0            (no component underflowed at all)
+/// 1e-2     0           0           0            (6e-4 of components zero)
+/// 5e-3     4/4000      0           0
+/// 3e-3     38/4000     0           0
+/// 1e-3     901/4000    0           0
+/// 1e-4     3448/4000   204/4000    0
+/// 1e-6     3996/4000   3894/4000   3671/4000
+/// 1e-12    4000/4000   4000/4000   4000/4000
+/// ```
+///
+/// `1e-2` is therefore the bound: nothing degenerates there, the per-component
+/// underflow rate is `8.3e-4` (closed form) against a measured `6e-4`, and an
+/// all-zero draw needs every component to underflow — `7e-7` at a two-action
+/// root and unreachable at a realistic one. The plan's `0.15` and the tests'
+/// `0.02` sit far above it.
+///
+/// This is a bound on what the *search* will accept, not on the arithmetic:
+/// [`root_dirichlet`] is public and unvalidated, so the uniform fallback is
+/// reachable through it and is tested through it.
+pub const MIN_DIRICHLET_ALPHA: f64 = 0.01;
+
+/// Domain separator for the Dirichlet's own draw stream, so its key cannot
+/// collide with any other keyed stream this codebase grows later. The bytes are
+/// `"DIR1"`.
+const DIRICHLET_TAG: u32 = 0x4449_5231;
+
+/// Cap on the gamma sampler's rejection loop.
+///
+/// Genuinely unreachable, and measured rather than argued: over 50,000 draws at
+/// each of `alpha` 0.02, 0.15, 0.5, 0.9 and 0.999 the acceptance rate is 0.982,
+/// 0.885, 0.747, 0.722 and 0.730, and the worst case observed is 3, 6, 9, 10 and
+/// 10 attempts. At the floor of that acceptance range, 128 consecutive
+/// rejections is a `0.28^128` event, about `1e-71`.
+/// `the_gamma_samplers_rejection_loop_never_approaches_its_cap` holds it there.
+/// The cap exists so that a wasm self-play worker cannot hang instead of
+/// finishing a shard, not because it is expected to bind.
+const GAMMA_MAX_ATTEMPTS: u32 = 128;
+
+/// Murmur3's 32-bit finalizer: the avalanche step, used here to key one stream
+/// from several small integers.
+///
+/// Needed rather than an addition or an xor because *both* inputs to the key
+/// vary by one between neighbours — game `i` seeds off `seed_base + i` and plies
+/// run `0, 1, 2, ...` — and an LCG32 seeded with adjacent values produces
+/// visibly related streams, especially in the low bits, which is where a
+/// `u32 / 2^32` uniform's leading digits do NOT come from but where the
+/// rejection sampler's accept/reject boundary can still feel it.
+fn fmix32(mut h: u32) -> u32 {
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85eb_ca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2_ae35);
+    h ^= h >> 16;
+    h
+}
+
+/// `mix(game_seed, ply, DIRICHLET_TAG)`: the seed of the Dirichlet's own
+/// [`Lcg32`], and the whole of D3's determinism contract in one function.
+///
+/// The root noise MUST NOT be drawn from the game's main stream. Gamma sampling
+/// for `alpha < 1` is a rejection method, so it consumes a variable number of
+/// words — a number that depends on the priors, the legal count, and (through
+/// the accept test's `exp`) on the target's libm. The main stream's offset is
+/// contractually a pure function of the ply index; see
+/// `crate::selfplay::Game::complete_move`, where the temperature draw is taken
+/// unconditionally inside the phase for exactly that reason. Drawing the noise
+/// from that stream would make the offset a function of the noise instead, and
+/// two builds that disagreed by one accepted sample would fork every subsequent
+/// game.
+///
+/// Keying off `(game_seed, ply)` also means the noise at a given ply is
+/// reproducible without replaying the game, and that a search run in isolation —
+/// a test, a diagnostic — sees the same noise the shard worker saw.
+#[must_use]
+pub fn dirichlet_stream_seed(game_seed: u32, ply: u64) -> u32 {
+    // Fold the ply's 64 bits into 32 before mixing; no board reaches 2^32 plies,
+    // so this is a formality that keeps the key defined for every input.
+    let ply = (ply as u32) ^ ((ply >> 32) as u32);
+    fmix32(fmix32(DIRICHLET_TAG ^ game_seed) ^ ply)
+}
+
+/// One `Gamma(alpha, 1)` draw for `0 < alpha < 1`, by Ahrens and Dieter's GS
+/// algorithm (Devroye, *Non-Uniform Random Variate Generation*, IX.3).
+///
+/// ```text
+/// b = 1 + alpha / e
+/// loop:
+///   p = b * U1
+///   if p <= 1:  x = p^(1/alpha);        accept if U2 <= exp(-x)
+///   else:       x = -log((b - p) / alpha);  accept if U2 <= x^(alpha - 1)
+/// ```
+///
+/// Chosen over Marsaglia-Tsang because that method needs a standard normal, and
+/// every cheap normal generator needs either a trigonometric pair or a second
+/// rejection loop; GS needs only uniforms, a logarithm, an exponential and a
+/// power. The restriction to `alpha < 1` is not a limitation in this codebase —
+/// [`PuctTreeSearch::new`] rejects anything else — but it IS a restriction, and
+/// adding `alpha >= 1` later means adding a second sampler, not relaxing a
+/// bound.
+///
+/// The bottom of the range is a different matter and is a real defect of this
+/// method rather than a scoping decision: `p^(1 / alpha)` underflows for small
+/// `alpha`, and the consequence is documented on [`MIN_DIRICHLET_ALPHA`].
+///
+/// **Portability.** [`js_log`] is bit-portable, so it is used for the logarithm.
+/// `exp` and `powf` are libm and are not; a target whose `exp` differs by an ULP
+/// can therefore accept a different sample and consume a different number of
+/// words. That is a real hazard and it is why [`dirichlet_stream_seed`] exists:
+/// the divergence is confined to one root's noise vector on that platform and
+/// cannot move the main stream by a single word. The same caveat already applies
+/// to the recorded policy target, which goes through `f64::exp`, and to
+/// `crate::selfplay::sample_visit_temperature`, which goes through `powf`.
+fn sample_gamma_below_one(rng: &mut Lcg32, alpha: f64) -> f64 {
+    let b = 1.0 + alpha / std::f64::consts::E;
+    let mut last = 0.0_f64;
+    for _ in 0..GAMMA_MAX_ATTEMPTS {
+        let p = b * rng.unit_interval();
+        let u = rng.unit_interval();
+        if p <= 1.0 {
+            // `x` is in (0, 1], so `exp(-x)` is in [1/e, 1) and the test accepts
+            // with probability at least 1/e.
+            let x = p.powf(1.0 / alpha);
+            last = x;
+            if u <= (-x).exp() {
+                return x;
+            }
+        } else {
+            // `(b - p) / alpha` is in (0, 1/e], so `x >= 1` and `x^(alpha - 1)`
+            // is in (0, 1].
+            let x = -js_log((b - p) / alpha);
+            last = x;
+            if u <= x.powf(alpha - 1.0) {
+                return x;
+            }
+        }
+    }
+    // Unreachable in practice. GS's expected number of attempts is
+    // `(e + alpha) / (e * gamma(1 + alpha))`, which over `alpha` in (0, 1) peaks
+    // at about 1.39 -- an acceptance rate of ~0.72 -- so 128 consecutive
+    // rejections is below 1e-70. Falling through with the last candidate keeps
+    // the draw count deterministic and the value inside the distribution's
+    // support, which neither a panic nor a zero would.
+    last
+}
+
+/// `eta ~ Dir(alpha, ..., alpha)` over `count` components, drawn from the
+/// stream [`dirichlet_stream_seed`] keys and from nothing else.
+///
+/// Public for the same reason [`root_qtransform`] is: the tests address the
+/// distribution directly rather than inferring it from a whole 9x9 search, and
+/// they address the *same code the search runs*, so there is no second
+/// implementation to drift.
+///
+/// The components are drawn in index order and normalised by their sum, which is
+/// the standard construction.
+///
+/// **The zero-sum guard is reachable, and it inverts the meaning of `alpha` when
+/// it fires.** [`sample_gamma_below_one`] computes `p^(1 / alpha)`, which
+/// underflows to exactly `0.0` with probability `10^(-308 * alpha)` per
+/// component; when every component underflows the total is `0.0` and this
+/// function returns the UNIFORM vector — the flattest noise available — to a
+/// caller who asked for the sparsest. See [`MIN_DIRICHLET_ALPHA`] for the
+/// measured table and for the bound that keeps the search out of that region.
+/// This function is deliberately not bounded, so the branch stays reachable and
+/// testable: `root_dirichlet(0, 0, 1e-6, 40)` takes it.
+///
+/// A non-finite total reaches the same fallback, which is how an `alpha` of
+/// `NaN` produces a uniform vector rather than poisoning every prior with `NaN`.
+/// Note the consequence for `eps = 0`: `0.0 * uniform` is `0.0`, so a
+/// `NaN`-alpha draw that reached the mixture would still leave the priors
+/// untouched — the guard, not the early return, is what makes that case
+/// harmless, and only the `root_selection_priors.is_empty()` assertion in
+/// `the_floor_mixes_into_a_copy_and_leaves_the_networks_prior_in_the_edges`
+/// distinguishes the two.
+#[must_use]
+pub fn root_dirichlet(game_seed: u32, ply: u64, alpha: f64, count: usize) -> Vec<f64> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let mut rng = Lcg32::new(dirichlet_stream_seed(game_seed, ply));
+    let mut draws: Vec<f64> = (0..count)
+        .map(|_| sample_gamma_below_one(&mut rng, alpha))
+        .collect();
+    let total: f64 = draws.iter().sum();
+    if !total.is_finite() || total <= 0.0 {
+        let uniform = 1.0 / count as f64;
+        return vec![uniform; count];
+    }
+    for draw in &mut draws {
+        *draw /= total;
+    }
+    draws
+}
+
 /// First-play-urgency reduction. See the reference for the full rationale.
 pub const FPU_REDUCTION: f64 = 0.25;
 
@@ -153,6 +401,8 @@ pub enum PuctError {
     ContradictoryExploration,
     #[error("invalid_c_puct")]
     InvalidCPuct,
+    #[error("invalid_dirichlet")]
+    InvalidDirichlet,
     #[error("invalid_state")]
     InvalidState,
     #[error("invalid_action_code")]
@@ -181,6 +431,7 @@ impl PuctError {
             Self::InvalidGames => "invalid_games",
             Self::ContradictoryExploration => "contradictory_exploration",
             Self::InvalidCPuct => "invalid_c_puct",
+            Self::InvalidDirichlet => "invalid_dirichlet",
             Self::InvalidState => "invalid_state",
             Self::InvalidActionCode => "invalid_action_code",
             Self::OutOfOrderEvaluation => "out_of_order_evaluation",
@@ -694,6 +945,31 @@ pub struct PuctParams {
     /// Which root algorithm to run. Defaults to [`RootMode::Gumbel`], so every
     /// caller that predates this field gets exactly the search it had.
     pub root_mode: RootMode,
+    /// The game this search belongs to, for [`dirichlet_stream_seed`]. Together
+    /// with `RootContext::ply` it is the whole key of the Dirichlet's stream.
+    ///
+    /// It is a *game* seed, not a search seed: the same number the game's main
+    /// [`Lcg32`] was constructed from, unchanged for the whole game. Read only
+    /// when [`Self::dirichlet_epsilon`] is positive, so a caller that does not
+    /// use the floor may leave it at `0`.
+    pub game_seed: u32,
+    /// D3's mixing weight `eps` in `P'(a) = (1 - eps) * P(a) + eps * eta_a`,
+    /// applied to the ROOT's priors only, before the Gumbel draws.
+    ///
+    /// **`0.0` means byte-for-byte absent** and that is the default: no stream is
+    /// created, no draw is taken from anywhere, and every prior the search reads
+    /// is the identical `f64` it read before D3 existed. `tests/dirichlet_root.rs`
+    /// pins that against digests taken from the pre-D3 build.
+    ///
+    /// See [`PuctTreeSearch::setup_root`] for the one thing this deliberately
+    /// does NOT touch: the recorded policy target.
+    pub dirichlet_epsilon: f64,
+    /// D3's concentration. Read only when [`Self::dirichlet_epsilon`] is
+    /// positive, and then required to lie in `[MIN_DIRICHLET_ALPHA, 1)`. Both
+    /// bounds are properties of the sampler rather than of the design: see
+    /// [`sample_gamma_below_one`] for the upper one and
+    /// [`MIN_DIRICHLET_ALPHA`] for the lower.
+    pub dirichlet_alpha: f64,
 }
 
 impl Default for PuctParams {
@@ -703,6 +979,12 @@ impl Default for PuctParams {
             max_considered: 8,
             c_puct: DEFAULT_C_PUCT,
             root_mode: RootMode::Gumbel,
+            game_seed: 0,
+            // Off. The floor is an arm of the experiment, not the baseline: b1
+            // runs without it and b2 with it, and a default of 0.25 would have
+            // made every caller that never heard of D3 into a b2 run.
+            dirichlet_epsilon: 0.0,
+            dirichlet_alpha: DEFAULT_DIRICHLET_ALPHA,
         }
     }
 }
@@ -773,6 +1055,18 @@ pub struct PuctTreeSearch {
 
     root_window: RepetitionWindow,
     root_value: f64,
+    /// D3's noised root priors, parallel to the ROOT's edge list, or **empty**
+    /// when the floor is off.
+    ///
+    /// Empty is the load-bearing state: every read goes through
+    /// [`Self::selection_priors`], which returns this slice and whose callers
+    /// fall back to `edge.prior` when it is empty, so `eps = 0` takes the
+    /// identical arithmetic path it took before D3 and not a `(1 - 0) * p + 0`
+    /// rewrite of it.
+    ///
+    /// Separate from `edges` rather than written into it because the recorded
+    /// training target reads `edge.prior`; see [`Self::setup_root`].
+    root_selection_priors: Vec<f64>,
     max_depth: u32,
     used: u32,
     budget: i64,
@@ -956,6 +1250,21 @@ impl PuctTreeSearch {
         if !params.c_puct.is_finite() || params.c_puct <= 0.0 {
             return Err(PuctError::InvalidCPuct);
         }
+        // `epsilon` is checked always -- a NaN or an out-of-range weight is a
+        // caller bug whether or not it would be read -- and `alpha` only when
+        // the floor is actually on, matching how `SelfPlayBatch` treats the
+        // temperature it only reads inside the sampling phase.
+        if !params.dirichlet_epsilon.is_finite() || !(0.0..=1.0).contains(&params.dirichlet_epsilon)
+        {
+            return Err(PuctError::InvalidDirichlet);
+        }
+        if params.dirichlet_epsilon > 0.0
+            && !(params.dirichlet_alpha.is_finite()
+                && params.dirichlet_alpha >= MIN_DIRICHLET_ALPHA
+                && params.dirichlet_alpha < 1.0)
+        {
+            return Err(PuctError::InvalidDirichlet);
+        }
 
         let node = Node {
             position: root.position,
@@ -990,6 +1299,7 @@ impl PuctTreeSearch {
             rng,
             root_window: root.window,
             root_value: 0.0,
+            root_selection_priors: Vec::new(),
             max_depth: 0,
             used: 0,
             budget: i64::from(params.simulations),
@@ -1228,43 +1538,91 @@ impl PuctTreeSearch {
 
     /// Everything that happens once, at the root, after the network has spoken.
     ///
-    /// Both root modes funnel through here, which makes it the right *call site*
-    /// for D3's Dirichlet floor (`P'(a) = (1 - eps) * P(a) + eps * eta_a`, root
-    /// only, before the Gumbel draws): it is the one point where the root's
-    /// priors are complete and nothing downstream has read them yet — the Gumbel
-    /// draws below take `edge.prior` through `js_log`, and the classic root takes
-    /// it in `select_edge`.
+    /// Both root modes funnel through here, which is what makes it the right
+    /// place for D3's Dirichlet floor — `P'(a) = (1 - eps) * P(a) + eps * eta_a`,
+    /// root only, **before** anything reads a root prior. The Gumbel draws in
+    /// [`Self::seed_candidates`] take one through [`js_log`]; the classic root
+    /// takes one per edge in [`Self::select_edge`]; both happen after this point.
     ///
-    /// **It is a call site, not a drop-in.** Two things D3 must do that this
-    /// function does not already provide, named here so they are not discovered
-    /// late:
+    /// Two properties of how it is applied are the whole of D3's correctness,
+    /// and neither is visible from the arithmetic alone.
     ///
-    /// 1. *No seed reaches here.* The key has to be `mix(game_seed, ply,
-    ///    DIRICHLET_TAG)`, and a search holds only the live [`Lcg32`] state and
-    ///    `nodes[0].ply` — the game's seed never arrives. D3 has to carry it in
-    ///    (a [`PuctParams`] or [`RootContext`] field) and re-plumb
-    ///    [`crate::selfplay`] and the wasm options DTO, the same plumbing
-    ///    `root_mode` needed.
-    /// 2. *Noising the edges in place would noise the training target too.*
-    ///    [`improved_policy`] reads `edge.prior` as its logit source, so writing
-    ///    the mixture back into `self.edges[root range]` would make b2's recorded
-    ///    target a softmax over *noised* logits rather than over the network's
-    ///    prior — Dirichlet is meant to perturb what the search explores, not
-    ///    what the net is asked to imitate. D3 needs either an un-noised copy of
-    ///    the root priors for the target, or the noise applied only on the
-    ///    selection path.
+    /// **The noise never touches `edge.prior`.** [`improved_policy`] reads
+    /// `edge.prior` as its logit source and [`mixed_value`] reads it as `v_mix`'s
+    /// weight, so writing the mixture back into the edge list would make the
+    /// RECORDED TRAINING TARGET a softmax over noised logits rather than over the
+    /// network's prior. Dirichlet is meant to perturb what the search explores,
+    /// not what the network is asked to imitate — a b2 arm that fitted the net to
+    /// its own noise would be measuring something nobody designed. The mixture
+    /// therefore lives in [`Self::root_selection_priors`], which only the
+    /// selection path reads, and `tests/dirichlet_root.rs` holds the target to
+    /// being a function of `(prior, visits, Q, root_value)` alone.
     ///
-    /// Deferred on scope, not on feasibility: D3 is its own change in the plan,
-    /// with its own determinism suite (`eps = 0` must consume no draw from
-    /// anywhere, and rejection sampling for `alpha < 1` consumes a variable
-    /// number of draws, so it needs a stream of its own rather than the game
-    /// stream whose offset is a pure function of the ply index). This arm's
-    /// design includes it; this commit does not implement it.
+    /// **The draws come from a stream of this root's own.** See
+    /// [`dirichlet_stream_seed`]: `alpha < 1` gamma sampling is a rejection
+    /// method, and the main stream's offset is contractually a pure function of
+    /// the ply index. `self.rng` is not touched here, at any `eps`.
+    ///
+    /// With `eps = 0` this function does exactly what it did before D3: no
+    /// stream, no draw, no vector, and every later prior read resolves to the
+    /// same `edge.prior` load it always was.
     fn setup_root(&mut self, value: f64) {
         self.root_value = value;
+        self.apply_root_dirichlet();
         if self.params.root_mode == RootMode::Gumbel {
             self.seed_candidates();
         }
+    }
+
+    /// Fill [`Self::root_selection_priors`] with the D3 mixture, or leave it
+    /// empty when the floor is off.
+    fn apply_root_dirichlet(&mut self) {
+        let epsilon = self.params.dirichlet_epsilon;
+        if epsilon <= 0.0 {
+            return;
+        }
+        let root = self.nodes[0];
+        let count = root.edges_len as usize;
+        if count == 0 {
+            return;
+        }
+        let noise = root_dirichlet(
+            self.params.game_seed,
+            root.ply,
+            self.params.dirichlet_alpha,
+            count,
+        );
+        let start = root.edges_start as usize;
+        self.root_selection_priors.clear();
+        self.root_selection_priors.reserve(count);
+        for (edge, eta) in self.edges[start..start + count].iter().zip(&noise) {
+            self.root_selection_priors
+                .push((1.0 - epsilon) * edge.prior + epsilon * eta);
+        }
+    }
+
+    /// The priors `node`'s selection reads: the D3 mixture at the root when the
+    /// floor is on, and an empty slice everywhere else, meaning "use
+    /// `edge.prior`".
+    ///
+    /// Returning a slice rather than a per-edge value keeps the emptiness check
+    /// out of the inner loop in [`Self::select_edge`], and keeps the un-noised
+    /// path a plain `edge.prior` load.
+    fn selection_priors(&self, node: u32) -> &[f64] {
+        if node == 0 {
+            &self.root_selection_priors
+        } else {
+            &[]
+        }
+    }
+
+    /// One edge's selection prior, by index into [`Self::edges`].
+    fn selection_prior(&self, node: u32, index: u32) -> f64 {
+        let priors = self.selection_priors(node);
+        if priors.is_empty() {
+            return self.edges[index as usize].prior;
+        }
+        priors[(index - self.nodes[node as usize].edges_start) as usize]
     }
 
     /// One Gumbel per legal root action, drawn in ascending code order — the
@@ -1280,7 +1638,12 @@ impl PuctTreeSearch {
             // so this is the identical expression it always was -- named, now
             // that the improved policy reads the prior through the same floor
             // without taking its logarithm at all.
-            let logit = js_log(effective_prior(edge.prior));
+            //
+            // `selection_prior` is `edge.prior` unless D3's floor is on, in
+            // which case it is `(1 - eps) * prior + eps * eta`. This is the
+            // "before the Gumbel draws" of the plan's sentence: the noise enters
+            // the logit the Gumbel is added to, not the target the tree records.
+            let logit = js_log(effective_prior(self.selection_prior(0, index)));
             self.candidates.push(Candidate {
                 code: edge.code,
                 edge: index,
@@ -1448,7 +1811,13 @@ impl PuctTreeSearch {
             self.note_descent(key, existing.resets_window);
         }
         if self.edges[edge as usize].visits == 0 {
-            self.nodes[node as usize].visited_prior += self.edges[edge as usize].prior;
+            // The FPU's visited-prior accounting is part of selection, so it
+            // reads the same prior selection does -- the D3 mixture at the root,
+            // `edge.prior` everywhere else. It is only ever *read* at the root by
+            // `RootMode::Classic` (a Gumbel root's children are chosen by the
+            // schedule, not by `select_edge`), but charging one prior here and
+            // selecting on another would be a silent inconsistency either way.
+            self.nodes[node as usize].visited_prior += self.selection_prior(node, edge);
         }
         self.path.push((node, edge));
         Ok(child)
@@ -1564,6 +1933,12 @@ impl PuctTreeSearch {
     /// tie-break needs no extra work. The FPU fallback is hoisted out of the
     /// loop: it depends only on the node, and hoisting a value out of a loop
     /// changes no float operation.
+    ///
+    /// `P` is the D3 mixture at the root when the floor is on — that is where
+    /// Dirichlet reaches [`RootMode::Classic`], which has no Gumbel logit to
+    /// perturb — and `edge.prior` everywhere else. The empty-slice test is
+    /// hoisted for the same reason the FPU is, and when it is empty the
+    /// expression below is the identical `edge.prior` load it was before D3.
     fn select_edge(&self, node: u32) -> u32 {
         let current = self.nodes[node as usize];
         let sqrt_total = f64::from(current.visits).sqrt();
@@ -1573,6 +1948,7 @@ impl PuctTreeSearch {
             current.value
         };
         let fpu = clamp_value(node_value - FPU_REDUCTION * current.visited_prior.sqrt());
+        let selection = self.selection_priors(node);
 
         let mut best = current.edges_start;
         let mut best_score = f64::NEG_INFINITY;
@@ -1583,8 +1959,12 @@ impl PuctTreeSearch {
             } else {
                 fpu
             };
-            let score =
-                q + self.params.c_puct * edge.prior * sqrt_total / f64::from(1 + edge.visits);
+            let prior = if selection.is_empty() {
+                edge.prior
+            } else {
+                selection[(index - current.edges_start) as usize]
+            };
+            let score = q + self.params.c_puct * prior * sqrt_total / f64::from(1 + edge.visits);
             if score > best_score {
                 best_score = score;
                 best = index;
@@ -2117,31 +2497,45 @@ mod tests {
         seed: u32,
         root_value: f64,
     ) -> PuctTreeSearch {
-        let state = crate::create_initial_state(config).expect("the 9x9 start is valid");
-        let mut search = PuctTreeSearch::from_state(
+        expanded_root_with(
             config,
-            &state,
             PuctParams {
                 simulations: 64,
                 max_considered,
                 c_puct: DEFAULT_C_PUCT,
                 // Explicit, not defaulted: the whole point of these two tests is
                 // the sequential-halving ranking, which `RootMode::Classic` does
-                // not run at all.
+                // not run at all. D3's floor is off, from `Default`.
                 root_mode: RootMode::Gumbel,
+                ..PuctParams::default()
             },
-            Lcg32::new(seed),
+            seed,
+            &vec![1.0_f32; config.policy_size()],
+            root_value,
         )
-        .expect("the start position begins a search");
+    }
+
+    /// The same, with the params and the network's raw policy under the caller's
+    /// control — the shape D3's tests need, since the whole question there is
+    /// what the search does with a prior it was given.
+    fn expanded_root_with(
+        config: &Config,
+        params: PuctParams,
+        seed: u32,
+        policy: &[f32],
+        root_value: f64,
+    ) -> PuctTreeSearch {
+        let state = crate::create_initial_state(config).expect("the 9x9 start is valid");
+        let mut search = PuctTreeSearch::from_state(config, &state, params, Lcg32::new(seed))
+            .expect("the start position begins a search");
 
         let mut features = vec![0.0_f32; NN_INPUT_PLANES * config.cells()];
         assert!(search
             .next_leaf(config, &mut features)
             .expect("the root is handed out first"));
-        let policy = vec![1.0_f32; config.policy_size()];
         search
-            .submit(config, &policy, root_value)
-            .expect("a uniform policy expands the root");
+            .submit(config, policy, root_value)
+            .expect("a positive policy expands the root");
         search
     }
 
@@ -2256,6 +2650,531 @@ mod tests {
             "halve() kept {survivors:?}; ranking by score + qtransform keeps {expected:?} and \
              ranking by the bare Gumbel score keeps {without_the_boost:?}"
         );
+    }
+
+    /* -------------------------------------------------------------- *
+     * D3: the Dirichlet floor's two-sided contract
+     * -------------------------------------------------------------- */
+
+    /// A non-uniform, strictly positive root policy, so "the noise moved the
+    /// prior" cannot be confused with "the prior was flat anyway".
+    ///
+    /// The values are arbitrary but deterministic and they differ across codes
+    /// by more than the noise does at some indices and less at others, which is
+    /// what makes the mixture's arithmetic worth checking pointwise.
+    fn sloped_policy(config: &Config) -> Vec<f32> {
+        (0..config.policy_size())
+            .map(|code| 0.25 + ((code * 37) % 101) as f32)
+            .collect()
+    }
+
+    fn floored_params(epsilon: f64, game_seed: u32) -> PuctParams {
+        PuctParams {
+            simulations: 64,
+            // Above the legal count, so `select_considered` keeps every
+            // candidate in edge order and `candidates[i]` is root edge `i`.
+            max_considered: 256,
+            c_puct: DEFAULT_C_PUCT,
+            root_mode: RootMode::Gumbel,
+            game_seed,
+            dirichlet_epsilon: epsilon,
+            dirichlet_alpha: DEFAULT_DIRICHLET_ALPHA,
+        }
+    }
+
+    /// The mixture is exactly `(1 - eps) * P + eps * eta`, it is a distribution,
+    /// and — the point of the whole design — the edge list the target is read
+    /// from is untouched.
+    #[test]
+    fn the_floor_mixes_into_a_copy_and_leaves_the_networks_prior_in_the_edges() {
+        let config = canonical_config();
+        let policy = sloped_policy(&config);
+        let plain = expanded_root_with(&config, floored_params(0.0, 77), 5, &policy, 0.25);
+        let floored = expanded_root_with(
+            &config,
+            floored_params(DEFAULT_DIRICHLET_EPSILON, 77),
+            5,
+            &policy,
+            0.25,
+        );
+
+        let root = floored.nodes[0];
+        let count = root.edges_len as usize;
+        assert!(count > 100, "the opening root has {count} edges");
+        assert!(
+            plain.root_selection_priors.is_empty(),
+            "eps = 0 must allocate no mixture at all"
+        );
+        assert_eq!(floored.root_selection_priors.len(), count);
+
+        // The network's priors are byte-identical between the two searches: the
+        // floor wrote nowhere near them.
+        let priors: Vec<f64> = plain.edges[..count].iter().map(|edge| edge.prior).collect();
+        let after: Vec<f64> = floored.edges[..count]
+            .iter()
+            .map(|edge| edge.prior)
+            .collect();
+        assert_eq!(priors, after, "the floor rewrote the root's edge priors");
+
+        // And the mixture is the formula, term by term, over the noise the
+        // public entry point produces from this root's key.
+        let eta = root_dirichlet(77, root.ply, DEFAULT_DIRICHLET_ALPHA, count);
+        let epsilon = DEFAULT_DIRICHLET_EPSILON;
+        for index in 0..count {
+            assert_eq!(
+                floored.root_selection_priors[index],
+                (1.0 - epsilon) * priors[index] + epsilon * eta[index],
+                "edge {index}"
+            );
+        }
+        let total: f64 = floored.root_selection_priors.iter().sum();
+        assert!(
+            (total - 1.0).abs() < 1e-12,
+            "the noised priors sum to {total}"
+        );
+        // Anti-vacuity: the noise has to have MOVED something, or every
+        // assertion above holds for a mixture with weight zero.
+        let moved = (0..count).filter(|i| floored.root_selection_priors[*i] != priors[*i]);
+        assert!(moved.count() > count / 2);
+    }
+
+    /// The noise enters the Gumbel logit — `g + log P'` and not `g + log P`.
+    ///
+    /// The draws themselves are reproduced here from a fresh stream, so the
+    /// assertion separates the two halves of the score: the Gumbel is the same
+    /// as it would have been (the floor took no word from this stream) and the
+    /// logit is the noised one.
+    #[test]
+    fn the_gumbel_score_is_drawn_against_the_noised_logit() {
+        let config = canonical_config();
+        let policy = sloped_policy(&config);
+        let search = expanded_root_with(
+            &config,
+            floored_params(DEFAULT_DIRICHLET_EPSILON, 909),
+            2024,
+            &policy,
+            0.0,
+        );
+        let count = search.nodes[0].edges_len as usize;
+        assert_eq!(
+            search.candidates.len(),
+            count,
+            "max_considered was supposed to keep every candidate"
+        );
+
+        let mut stream = Lcg32::new(2024);
+        let mut differed = 0_usize;
+        for index in 0..count {
+            let candidate = search.candidates[index];
+            assert_eq!(candidate.edge as usize, index, "candidates lost edge order");
+            let gumbel = stream.gumbel();
+            let noised = js_log(effective_prior(search.root_selection_priors[index]));
+            let bare = js_log(effective_prior(search.edges[index].prior));
+            assert_eq!(
+                candidate.score,
+                gumbel + noised,
+                "candidate {index} scored against the bare logit {bare} rather than the \
+                 noised {noised}"
+            );
+            if noised != bare {
+                differed += 1;
+            }
+        }
+        assert!(
+            differed > count / 2,
+            "only {differed} of {count} logits moved; the assertion above cannot tell the two \
+             apart"
+        );
+    }
+
+    /// **The recorded target is a function of the network's prior, the visits,
+    /// the Q-values and the root value — and of nothing else.**
+    ///
+    /// This is the constraint the whole design exists for. Two searches are run
+    /// from the same seed and the same policy, one floored and one not, and then
+    /// given IDENTICAL root statistics by hand. Their recorded targets must be
+    /// bit-identical, even though their candidate sets are not, because the
+    /// target reads `edge.prior` and the noise lives elsewhere.
+    ///
+    /// The last assertion is what stops this passing for the wrong reason: it
+    /// computes the target the other way — over the noised priors — and requires
+    /// it to be a genuinely different distribution. If the noise were too small
+    /// to matter, or absent, that would fail.
+    #[test]
+    fn the_recorded_target_ignores_the_floor_at_identical_tree_statistics() {
+        let config = canonical_config();
+        let policy = sloped_policy(&config);
+        let mut plain =
+            expanded_root_with(&config, floored_params(0.0, 31), 8_675_309, &policy, -0.4);
+        let mut floored = expanded_root_with(
+            &config,
+            floored_params(DEFAULT_DIRICHLET_EPSILON, 31),
+            8_675_309,
+            &policy,
+            -0.4,
+        );
+        assert_ne!(
+            plain.candidates.iter().map(|c| c.score).collect::<Vec<_>>(),
+            floored
+                .candidates
+                .iter()
+                .map(|c| c.score)
+                .collect::<Vec<_>>(),
+            "the two searches are supposed to differ in what they would explore"
+        );
+
+        // Plant the same tree on both: a visited prefix with spread-out
+        // Q-values, an unvisited tail completed by `v_mix`.
+        let count = plain.nodes[0].edges_len as usize;
+        for index in 0..count {
+            let (visits, q) = if index % 5 == 0 {
+                (3 + (index as u32 % 7), -0.6 + 0.03 * (index as f64 % 11.0))
+            } else {
+                (0, 0.0)
+            };
+            for search in [&mut plain, &mut floored] {
+                search.edges[index].visits = visits;
+                search.edges[index].value_sum = f64::from(visits) * q;
+            }
+        }
+
+        let expected = plain.result().improved_policy;
+        assert_eq!(
+            floored.result().improved_policy,
+            expected,
+            "the floor reached the recorded policy target"
+        );
+
+        // The discriminator: the same target computed over the NOISED priors is
+        // a different distribution, so the equality above is a statement about
+        // which prior was used and not about the noise being negligible.
+        let noised_edges: Vec<Edge> = (0..count)
+            .map(|index| Edge {
+                prior: floored.root_selection_priors[index],
+                ..floored.edges[index]
+            })
+            .collect();
+        let over_noised = improved_policy(&noised_edges, floored.root_value);
+        assert_ne!(over_noised, expected);
+        let divergence: f64 = over_noised
+            .iter()
+            .zip(&expected)
+            .map(|((_, noised), (_, clean))| (noised - clean).abs())
+            .sum();
+        assert!(
+            divergence > 0.1,
+            "the two targets differ by only {divergence} in total variation; this case cannot \
+             tell them apart"
+        );
+    }
+
+    /// **The classic root's PUCT term reads `P'`, not `P`.**
+    ///
+    /// This is where Dirichlet enters [`RootMode::Classic`] — there is no Gumbel
+    /// logit for it to perturb — and it needs an assertion of its own, because
+    /// the obvious end-to-end test does not discriminate. "A floored classic
+    /// shard differs from an unfloored one" is satisfied by the FPU's
+    /// visited-prior accounting ALONE: a `select_edge` that ignored the mixture
+    /// entirely would still produce different games, because the priors it
+    /// charges to `visited_prior` moved. A mutation that did exactly that
+    /// survived every other test in this file and in `tests/dirichlet_root.rs`.
+    ///
+    /// So this plants known statistics, computes the argmax both ways, requires
+    /// them to disagree, and only then asks which one `select_edge` followed.
+    #[test]
+    fn the_classic_roots_puct_term_ranks_by_the_noised_prior() {
+        let config = canonical_config();
+        let policy = sloped_policy(&config);
+        let mut search = expanded_root_with(
+            &config,
+            PuctParams {
+                root_mode: RootMode::Classic,
+                ..floored_params(DEFAULT_DIRICHLET_EPSILON, 2718)
+            },
+            281,
+            &policy,
+            0.2,
+        );
+        let count = search.nodes[0].edges_len as usize;
+
+        // A root part-way through its budget: 100 visits spread over a handful
+        // of edges, the rest untouched, so the exploration term is live
+        // (`sqrt(100) = 10`) and the FPU is the same for every unvisited edge.
+        search.nodes[0].visits = 100;
+        search.nodes[0].value_sum = 12.0;
+        search.nodes[0].visited_prior = 0.3;
+        for index in 0..count {
+            let (visits, q) = match index % 23 {
+                0 => (9_u32, 0.42),
+                7 => (5, -0.11),
+                _ => (0, 0.0),
+            };
+            search.edges[index].visits = visits;
+            search.edges[index].value_sum = f64::from(visits) * q;
+        }
+
+        let node = search.nodes[0];
+        let fpu = clamp_value(
+            node.value_sum / f64::from(node.visits) - FPU_REDUCTION * node.visited_prior.sqrt(),
+        );
+        let sqrt_total = f64::from(node.visits).sqrt();
+        let argmax = |priors: &[f64]| -> usize {
+            let mut best = 0_usize;
+            let mut best_score = f64::NEG_INFINITY;
+            for (index, prior) in priors.iter().enumerate().take(count) {
+                let edge = search.edges[index];
+                let q = if edge.visits > 0 {
+                    edge.value_sum / f64::from(edge.visits)
+                } else {
+                    fpu
+                };
+                let score = q + DEFAULT_C_PUCT * prior * sqrt_total / f64::from(1 + edge.visits);
+                if score > best_score {
+                    best_score = score;
+                    best = index;
+                }
+            }
+            best
+        };
+        let bare: Vec<f64> = search.edges[..count]
+            .iter()
+            .map(|edge| edge.prior)
+            .collect();
+        let noised = argmax(&search.root_selection_priors);
+        let unnoised = argmax(&bare);
+        assert_ne!(
+            noised, unnoised,
+            "the planted root ranks the same edge first either way, so it cannot tell a \
+             noised PUCT term from a bare one"
+        );
+
+        assert_eq!(
+            search.select_edge(0) as usize,
+            noised,
+            "the classic root selected edge {} -- the bare-prior argmax is {unnoised} and the \
+             noised one is {noised}",
+            search.select_edge(0)
+        );
+    }
+
+    /// **Root only.** The mixture reaches the root's edge list and no other
+    /// node's, which is the "root only" of D3's one-line specification.
+    ///
+    /// Every other test would survive its removal: the digests and the
+    /// floored-vs-unfloored comparisons all move whether the noise is applied at
+    /// one node or at every node, so "root only" is currently a property nothing
+    /// NAMES. This names it, at the two places a prior is read below the root —
+    /// `select_edge`'s ranking and the FPU's charge — and it is the same class of
+    /// gap as the `select_edge` near-miss above, one rung less severe.
+    #[test]
+    fn the_floor_reaches_the_root_and_no_other_node() {
+        let config = canonical_config();
+        let policy = sloped_policy(&config);
+        let mut search = expanded_root_with(
+            &config,
+            PuctParams {
+                simulations: 48,
+                root_mode: RootMode::Classic,
+                ..floored_params(DEFAULT_DIRICHLET_EPSILON, 1234)
+            },
+            99,
+            &policy,
+            0.0,
+        );
+        let mut features = vec![0.0_f32; NN_INPUT_PLANES * config.cells()];
+        let mut leaf_policy = vec![0.0_f32; config.policy_size()];
+        while search
+            .next_leaf(&config, &mut features)
+            .expect("the search runs to completion")
+        {
+            let value = crate::mock_evaluator::evaluate(&features, &mut leaf_policy);
+            search
+                .submit(&config, &leaf_policy, value)
+                .expect("the mock evaluation is well formed");
+        }
+
+        // The root has a mixture and it is not the bare prior.
+        assert!(!search.root_selection_priors.is_empty());
+        assert!(search.selection_priors(0) == search.root_selection_priors.as_slice());
+
+        // Every expanded node below the root selects on `edge.prior` itself.
+        let mut checked = 0_usize;
+        for node in 1..search.nodes.len() as u32 {
+            let entry = search.nodes[node as usize];
+            if !entry.expanded || entry.edges_len == 0 {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                search.selection_priors(node).is_empty(),
+                "node {node} was handed a noise vector"
+            );
+            let start = entry.edges_start;
+            for index in start..start + entry.edges_len {
+                assert_eq!(
+                    search.selection_prior(node, index),
+                    search.edges[index as usize].prior,
+                    "node {node} edge {index} selects on something other than the network's prior"
+                );
+            }
+        }
+        assert!(
+            checked > 5,
+            "only {checked} non-root nodes were expanded; this case cannot discriminate"
+        );
+
+        // And the discriminator for the root itself: had the mixture been
+        // applied everywhere, a child's priors would differ from the network's
+        // by about as much as the root's do.
+        let count = search.nodes[0].edges_len as usize;
+        let drift: f64 = (0..count)
+            .map(|index| (search.root_selection_priors[index] - search.edges[index].prior).abs())
+            .sum();
+        assert!(
+            drift > 0.1,
+            "the root's own mixture moved the priors by only {drift}; this case cannot tell \
+             root-only from nowhere-at-all"
+        );
+    }
+
+    /// The rejection loop's cap is unreachable, measured rather than argued.
+    ///
+    /// [`GAMMA_MAX_ATTEMPTS`] is a hang guard whose fallback returns a value
+    /// outside the accept region, so "it never fires" is a claim the sampler's
+    /// correctness rests on. The attempt count is recovered exactly: GS consumes
+    /// two words per attempt, and [`Lcg32`] is a bijection, so replaying the
+    /// stream from the pre-call state counts them.
+    #[test]
+    fn the_gamma_samplers_rejection_loop_never_approaches_its_cap() {
+        const DRAWS: u64 = 20_000;
+        for alpha in [
+            MIN_DIRICHLET_ALPHA,
+            0.02,
+            DEFAULT_DIRICHLET_ALPHA,
+            0.5,
+            0.999,
+        ] {
+            let mut rng = Lcg32::new(12_345);
+            let mut attempts_total = 0_u64;
+            let mut worst = 0_u64;
+            for _ in 0..DRAWS {
+                let before = rng;
+                let draw = sample_gamma_below_one(&mut rng, alpha);
+                assert!(draw.is_finite() && draw >= 0.0);
+                let mut shadow = before;
+                let mut words = 0_u64;
+                while shadow != rng {
+                    shadow.next_u32();
+                    words += 1;
+                    assert!(words < 4 * u64::from(GAMMA_MAX_ATTEMPTS), "runaway replay");
+                }
+                assert_eq!(words % 2, 0, "GS takes exactly two words per attempt");
+                attempts_total += words / 2;
+                worst = worst.max(words / 2);
+            }
+            let acceptance = DRAWS as f64 / attempts_total as f64;
+            assert!(
+                acceptance > 0.7,
+                "alpha {alpha} accepted {acceptance} of its attempts"
+            );
+            assert!(
+                worst * 4 < u64::from(GAMMA_MAX_ATTEMPTS),
+                "alpha {alpha} needed {worst} attempts against a cap of {GAMMA_MAX_ATTEMPTS}; \
+                 the cap is supposed to be unreachable, not merely large"
+            );
+        }
+    }
+
+    /// The FPU's visited-prior accounting reads the mixture too, so the classic
+    /// root selects and charges on ONE prior rather than two.
+    ///
+    /// Nothing above would notice if it did not: every other test compares a
+    /// floored search against an unfloored one, and charging `edge.prior` while
+    /// selecting on `P'` is wrong in a way that is invisible to that comparison.
+    /// This reads the accumulator directly.
+    #[test]
+    fn the_classic_roots_fpu_charges_the_same_prior_it_selects_on() {
+        let config = canonical_config();
+        let policy = sloped_policy(&config);
+        let mut search = expanded_root_with(
+            &config,
+            PuctParams {
+                simulations: 48,
+                root_mode: RootMode::Classic,
+                ..floored_params(DEFAULT_DIRICHLET_EPSILON, 5150)
+            },
+            17,
+            &policy,
+            0.1,
+        );
+        let mut features = vec![0.0_f32; NN_INPUT_PLANES * config.cells()];
+        let mut leaf_policy = vec![0.0_f32; config.policy_size()];
+        while search
+            .next_leaf(&config, &mut features)
+            .expect("the classic root runs to completion")
+        {
+            let value = crate::mock_evaluator::evaluate(&features, &mut leaf_policy);
+            search
+                .submit(&config, &leaf_policy, value)
+                .expect("the mock evaluation is well formed");
+        }
+
+        let count = search.nodes[0].edges_len as usize;
+        let visited: Vec<usize> = (0..count)
+            .filter(|index| search.edges[*index].visits > 0)
+            .collect();
+        assert!(
+            visited.len() > 3 && visited.len() < count,
+            "{} of {count} root edges were visited; this case cannot discriminate",
+            visited.len()
+        );
+
+        let charged: f64 = visited
+            .iter()
+            .map(|index| search.root_selection_priors[*index])
+            .sum();
+        let bare: f64 = visited.iter().map(|index| search.edges[*index].prior).sum();
+        assert!(
+            (search.nodes[0].visited_prior - charged).abs() < 1e-12,
+            "the root charged {} against the noised {charged}",
+            search.nodes[0].visited_prior
+        );
+        assert!(
+            (charged - bare).abs() > 1e-6,
+            "the noised and bare visited priors agree to {}, so this case cannot tell them apart",
+            (charged - bare).abs()
+        );
+    }
+
+    /// `Gamma(alpha, 1)` really is `Gamma(alpha, 1)`: mean `alpha`, variance
+    /// `alpha`. The Dirichlet is only correct if this is, and the closed form is
+    /// a stronger check than any ordering property of the normalised vector.
+    #[test]
+    fn the_gamma_sampler_matches_the_distributions_moments() {
+        for alpha in [0.02_f64, 0.15, 0.5, 0.9] {
+            let mut rng = Lcg32::new(0x5eed_1234);
+            const DRAWS: usize = 40_000;
+            let mut sum = 0.0_f64;
+            let mut square_sum = 0.0_f64;
+            for _ in 0..DRAWS {
+                let x = sample_gamma_below_one(&mut rng, alpha);
+                assert!(x.is_finite() && x >= 0.0, "Gamma({alpha}) returned {x}");
+                sum += x;
+                square_sum += x * x;
+            }
+            let mean = sum / DRAWS as f64;
+            let variance = square_sum / DRAWS as f64 - mean * mean;
+            // Standard error of the mean is sqrt(alpha / DRAWS) <= 0.005 here;
+            // the variance converges more slowly, hence the looser band.
+            assert!(
+                (mean - alpha).abs() < 0.02 * alpha.max(0.15) + 0.005,
+                "Gamma({alpha}) has mean {mean}"
+            );
+            assert!(
+                (variance - alpha).abs() < 0.15 * alpha.max(0.15),
+                "Gamma({alpha}) has variance {variance}"
+            );
+        }
     }
 
     /// The halving's ranking VALUES are `g + logit + qtransform`, and the

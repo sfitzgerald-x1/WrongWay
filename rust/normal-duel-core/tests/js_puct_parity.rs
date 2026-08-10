@@ -82,8 +82,8 @@ use serde_json::{json, Value};
 use wrongway_normal_duel::js_math::Lcg32;
 use wrongway_normal_duel::mock_evaluator;
 use wrongway_normal_duel::puct::{
-    PuctParams, PuctResult, PuctTreeSearch, RootMode, JS_REFERENCE_SEARCH_VERSION,
-    PUCT_SEARCH_VERSION, SUPERSEDED_SEARCH_VERSION,
+    PuctParams, PuctResult, PuctTreeSearch, RootMode, DEFAULT_DIRICHLET_ALPHA,
+    JS_REFERENCE_SEARCH_VERSION, PUCT_SEARCH_VERSION, SUPERSEDED_SEARCH_VERSION,
 };
 use wrongway_normal_duel::{Config, GameState, NN_INPUT_PLANES};
 
@@ -321,11 +321,16 @@ fn rust_search(config: &Config, state: &GameState, case: Case) -> PuctResult {
             simulations: case.simulations,
             max_considered: case.max_considered,
             c_puct: case.c_puct,
-            // The oracle is the frozen JavaScript, which has one root algorithm.
-            // Spelled out rather than left to `Default` so the parity suite is a
-            // statement about the Gumbel root, not about whatever the default
-            // happens to be.
+            // The oracle is the frozen JavaScript, which has one root algorithm
+            // and no root noise. Spelled out rather than left to `Default` so
+            // the parity suite is a statement about the Gumbel root without
+            // D3's floor, not about whatever the defaults happen to be. A
+            // positive `dirichlet_epsilon` here would perturb the very logits
+            // the cross-engine grid compares.
             root_mode: RootMode::Gumbel,
+            game_seed: 0,
+            dirichlet_epsilon: 0.0,
+            dirichlet_alpha: DEFAULT_DIRICHLET_ALPHA,
         },
         Lcg32::new(case.seed),
     )
