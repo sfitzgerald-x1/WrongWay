@@ -1005,21 +1005,38 @@ impl PuctTreeSearch {
 
     /// Everything that happens once, at the root, after the network has spoken.
     ///
-    /// Both root modes funnel through here, and this is the **one place** the
-    /// root's priors are complete and nothing has yet read them: the Gumbel
-    /// draws below take `edge.prior` through `js_log`, and the classic root
-    /// takes it in `select_edge`. D3's Dirichlet floor — `P'(a) = (1 - eps) *
-    /// P(a) + eps * eta_a`, root only, before the Gumbel draws — therefore
-    /// belongs at the top of this function, reading its parameters off
-    /// [`PuctParams`] and writing back into `self.edges[root range]`, with no
-    /// other change to this file.
+    /// Both root modes funnel through here, which makes it the right *call site*
+    /// for D3's Dirichlet floor (`P'(a) = (1 - eps) * P(a) + eps * eta_a`, root
+    /// only, before the Gumbel draws): it is the one point where the root's
+    /// priors are complete and nothing downstream has read them yet — the Gumbel
+    /// draws below take `edge.prior` through `js_log`, and the classic root takes
+    /// it in `select_edge`.
     ///
-    /// It is a seam and not an implementation: `eps = 0` must consume no draw
-    /// from anywhere, and for `alpha < 1` the gamma sampler rejects, so it needs
-    /// its own `Lcg32` keyed `mix(game_seed, ply, DIRICHLET_TAG)` rather than the
-    /// game stream whose offset is a pure function of the ply index. That is
-    /// D3's own change, with its own determinism suite; this arm's design
-    /// includes it but this commit does not.
+    /// **It is a call site, not a drop-in.** Two things D3 must do that this
+    /// function does not already provide, named here so they are not discovered
+    /// late:
+    ///
+    /// 1. *No seed reaches here.* The key has to be `mix(game_seed, ply,
+    ///    DIRICHLET_TAG)`, and a search holds only the live [`Lcg32`] state and
+    ///    `nodes[0].ply` — the game's seed never arrives. D3 has to carry it in
+    ///    (a [`PuctParams`] or [`RootContext`] field) and re-plumb
+    ///    [`crate::selfplay`] and the wasm options DTO, the same plumbing
+    ///    `root_mode` needed.
+    /// 2. *Noising the edges in place would noise the training target too.*
+    ///    [`improved_policy`] reads `edge.prior` as its logit source, so writing
+    ///    the mixture back into `self.edges[root range]` would make b2's recorded
+    ///    target a softmax over *noised* logits rather than over the network's
+    ///    prior — Dirichlet is meant to perturb what the search explores, not
+    ///    what the net is asked to imitate. D3 needs either an un-noised copy of
+    ///    the root priors for the target, or the noise applied only on the
+    ///    selection path.
+    ///
+    /// Deferred on scope, not on feasibility: D3 is its own change in the plan,
+    /// with its own determinism suite (`eps = 0` must consume no draw from
+    /// anywhere, and rejection sampling for `alpha < 1` consumes a variable
+    /// number of draws, so it needs a stream of its own rather than the game
+    /// stream whose offset is a pure function of the ply index). This arm's
+    /// design includes it; this commit does not implement it.
     fn setup_root(&mut self, value: f64) {
         self.root_value = value;
         if self.params.root_mode == RootMode::Gumbel {
@@ -1584,6 +1601,91 @@ mod tests {
         assert_eq!(clamp_value(-2.0), -1.0);
         assert_eq!(clamp_value(0.25), 0.25);
         assert!(clamp_value(f64::NAN).is_nan());
+    }
+
+    /// The classic target is the visit distribution, exactly, and the tie-break
+    /// on the played move is the lowest code — the same rule `select_edge` uses.
+    ///
+    /// A real search almost never produces a tie at the maximum (PUCT keeps
+    /// pushing the leader), so this is where the rule can be exercised at all: a
+    /// sweep of 1..260 simulations from the opening produced no tied maximum,
+    /// which is precisely why the integration test cannot cover it and why a
+    /// `>=` here would otherwise be invisible.
+    #[test]
+    fn most_visited_breaks_ties_to_the_lowest_code() {
+        let tied = [
+            edge(3, 0.2, 7, 0.0),
+            edge(11, 0.5, 7, 0.0),
+            edge(40, 0.3, 2, 0.0),
+        ];
+        // Anti-vacuity: this only tests a tie-break if there is a tie, and only
+        // tests the *lowest* code if the tie is not already won by position.
+        assert_eq!(tied[0].visits, tied[1].visits, "the fixture has no tie");
+        assert!(
+            tied[1].prior > tied[0].prior,
+            "the tie must not be breakable by prior"
+        );
+        assert_eq!(most_visited(&tied), 3);
+
+        // A strictly greater count wins wherever it sits in the list.
+        assert_eq!(
+            most_visited(&[edge(3, 0.2, 7, 0.0), edge(11, 0.2, 8, 0.0)]),
+            11
+        );
+        assert_eq!(
+            most_visited(&[edge(3, 0.2, 9, 0.0), edge(11, 0.2, 8, 0.0)]),
+            3
+        );
+        // An all-unvisited root is a tie at zero: still the lowest code, never
+        // an arbitrary one.
+        assert_eq!(
+            most_visited(&[edge(5, 0.9, 0, 0.0), edge(9, 0.1, 0, 0.0)]),
+            5
+        );
+    }
+
+    #[test]
+    fn the_classic_target_is_exactly_the_visit_share() {
+        let policy = visit_count_policy(&[
+            edge(3, 0.7, 6, 0.0),
+            edge(11, 0.2, 2, 0.0),
+            edge(40, 0.1, 0, 0.0),
+        ]);
+        // 8 visits: 6/8, 2/8, and an unvisited action at exactly zero. Exact
+        // equality, not a tolerance -- these are dyadic rationals.
+        assert_eq!(policy, vec![(3, 0.75), (11, 0.25), (40, 0.0)]);
+        // The prior is not consulted: 0.7 against 0.2 did not move the split.
+        let reprioritised = visit_count_policy(&[
+            edge(3, 0.1, 6, 0.0),
+            edge(11, 0.8, 2, 0.0),
+            edge(40, 0.1, 0, 0.0),
+        ]);
+        assert_eq!(policy, reprioritised);
+    }
+
+    /// The zero-visit fallback, pinned rather than merely argued for.
+    ///
+    /// This codebase lost 114 iterations to a silent one-hot policy target
+    /// (`effective_visit_counts` under the v1 format), so the shape of this
+    /// fallback is not a detail: a one-hot here would be that same defect
+    /// wearing the new target's name. It returns the network's own prior, which
+    /// teaches the policy head nothing rather than something false.
+    #[test]
+    fn a_classic_target_with_no_visits_is_the_prior_and_never_a_one_hot() {
+        let edges = [
+            edge(2, 0.5, 0, 0.0),
+            edge(8, 0.3, 0, 0.0),
+            edge(40, 0.2, 0, 0.0),
+        ];
+        let policy = visit_count_policy(&edges);
+        assert_eq!(policy, vec![(2, 0.5), (8, 0.3), (40, 0.2)]);
+        let support = policy.iter().filter(|(_, p)| *p > 0.0).count();
+        assert_eq!(
+            support, 3,
+            "an unvisited classic root must not collapse onto one action"
+        );
+        // And an empty root is empty, not a one-hot on code 0.
+        assert!(visit_count_policy(&[]).is_empty());
     }
 
     #[test]

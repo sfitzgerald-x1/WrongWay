@@ -377,8 +377,19 @@ pub fn normal_duel_search_for(request_json: &str) -> std::result::Result<String,
 
 /// Options DTO for [`NormalDuelSelfPlayBatch`]. JSON here is fine: it is read
 /// once at construction, off the hot path.
+///
+/// `deny_unknown_fields` for the same reason [`SearchOptionsRequest`] has it:
+/// the wire contract must not silently accept a misspelled tuning request.
+/// Every field here except `games`, `simulations` and `maxConsidered` has a
+/// default, so without it a typo is indistinguishable from an omission and the
+/// batch runs the default instead of what was asked for. That is not
+/// hypothetical for `rootMode`: `TRAINING-DESIGN-FIX.md` writes the option
+/// `root_mode` in prose, and snake_case, wrong case, or any other near-miss all
+/// used to parse cleanly and select the Gumbel arm — so a b3 shard could have
+/// been the Gumbel arm at 512 simulations, under the b3 label, and nothing in
+/// the records would have said so.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SelfPlayOptionsDto {
     games: usize,
     simulations: u32,
@@ -1245,7 +1256,7 @@ mod tests {
             RootMode::Gumbel
         );
 
-        // A misspelling is refused, not defaulted. `invalid_options` at
+        // A misspelled VALUE is refused, not defaulted. `invalid_options` at
         // construction is a driver bug an operator can see; silently running the
         // other arm is not.
         for spelling in ["Classic", "az-classic", "", "puct"] {
@@ -1256,5 +1267,43 @@ mod tests {
                 "rootMode {spelling:?} should be refused"
             );
         }
+    }
+
+    /// A misspelled KEY is the same hazard one level up, and the more likely
+    /// one: every optional field here has a default, so an unrecognised key that
+    /// merely parses is indistinguishable from a field the driver never sent.
+    ///
+    /// `root_mode` is called out because `TRAINING-DESIGN-FIX.md` writes the
+    /// option that way in prose. A driver author copying it from the design doc
+    /// must get `invalid_options`, not a b3 run that is quietly the Gumbel arm
+    /// at 512 simulations — nothing downstream could tell the difference.
+    #[test]
+    fn a_misspelled_self_play_option_key_is_refused_rather_than_defaulted() {
+        let base = json!({"games": 2, "simulations": 8, "maxConsidered": 4});
+        let parses = |value: &Value| serde_json::from_value::<SelfPlayOptionsDto>(value.clone());
+        assert!(parses(&base).is_ok(), "the base options must still parse");
+
+        for key in [
+            "root_mode",
+            "rootmode",
+            "ROOTMODE",
+            "RootMode",
+            "temperature_moves",
+            "totallyBogusKey",
+        ] {
+            let mut bogus = base.clone();
+            bogus[key] = json!("classic");
+            assert!(
+                parses(&bogus).is_err(),
+                "unknown key {key:?} must be refused, not silently ignored"
+            );
+        }
+
+        // The camelCase spellings the wire format actually defines still parse,
+        // so the guard above is rejecting typos rather than the contract.
+        let mut spelled_correctly = base;
+        spelled_correctly["rootMode"] = json!("classic");
+        spelled_correctly["temperatureMoves"] = json!(4);
+        assert!(parses(&spelled_correctly).is_ok());
     }
 }

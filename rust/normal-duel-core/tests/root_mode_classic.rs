@@ -532,3 +532,56 @@ fn the_classic_arm_produces_different_data_from_the_default() {
     }));
     assert_ne!(classic, gumbel);
 }
+
+/// The zero-visit branch of the classic target is **reachable through the
+/// public API**, which is why it is a fallback and not a `debug_assert`.
+///
+/// `result()` is documented as callable at any time; the counts are simply
+/// partial before the search finishes. Read between the root's expansion and
+/// the first backup, a classic root has expanded edges and no visits at all,
+/// and the honest answer there is the network's own prior. Asserting the branch
+/// unreachable would turn that documented call into a debug-build panic.
+#[test]
+fn a_classic_result_read_before_the_first_backup_is_the_prior_not_a_one_hot() {
+    let config = config();
+    let state = create_initial_state(&config).expect("initial state");
+    let mut tree = PuctTreeSearch::from_state(
+        &config,
+        &state,
+        PuctParams {
+            simulations: 64,
+            max_considered: 8,
+            c_puct: 1.25,
+            root_mode: RootMode::Classic,
+        },
+        Lcg32::new(5),
+    )
+    .expect("an ongoing 9x9 state starts a search");
+
+    let mut features = vec![0.0_f32; RECORD_FEATURES];
+    let mut policy = vec![0.0_f32; RECORD_POLICY];
+    assert!(tree.next_leaf(&config, &mut features).expect("root leaf"));
+    let value = mock_evaluator::evaluate(&features, &mut policy);
+    tree.submit(&config, &policy, value).expect("root submit");
+
+    // The root is expanded and nothing has been simulated: exactly the state
+    // the fallback exists for.
+    let result = tree.result();
+    assert_eq!(result.simulations_used, 0);
+    let visits: u32 = result.visit_counts.iter().map(|(_, n)| *n).sum();
+    assert_eq!(visits, 0);
+
+    let support = result
+        .improved_policy
+        .iter()
+        .filter(|(_, p)| *p > 0.0)
+        .count();
+    assert!(
+        support > 1,
+        "an unvisited classic root collapsed onto {support} action(s); that is the one-hot \
+         target that cost an earlier run 114 iterations"
+    );
+    assert_eq!(support, legal_root_actions());
+    let mass: f64 = result.improved_policy.iter().map(|(_, p)| *p).sum();
+    assert!((mass - 1.0).abs() < 1e-9, "the fallback sums to {mass}");
+}
