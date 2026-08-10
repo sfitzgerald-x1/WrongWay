@@ -24,6 +24,12 @@ use wrongway_normal_duel::puct::{root_qtransform, ActionStats};
 const MAXVISIT_INIT: f64 = 50.0;
 const VALUE_SCALE: f64 = 0.1;
 
+/// What an unvisited action's Q-value is set to, matching
+/// `scripts/gen-qtransform-goldens.py`. Far outside `[-1, 1]`, so an
+/// implementation that reads it instead of completing it cannot land somewhere
+/// plausible.
+const POISON_Q: f64 = 9.0;
+
 /// The `v2` expression this change replaced: `(50 + maxN) * 1.0` applied to raw
 /// completed-Q in `[-1, 1]`. Kept so the bound below can be shown to be a
 /// property of `v3` specifically and not of arithmetic in general.
@@ -78,11 +84,15 @@ fn random_root(rng: &mut Lcg32) -> (Vec<ActionStats>, f64) {
             ActionStats {
                 prior: *prior,
                 visits,
-                // Q lives in [-1, 1]: it is a backed-up game value.
+                // Q lives in [-1, 1]: it is a backed-up game value. An unvisited
+                // action gets `POISON_Q` instead, the same discipline the
+                // goldens use -- the completion is supposed to replace it, and
+                // an implementation that reads it should fail loudly rather than
+                // land plausibly near zero.
                 qvalue: if visits > 0 {
                     range(rng, -1.0, 1.0)
                 } else {
-                    0.0
+                    POISON_Q
                 },
             }
         })
@@ -208,11 +218,14 @@ fn the_v2_expression_violates_the_bound_this_suite_asserts() {
 /// reason the rescale is defined at all. It must produce a boost of exactly
 /// `0.0` for every action, leaving `pi'` the renormalised prior.
 ///
-/// The boost is asserted at exact `f64` equality, because that part IS exact:
-/// `(c - min)` is `0.0` and `0.0 / 1e-8` is `0.0`. `pi'` is asserted to 1e-12
-/// relative instead, because the softmax reaches it through `exp(log(p))`, and
-/// a logarithm followed by an exponential is a round trip of one or two ULP —
-/// mathematically the identity, not bitwise.
+/// Both halves are asserted at exact `f64` equality, and both can be. The boost
+/// is exact because `(c - min)` is `0.0` and `0.0 / 1e-8` is `0.0`. `pi'` is
+/// exact because [`root_qtransform`] reaches it as `p(a) * exp(boost - max)`
+/// rather than `exp(log(p(a)) + boost)`: with a flat boost every exponential is
+/// exactly `1.0`, so the computation is `p(a) / sum(p)`, summed in the same
+/// order this test sums it. The logarithmic form -- which is what `mctx` writes,
+/// because its input is a logit vector -- would land about `1e-14` away, and the
+/// plan says this case MUST be exact.
 #[test]
 fn a_search_that_learned_nothing_sharpens_nothing() {
     // Every shape that can produce a flat completion: nothing visited, so v_mix
@@ -322,11 +335,10 @@ fn a_search_that_learned_nothing_sharpens_nothing() {
         }
         let priors = floored_prior(&stats);
         for (index, (weight, prior)) in outcome.action_weights.iter().zip(&priors).enumerate() {
-            let relative = (weight - prior).abs() / prior;
-            assert!(
-                relative < 1e-12,
-                "{name}: action {index} got {weight} where the renormalised prior is {prior} \
-                 (relative {relative:e}); a flat boost must leave the prior alone"
+            assert_eq!(
+                weight, prior,
+                "{name}: action {index} got {weight} where the renormalised prior is {prior}; \
+                 a flat boost must leave the prior alone, bit for bit"
             );
         }
     }
@@ -374,10 +386,15 @@ fn equal_completions_are_flat_across_the_sweep() {
                 "action {index}: boost {boost} on a root where every completion is {q}"
             );
         }
+        let priors = floored_prior(&stats);
+        assert_eq!(
+            outcome.action_weights, priors,
+            "a flat boost must leave pi' as the renormalised prior, bit for bit"
+        );
     }
     println!(
         "no-signal property: {visited_roots} all-visited and {unvisited_roots} all-unvisited \
-         degenerate roots, all exactly flat"
+         degenerate roots, all exactly flat and exactly the renormalised prior"
     );
 }
 
@@ -401,24 +418,35 @@ fn equal_completions_are_flat_across_the_sweep() {
 fn a_v_mix_rounding_crumb_stays_a_crumb() {
     let mut rng = Lcg32::new(6_060_842);
     let mut worst = 0.0_f64;
+    let mut worst_at_production_shape = 0.0_f64;
 
-    for _ in 0..4_000 {
+    let mut production_roots = 0_usize;
+    for round in 0..4_000 {
         let (mut stats, _) = random_root(&mut rng);
         if stats.len() < 2 {
             continue;
         }
+        // Half the sweep at the production budget and half at the widest shape
+        // the engine could reach, so the two numbers below are both measured
+        // rather than one of them being an empty filter over the other.
+        let production_shape = round % 2 == 0;
+        let cap = if production_shape { 128 } else { 4096 };
         let q = range(&mut rng, -1.0, 1.0);
         for (index, stat) in stats.iter_mut().enumerate() {
             stat.visits = if index % 2 == 0 {
-                1 + rng.next_u32() % 4096
+                1 + rng.next_u32() % cap
             } else {
                 0
             };
             stat.qvalue = q;
         }
         let outcome = root_qtransform(&stats, q);
+        production_roots += usize::from(production_shape);
         for boost in &outcome.transformed {
             worst = worst.max(boost.abs());
+            if production_shape {
+                worst_at_production_shape = worst_at_production_shape.max(boost.abs());
+            }
         }
         for (index, weight) in outcome.action_weights.iter().enumerate() {
             let prior = floored_prior(&stats)[index];
@@ -434,7 +462,20 @@ fn a_v_mix_rounding_crumb_stays_a_crumb() {
         worst < 2e-4,
         "a v_mix rounding crumb was amplified to a boost of {worst}, which is no longer a crumb"
     );
-    println!("v_mix rounding crumb: worst amplified boost {worst:e} in logit space");
+    // The number that matters for the halving cut is this one: the tightest
+    // `g + logit` gap the cross-engine grid observes is 4.1e-7, and the boost
+    // is added to that sum. At the production search shape the crumb stays an
+    // order of magnitude below it; at the sweep's widest shapes it does not.
+    assert!(
+        worst_at_production_shape < 1e-5,
+        "at maxN <= 128 the crumb reached {worst_at_production_shape}"
+    );
+    assert!(production_roots > 1_000);
+    println!(
+        "v_mix rounding crumb: worst amplified boost {worst:e} in logit space over all shapes, \
+         {worst_at_production_shape:e} over {production_roots} roots at the production \
+         maxN <= 128"
+    );
 }
 
 /// **v_mix interpolates.** It lies between the raw value and the prior-weighted
@@ -627,15 +668,34 @@ fn the_improved_policy_is_always_a_distribution() {
     );
 }
 
-/// **Monotonicity.** The transform never reorders two actions by value, which is
-/// the property the halving ranking depends on: a better completed Q must never
-/// buy a smaller boost.
+/// **Monotonicity, strictly.** The transform never reorders two actions by
+/// value — the property the halving ranking depends on — and where the two
+/// completed values are meaningfully apart it never FLATTENS them either.
+///
+/// The weak form (`<=`) is satisfied by any monotone map, the constant-zero one
+/// included, so on its own it survives a revert of D1. The strict form does
+/// not: a better completed Q must buy a strictly larger boost whenever the
+/// node's range is wide enough for the rescale to resolve the difference.
+/// "Wide enough" is the guard on the second comparison: at a completed gap
+/// below `1e-12` of the span the division can legitimately round two actions
+/// onto one boost, and that is float arithmetic, not a policy.
 #[test]
 fn the_transform_never_reorders_two_actions_by_value() {
     let mut rng = Lcg32::new(90_210);
+    let mut strict_pairs = 0_u64;
     for _ in 0..2_000 {
         let (stats, raw_value) = random_root(&mut rng);
         let outcome = root_qtransform(&stats, raw_value);
+        let span = outcome
+            .completed
+            .iter()
+            .copied()
+            .fold(f64::NEG_INFINITY, f64::max)
+            - outcome
+                .completed
+                .iter()
+                .copied()
+                .fold(f64::INFINITY, f64::min);
         for i in 0..stats.len() {
             for j in 0..stats.len() {
                 if outcome.completed[i] < outcome.completed[j] {
@@ -647,10 +707,26 @@ fn the_transform_never_reorders_two_actions_by_value() {
                         outcome.transformed[i],
                         outcome.transformed[j]
                     );
+                    if outcome.completed[j] - outcome.completed[i] > span * 1e-12 {
+                        assert!(
+                            outcome.transformed[i] < outcome.transformed[j],
+                            "a completed gap of {} across a span of {span} bought no boost at \
+                             all: {} against {}",
+                            outcome.completed[j] - outcome.completed[i],
+                            outcome.transformed[i],
+                            outcome.transformed[j]
+                        );
+                        strict_pairs += 1;
+                    }
                 }
             }
         }
     }
+    assert!(
+        strict_pairs > 100_000,
+        "only {strict_pairs} pairs were far enough apart to require strictness"
+    );
+    println!("monotonicity: {strict_pairs} strictly separated pairs");
 }
 
 /// **The transform's range.** Every boost lands in `[0, (50 + maxN) * 0.1]`,

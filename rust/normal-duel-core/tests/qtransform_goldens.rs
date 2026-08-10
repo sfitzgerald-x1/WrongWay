@@ -10,10 +10,11 @@
 //!
 //! `scripts/gen-qtransform-goldens.py` runs
 //! `mctx.qtransform_completed_by_mix_value` and `gumbel_muzero_policy`'s
-//! `action_weights` over ~200 synthetic roots — a grid over priors x visit
-//! counts x Q-values x maxN, plus every edge case the plan pins by name — and
-//! commits what came back as `fixtures/qtransform-mctx-goldens.json`. Nothing
-//! in this file recomputes `mctx`; it only compares.
+//! `action_weights` over 234 synthetic roots — all 216 combinations of prior
+//! shape x visit pattern x Q range, at independently drawn action counts and
+//! visit budgets, plus the 18 edge cases the plan pins by name — and commits
+//! what came back as `fixtures/qtransform-mctx-goldens.json`. Nothing in this
+//! file recomputes `mctx`; it only compares.
 //!
 //! **The tolerance is 1e-6 in f64 and does not move.** A mismatch is a bug in
 //! `puct.rs`, to be fixed there and the fixtures regenerated. Widening the band
@@ -119,10 +120,24 @@ fn our_qtransform_matches_mctx_over_the_whole_fixture_grid() {
         .as_array()
         .expect("the goldens file holds a `cases` array");
     assert!(
-        cases.len() >= 200 - 20,
+        cases.len() >= 230,
         "only {} golden cases; the plan asks for ~200",
         cases.len()
     );
+    // 6 prior shapes x 6 visit patterns x 6 Q ranges, enumerated rather than
+    // sampled. A regeneration that quietly went back to sampling them from one
+    // counter -- which is what the first version of the generator did, covering
+    // 64 of the combinations -- fails here.
+    let grid = cases
+        .iter()
+        .filter(|case| {
+            case["name"]
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("grid/")
+        })
+        .count();
+    assert_eq!(grid, 6 * 6 * 6, "the shape grid is no longer enumerated");
 
     // The fixture is only an authority if it says what produced it.
     assert_eq!(

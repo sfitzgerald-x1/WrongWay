@@ -75,10 +75,12 @@ import { createLcg32 } from './lcg32.mjs';
  * What this module still is: the parity oracle for everything the qtransform
  * cannot reach — the Gumbel considered set, the root value, the budget
  * accounting, and, at `maxConsidered = 1` where the halving loop below never
- * executes, the whole descent, backup, repetition and terminality path at full
- * strength. `rust/normal-duel-core/tests/js_puct_parity.rs` compares all of
- * that exactly, counts the halving-dependent divergence separately, and asserts
- * this string, so changing it fails the Rust suite rather than quietly
+ * executes, every field the harness dumps (though with a single candidate the
+ * visit ladder and the played action are forced, so the depth reached is the
+ * one that still observes the descent).
+ * `rust/normal-duel-core/tests/js_puct_parity.rs` compares all of that exactly,
+ * pins the halving-dependent divergence counts separately, and asserts this
+ * string, so changing it fails the Rust suite rather than quietly
  * desynchronising the two engines.
  */
 export const PUCT_SEARCH_VERSION = 'puct-az-tree-v1';

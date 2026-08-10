@@ -5,7 +5,7 @@ The authority for `puct.rs`'s completed-Q, its qtransform and its improved
 policy is DeepMind's `mctx`, not this repository's reading of the paper. This
 script runs `mctx.qtransform_completed_by_mix_value` -- the exact function
 `mctx.gumbel_muzero_policy` uses for both the sequential-halving ranking and
-`action_weights` -- over ~200 synthetic roots and writes what it produced to
+`action_weights` -- over 234 synthetic roots and writes what it produced to
 `rust/normal-duel-core/tests/fixtures/qtransform-mctx-goldens.json`.
 
 `rust/normal-duel-core/tests/qtransform_goldens.rs` then asserts our numbers
@@ -264,12 +264,19 @@ def edge_cases():
     return cases
 
 
-def grid_cases(rng, count):
+def grid_cases(rng):
     """A grid over priors x visit counts x Q-values x maxN.
 
-    Sampled rather than enumerated, but from an enumerated set of *shapes*: the
-    point is that every combination of prior shape, visit pattern and Q range is
-    represented, not that the numbers themselves are special.
+    The three shape axes that decide the *arithmetic* -- the prior's shape, the
+    visit pattern and the Q range -- are ENUMERATED, all 6 x 6 x 6 of them, so
+    every combination really is represented. The two axes that only decide the
+    problem's size -- the action count and the top visit count -- are drawn
+    independently from `rng` for each combination.
+
+    An earlier version derived all five axes from one counter with different
+    strides, which phase-locked them: 64 of 1512 combinations, and only 12 of
+    the 36 prior x visit pairs. That is the kind of hole a grid is supposed to
+    close, so it is enumerated now rather than sampled.
     """
     action_counts = [2, 3, 5, 8, 16, 40, 64]
     prior_shapes = ["uniform", "dirichlet-0.1", "dirichlet-1", "dirichlet-10", "peaked", "floored"]
@@ -277,15 +284,17 @@ def grid_cases(rng, count):
     q_shapes = ["positive", "negative", "mixed", "tight", "wide", "extreme"]
     max_visits = [0, 1, 2, 7, 30, 128, 1000]
 
+    combinations = [
+        (prior_shape, visit_shape, q_shape)
+        for prior_shape in prior_shapes
+        for visit_shape in visit_shapes
+        for q_shape in q_shapes
+    ]
+
     cases = []
-    index = 0
-    while len(cases) < count:
-        num_actions = action_counts[index % len(action_counts)]
-        prior_shape = prior_shapes[(index // 1) % len(prior_shapes)]
-        visit_shape = visit_shapes[(index // 2) % len(visit_shapes)]
-        q_shape = q_shapes[(index // 3) % len(q_shapes)]
-        top_visits = max_visits[(index // 5) % len(max_visits)]
-        index += 1
+    for index, (prior_shape, visit_shape, q_shape) in enumerate(combinations):
+        num_actions = int(rng.choice(action_counts))
+        top_visits = int(rng.choice(max_visits))
 
         if prior_shape == "uniform":
             priors = np.full(num_actions, 1.0 / num_actions)
@@ -357,12 +366,11 @@ def main():
         default=Path(__file__).resolve().parents[1]
         / "rust/normal-duel-core/tests/fixtures/qtransform-mctx-goldens.json",
     )
-    parser.add_argument("--grid", type=int, default=180)
     parser.add_argument("--seed", type=int, default=20_260_809)
     args = parser.parse_args()
 
     rng = np.random.default_rng(args.seed)
-    specs = edge_cases() + grid_cases(rng, args.grid)
+    specs = edge_cases() + grid_cases(rng)
 
     cases = []
     for name, priors, visits, qvalues, raw_value in specs:

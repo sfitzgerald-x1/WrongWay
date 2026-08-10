@@ -32,15 +32,24 @@
 //! still means what it always meant. Concretely, two tests:
 //!
 //! 1. `rust_batched_puct_matches_the_javascript_search_exactly_without_halving`
-//!    runs the full, unweakened comparison at `max_considered = 1`. With one
-//!    candidate the halving loop never executes in either engine — the JS goes
-//!    straight to `while (budget > 0) visit(survivors[0])` and the Rust to
-//!    `draining_single` — so the qtransform is never consulted and every
-//!    quantity is still required to be identical. What that covers is the whole
-//!    of the tree below the root: `select_edge`'s PUCT and FPU, the repetition
-//!    window, terminality and adjudication order, the backup's negation per ply,
-//!    the depth accounting and the budget. At 64 simulations down a single root
-//!    move it is a deeper tree than any case in the halving grid built.
+//!    compares every field at `max_considered = 1`. With one candidate the
+//!    halving loop never executes in either engine — the JS goes straight to
+//!    `while (budget > 0) visit(survivors[0])` and the Rust to
+//!    `draining_single` — so the qtransform is never consulted and nothing is
+//!    excused from matching.
+//!
+//!    Be precise about what that buys, because "every field" is not the same as
+//!    "every field is informative". With one candidate the visit counts are the
+//!    schedule and the played action is forced, so the field through which a
+//!    descent disagreement can actually surface is `max_depth_reached` (plus the
+//!    budget, which terminal nodes consume without an evaluation). It is a
+//!    coarse observation of `select_edge`'s PUCT and FPU, the repetition window,
+//!    adjudication order and the per-ply backup — one integer per search, over
+//!    880 searches and trees up to 17 plies deep. The halving grid was no
+//!    stronger here: its extra descent-sensitive field was the visit ladder,
+//!    which is also mostly schedule. The fine-grained coverage of the descent
+//!    lives in `tests/tree_ply_cap.rs`, `tests/property_gates.rs` and the
+//!    engine's own unit tests, not in this file.
 //!
 //! 2. `the_halving_grid_still_agrees_on_everything_the_qtransform_cannot_reach`
 //!    runs the original grid and splits it. The Gumbel considered set, the root
@@ -592,12 +601,20 @@ fn the_halving_grid_still_agrees_on_everything_the_qtransform_cannot_reach() {
         "the Gumbel ranking came within {tightest_gap:e} of a tie, which is close enough to a \
          1-ULP Math.log disagreement to be worth investigating"
     );
-    // The divergence is the change. If it vanished, D1 was reverted -- and this
-    // grid would silently go back to being a full-strength parity test against
-    // an implementation the plan deliberately moved away from.
-    assert!(
-        differing_counts > 0,
-        "the v3 halving reached the same visit counts as the frozen v1 reference on all \
-         {compared} searches; the qtransform is not reaching the halving ranking"
+    // The divergence is the change, and it is PINNED, not merely required to be
+    // non-zero. Every input here is fixed -- the state pool, the case grid, the
+    // seeds, the mock evaluator -- so these are three deterministic integers,
+    // and `> 0` was far too loose to protect anything: dropping the boost from
+    // `halve` entirely, so the ranking never consults the qtransform at all,
+    // moves them to 616 / 845 / 349 and still leaves a positive count.
+    //
+    // If one of these moves, something changed the search. That is not
+    // automatically wrong -- but it is never a number to update without saying
+    // which change moved it and why the new one is right.
+    assert_eq!(
+        (differing_counts, differing_actions, differing_depths),
+        (437, 360, 233),
+        "the v1-vs-v3 divergence profile moved from (437, 360, 233); the inputs are \
+         deterministic, so a search change caused this and it needs naming"
     );
 }
