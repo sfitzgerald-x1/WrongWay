@@ -53,6 +53,13 @@
 //! action — `PuctResult::improved_policy`, `pi'(a) ∝ exp(logit(a) +
 //! sigma(completedQ(a)))` — never a one-hot, and never the visit distribution.
 //!
+//! Unless [`SelfPlayOptions::root_mode`] is `Classic`, in which case there is no
+//! Gumbel root to improve on and the target is that root's visit distribution,
+//! `N(a) / sum N`. The paragraph below is the argument for why the visit
+//! distribution is the wrong target *under sequential halving*; it is not an
+//! argument against visit counts as such, and the classic arm exists to hold the
+//! other end of that distinction.
+//!
 //! It used to be the visit distribution, and that was the defect: under
 //! sequential halving the visit counts are the schedule rather than the search's
 //! opinion. At 128 simulations over 16 candidates the rounds spend 16x2, 8x4,
@@ -75,7 +82,7 @@
 use crate::js_math::Lcg32;
 use crate::puct::{
     apply_action_code, compact_key, PuctError, PuctParams, PuctTreeSearch, RepetitionWindow,
-    RootContext,
+    RootContext, RootMode,
 };
 use crate::{Config, Player, SearchPosition, MAX_POLICY_CODES, NN_INPUT_PLANES};
 
@@ -132,8 +139,21 @@ pub enum Exploration {
 pub struct SelfPlayOptions {
     pub games: usize,
     pub simulations: u32,
+    /// Read only by [`RootMode::Gumbel`]; the classic root has no candidate set.
     pub max_considered: u32,
     pub c_puct: f64,
+    /// Which root algorithm the per-move searches run. Defaults to
+    /// [`RootMode::Gumbel`].
+    ///
+    /// Under [`RootMode::Classic`] the recorded policy target is the root's
+    /// visit distribution, so [`Exploration::VisitTemperature`] — which samples
+    /// the played move from the recorded target — becomes AlphaZero's own
+    /// recipe verbatim: sample from visit counts for
+    /// [`Self::temperature_moves`] plies, then play the argmax. That is not a
+    /// coincidence to rely on quietly; it is why the played-move rule needed no
+    /// second implementation for this arm, and it is pinned by
+    /// `tests/root_mode_classic.rs`.
+    pub root_mode: RootMode,
     /// Which exploration recipe drives the played move.
     pub exploration: Exploration,
     /// Probability of playing a uniformly random legal move instead of the
@@ -181,6 +201,7 @@ impl Default for SelfPlayOptions {
             simulations: 32,
             max_considered: 8,
             c_puct: crate::puct::DEFAULT_C_PUCT,
+            root_mode: RootMode::Gumbel,
             exploration: Exploration::VisitTemperature,
             epsilon: 0.0,
             temperature: 1.0,
@@ -388,6 +409,7 @@ impl Game {
                         simulations: options.simulations,
                         max_considered: options.max_considered,
                         c_puct: options.c_puct,
+                        root_mode: options.root_mode,
                     },
                     self.rng,
                 )?);
