@@ -17,15 +17,33 @@
 // SINCE `puct-az-tree-v2` THE TWO DRIVERS RECORD DIFFERENT POLICY TARGETS BY
 // DESIGN: driver B records the Gumbel improved policy, driver A is the frozen
 // JS reference and still records normalised visit counts. That is a deliberate
-// format divergence, not the fork this script hunts.
+// format divergence, not the fork this script hunts. So `policyTarget` is
+// compared SEPARATELY and does not affect the verdict.
 //
-// So `policyTarget` is compared SEPARATELY and does not affect the verdict.
-// Folding it into the line comparison would have pinned `firstLine` at 0 and
-// the exit code at 1 forever, which destroys the tool: its own target condition
+// SINCE `puct-az-tree-v3` THE TWO DRIVERS ALSO PLAY DIFFERENT MOVES BY DESIGN.
+// Driver B's sequential halving ranks survivors with the mctx qtransform;
+// driver A is still frozen at `v1` and ranks them with the old raw-Q `sigma`.
+// The two therefore visit different children and can choose differently at any
+// ply -- and once they do, the games are at DIFFERENT POSITIONS and nothing
+// after that point is comparable at all.
+//
+// Comparing whole games would therefore have pinned the exit code at 1 forever,
+// which destroys the tool: its own target condition -- an RNG-stream fork --
 // would no longer be distinguishable from its steady state, and a permanently
-// red check is one nobody reads. What still means what it always meant —
-// identical positions, identical legality, identical outcomes and an identical
-// ply trace — is what `identical` is now computed from.
+// red check is one nobody reads. Nor is the answer to make it green by
+// asserting nothing.
+//
+// So the verdict is computed PER GAME OVER THE SHARED PREFIX: every ply up to
+// and including the first one where the two drivers played different moves.
+// Inside that prefix both drivers are at the same position with the same draw
+// stream, so identical features, identical legal masks and an identical
+// absolute-ply trace still mean exactly what they always meant, and a
+// termination-rule difference or a stream fork still fails. The fork ply itself
+// is reported per game, informational: under `v3` it is expected to be finite.
+//
+// `z` is compared only for games that never forked, because a game that forked
+// can legitimately end differently. Where the two drivers agree on every played
+// move, the comparison is the whole game exactly as before.
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
@@ -88,6 +106,7 @@ const evaluate = (config, state) => mockEvaluator(config, state);
  * ---------------------------------------------------------------- */
 function runJs() {
   const lines = [];
+  const positions = [];
   const targets = [];
   const trace = [];
   const outcomes = {};
@@ -146,10 +165,13 @@ function runJs() {
       lines.push(JSON.stringify({
         features: rec.features, legalMask: rec.legalMask, z
       }));
+      // The position alone, without `z`: the outcome of a game that forked is
+      // not a fact about either driver's correctness.
+      positions.push(JSON.stringify({ features: rec.features, legalMask: rec.legalMask }));
       targets.push(JSON.stringify(rec.policyTarget));
     }
   }
-  return { lines, targets, trace, outcomes, plyTotal };
+  return { lines, positions, targets, trace, outcomes, plyTotal };
 }
 
 /* ---------------------------------------------------------------- *
@@ -212,39 +234,78 @@ async function runRust() {
 
   const { features: F, recordFloats: R } = layout;
   const lines = [];
+  const positions = [];
   const targets = [];
   const trace = [];
   for (let i = 0; i < count; i += 1) {
     const base = i * R;
-    lines.push(JSON.stringify({
-      features: Array.from(records.subarray(base, base + F)),
-      legalMask: Array.from(records.subarray(base + F + P, base + F + 2 * P)),
-      z: records[base + F + 2 * P]
-    }));
+    const features = Array.from(records.subarray(base, base + F));
+    const legalMask = Array.from(records.subarray(base + F + P, base + F + 2 * P));
+    lines.push(JSON.stringify({ features, legalMask, z: records[base + F + 2 * P] }));
+    positions.push(JSON.stringify({ features, legalMask }));
     targets.push(JSON.stringify(Array.from(records.subarray(base + F, base + F + P))));
     trace.push({
       game: meta[i * 4], absPly: meta[i * 4 + 1],
       turn: meta[i * 4 + 2], playedCode: meta[i * 4 + 3]
     });
   }
-  return { lines, targets, trace, outcomes, plies, count };
+  return { lines, positions, targets, trace, outcomes, plies, count };
 }
 
 const js = runJs();
 const rust = await runRust();
 
-// Locate the first differing shard line, and the first differing ply.
-let firstLine = -1;
-for (let i = 0; i < Math.max(js.lines.length, rust.lines.length); i += 1) {
-  if (js.lines[i] !== rust.lines[i]) { firstLine = i; break; }
+// Group each driver's records by game. Both drivers emit one record per ply in
+// game order, so the record index and the trace index are the same index.
+function byGame(trace) {
+  const games = new Map();
+  trace.forEach((entry, index) => {
+    if (!games.has(entry.game)) games.set(entry.game, []);
+    games.get(entry.game).push(index);
+  });
+  return games;
 }
-let firstPly = -1;
-for (let i = 0; i < Math.max(js.trace.length, rust.trace.length); i += 1) {
-  const a = js.trace[i];
-  const b = rust.trace[i];
-  if (!a || !b || a.game !== b.game || a.absPly !== b.absPly || a.playedCode !== b.playedCode) {
-    firstPly = i; break;
+
+const jsGames = byGame(js.trace);
+const rustGames = byGame(rust.trace);
+
+// Walk each game's shared prefix: every ply up to and including the first one
+// where the drivers played different moves. Inside it they are at the same
+// position, so every disagreement is a real fault.
+const faults = [];
+const perGame = [];
+for (const game of [...new Set([...jsGames.keys(), ...rustGames.keys()])].sort((l, r) => l - r)) {
+  const a = jsGames.get(game) ?? [];
+  const b = rustGames.get(game) ?? [];
+  let forkPly = -1;
+  const shared = Math.min(a.length, b.length);
+  for (let i = 0; i < shared; i += 1) {
+    const left = js.trace[a[i]];
+    const right = rust.trace[b[i]];
+    if (left.absPly !== right.absPly) {
+      faults.push({ game, recPly: i, why: 'absPly', js: left, rust: right });
+      break;
+    }
+    if (js.positions[a[i]] !== rust.positions[b[i]]) {
+      faults.push({ game, recPly: i, why: 'position', js: left, rust: right });
+      break;
+    }
+    if (left.playedCode !== right.playedCode) { forkPly = i; break; }
   }
+  if (forkPly === -1) {
+    // Never forked: the whole game must match, `z` and ply count included.
+    if (a.length !== b.length) {
+      faults.push({ game, recPly: shared, why: 'plyCount', js: a.length, rust: b.length });
+    } else {
+      for (let i = 0; i < a.length; i += 1) {
+        if (js.lines[a[i]] !== rust.lines[b[i]]) {
+          faults.push({ game, recPly: i, why: 'z', js: js.trace[a[i]], rust: rust.trace[b[i]] });
+          break;
+        }
+      }
+    }
+  }
+  perGame.push({ game, jsPlies: a.length, rustPlies: b.length, forkPly });
 }
 
 const perGameJs = {};
@@ -257,14 +318,18 @@ const report = {
   openingLengths: OPENINGS.map((o) => o.length),
   js: { records: js.lines.length, outcomes: js.outcomes, perGame: perGameJs },
   rust: { records: rust.lines.length, outcomes: rust.outcomes, plies: rust.plies, perGame: perGameRust },
-  // The verdict deliberately excludes `policyTarget` (see the header) and
-  // deliberately includes `firstPly`: a fork that produced the same number of
-  // identical-looking records but a different ply trace is exactly the failure
-  // this script exists to catch, and leaving it out of the verdict would have
-  // let it pass green.
-  identical: firstLine === -1 && firstPly === -1 && js.lines.length === rust.lines.length,
-  firstDifferingLine: firstLine,
-  firstDifferingPly: firstPly,
+  // The verdict deliberately excludes `policyTarget` and everything after a
+  // game's fork ply (see the header), and deliberately includes the absolute
+  // ply of every shared position: a stream fork that produced the same number
+  // of identical-looking records but a different ply trace is exactly the
+  // failure this script exists to catch.
+  identical: faults.length === 0,
+  faults,
+  // Per game: how far the two drivers agreed on the played move. `forkPly: -1`
+  // means they agreed for the whole game. Expected to be finite under
+  // `puct-az-tree-v3` and NOT a fault -- see the header.
+  perGameFork: perGame,
+  forkedGames: perGame.filter((entry) => entry.forkPly >= 0).length,
   // Informational: expected to be 0 since `puct-az-tree-v2`, because the two
   // drivers record different targets on purpose. A -1 here would mean the JS
   // reference had been changed to match, which is a decision, not an accident.
@@ -274,10 +339,8 @@ const report = {
     }
     return -1;
   })(),
-  jsPlyAt: firstPly >= 0 ? js.trace[firstPly] : null,
-  rustPlyAt: firstPly >= 0 ? rust.trace[firstPly] : null,
-  jsTailTrace: js.trace.slice(Math.max(0, firstPly - 2), firstPly + 3),
-  rustTailTrace: rust.trace.slice(Math.max(0, firstPly - 2), firstPly + 3)
+  jsTailTrace: faults.length ? js.trace.slice(0, 8) : [],
+  rustTailTrace: faults.length ? rust.trace.slice(0, 8) : []
 };
 console.log(JSON.stringify(report, null, 2));
 

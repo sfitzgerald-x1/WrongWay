@@ -54,20 +54,34 @@ import { createLcg32 } from './lcg32.mjs';
 /**
  * Frozen identifier for this search + self-play record format.
  *
- * Deliberately still `v1`. The Rust port moved to `puct-az-tree-v2`, whose
- * `policyTarget` is the Gumbel improved policy over every legal root action
- * rather than the considered set's normalised visit counts; this module keeps
- * recording visit counts. That divergence is a decision, not drift — see
- * `JS_REFERENCE_SEARCH_VERSION` in `rust/normal-duel-core/src/puct.rs` for why
- * (in short: cross-checking an improved policy would mean comparing `Math.exp`
- * to Rust's `exp` bit for bit, and production self-play runs the Rust/wasm
- * batch, not this driver).
+ * Deliberately still `v1`, through two Rust bumps.
  *
- * What this module still is: the parity oracle for every search *decision* —
- * visit counts, chosen action, root value, simulations spent, considered set.
- * None of those moved, and `rust/normal-duel-core/tests/js_puct_parity.rs`
- * compares all of them exactly, plus this string, so changing it fails the Rust
- * suite rather than quietly desynchronising the two engines.
+ * `puct-az-tree-v2` changed the Rust `policyTarget` to the Gumbel improved
+ * policy over every legal root action rather than the considered set's
+ * normalised visit counts; this module keeps recording visit counts.
+ * Cross-checking an improved policy would mean comparing `Math.exp` to Rust's
+ * `exp` bit for bit, and production self-play runs the Rust/wasm batch, not
+ * this driver.
+ *
+ * `puct-az-tree-v3` goes further and changes what the Rust search DECIDES. It
+ * replaces the `sigma` below with `mctx`'s `qtransform_completed_by_mix_value`
+ * — completed-Q min-max rescaled per node at `c_scale = 0.1`, with `v_mix`
+ * completing the unvisited actions — in both the improved policy and the
+ * sequential-halving ranking. The ranking is the part that matters here: a `v1`
+ * tree and a `v3` tree visit different children. That divergence is the change,
+ * not drift, and its correctness anchor is `mctx` itself (see
+ * `rust/normal-duel-core/tests/qtransform_goldens.rs`), not this module.
+ *
+ * What this module still is: the parity oracle for everything the qtransform
+ * cannot reach — the Gumbel considered set, the root value, the budget
+ * accounting, and, at `maxConsidered = 1` where the halving loop below never
+ * executes, every field the harness dumps (though with a single candidate the
+ * visit ladder and the played action are forced, so the depth reached is the
+ * one that still observes the descent).
+ * `rust/normal-duel-core/tests/js_puct_parity.rs` compares all of that exactly,
+ * pins the halving-dependent divergence counts separately, and asserts this
+ * string, so changing it fails the Rust suite rather than quietly
+ * desynchronising the two engines.
  */
 export const PUCT_SEARCH_VERSION = 'puct-az-tree-v1';
 

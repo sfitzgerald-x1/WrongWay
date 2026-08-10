@@ -140,13 +140,42 @@ fn gumbel_temperature_options() -> SelfPlayOptions {
     }
 }
 
-/// Computed on `scott/completed-q-targets` at 69a7f35 — the commit this branch
-/// is based on, before `RootMode` existed — by running this same file with the
-/// two constants set to 0 and reading the panic message.
-const GUMBEL_ARGMAX_DIGEST: u64 = 0x7977_465b_8b0d_d648;
-const GUMBEL_TEMPERATURE_DIGEST: u64 = 0xcb4d_f111_6f90_19e2;
+/// **Re-baselined at `puct-az-tree-v3`. Read this before touching them.**
+///
+/// These were originally computed on `scott/completed-q-targets` at 69a7f35 —
+/// before `RootMode` existed — as `0x7977_465b_8b0d_d648` and
+/// `0xcb4d_f111_6f90_19e2`, and they were D4's evidence for a *pre-D4* claim:
+/// the Classic arm does not perturb the Gumbel root, because the Gumbel root
+/// still produces byte-for-byte what it produced before the arm was added.
+///
+/// The `v3` qtransform (D1/D2) then changed the Gumbel search's decisions on
+/// purpose — that is the whole content of that change — so both digests moved.
+/// The values below are the same two quantities recomputed on the merged tree,
+/// and the property they attest is therefore WEAKER than the one they attested
+/// before: it is now "Classic does not perturb Gumbel **under v3**", anchored to
+/// this merge rather than to a state that predates both changes. The chain back
+/// to 69a7f35 is broken and cannot be restored, because the intervening change
+/// is a deliberate change to the thing being digested.
+///
+/// That the move is attributable to `v3` and to nothing else was checked, not
+/// assumed: reverting `v3`'s arithmetic on this same merged tree — the
+/// qtransform back to `sigma(q) = (50 + maxN) * 1.0 * q` on raw completed-Q, the
+/// completion back to the raw root value, and the improved policy back to
+/// `exp(log(p) + boost)` — reproduces `0x7977_465b_8b0d_d648` and
+/// `0xcb4d_f111_6f90_19e2` exactly. Nothing in `RootMode` or in the merge is
+/// implicated.
+///
+/// So: if these move again, that is a search change and it needs naming. Do not
+/// recompute them to make a build green. Recompute them only alongside a
+/// deliberate change to the Gumbel root, and rewrite this comment to say what
+/// the new baseline attests — the same discipline the pinned divergence counts
+/// in `tests/js_puct_parity.rs` are held to.
+const GUMBEL_ARGMAX_DIGEST: u64 = 0xf4b3_b3a9_c83b_5534;
+const GUMBEL_TEMPERATURE_DIGEST: u64 = 0x8eb8_8c62_f02a_f7c5;
 
-/// The negative claim: the default root is byte-for-byte what it was.
+/// The negative claim: the default root is byte-for-byte what it is without the
+/// Classic arm — see the re-baselining note above for what "what it is" is now
+/// pinned against.
 #[test]
 fn the_default_gumbel_root_is_unchanged_by_the_classic_arm() {
     let argmax = digest(&run(gumbel_argmax_options()));

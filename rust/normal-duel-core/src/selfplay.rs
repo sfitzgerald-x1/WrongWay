@@ -650,12 +650,13 @@ impl SelfPlayBatch {
         // and the recorded policy target became one-hot at a position with ~130
         // legal codes -- silently, at full record count. That degenerate target
         // removes AlphaZero's improvement ratchet and cost an earlier run 114
-        // flat iterations. The v2 target cannot produce that one-hot (the
-        // improved policy is a distribution over every legal action however the
-        // budget was spent), but a search that runs no simulations still has no
-        // opinion to record: with nothing visited, every completed Q is the root
-        // value and the target collapses to the network's own prior, which
-        // teaches the policy head only what it already said. `max_considered ==
+        // flat iterations. The completed-Q target cannot produce that one-hot
+        // (the improved policy is a distribution over every legal action however
+        // the budget was spent), but a search that runs no simulations still has
+        // no opinion to record: with nothing visited every completed Q is
+        // `v_mix`, which with no visits is the root value, so under `v3` the
+        // target is EXACTLY the renormalised prior -- it teaches the policy head
+        // only what it already said. `max_considered ==
         // 0` was already rejected, so accepting this was an asymmetry rather than
         // a decision, and the trigger is mundane: `Number('')` is 0, so any
         // driver resolving its sim count from an unset environment variable

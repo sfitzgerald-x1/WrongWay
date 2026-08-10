@@ -1,6 +1,7 @@
-//! Cross-engine parity for the batched PUCT search.
+//! Cross-engine parity for the batched PUCT search, under the `v3` version
+//! split.
 //!
-//! This is the acceptance criterion for moving the tree into Rust: for the same
+//! This was the acceptance criterion for moving the tree into Rust: for the same
 //! seed, the same RNG stream and the same deterministic evaluator, the Rust
 //! search must reach *identical* decisions to `js/normal-duel-puct-search.mjs` —
 //! the same visit counts, the same chosen action, the same root value and the
@@ -12,30 +13,67 @@
 //! function of the feature vector, so no ONNX or float-library difference can
 //! confound the comparison.
 //!
-//! The test also reports the smallest Gumbel-ranking gap it saw. That is the
+//! What `v3` did to that, and what is done about it
+//! ------------------------------------------------
+//! `puct-az-tree-v3` replaced this project's `sigma` with `mctx`'s
+//! `qtransform_completed_by_mix_value` in BOTH places it was used. One of those
+//! is the sequential-halving ranking, so the two engines now visit different
+//! children and can finish on different actions. That is the change, not a
+//! regression: the plan states it, `src/puct.rs` states it, and the correctness
+//! anchor moved with it — from "identical to our old JS" to "identical to mctx"
+//! (`tests/qtransform_goldens.rs`) plus the property suite
+//! (`tests/qtransform_properties.rs`).
+//!
+//! Deleting or ignoring this file would have thrown away everything the
+//! qtransform does NOT touch, which is most of the search. It follows the
+//! convention `scripts/diagnose-selfplay-driver-parity.mjs` already set when the
+//! `v2` targets made its line comparison meaningless: the by-design divergence
+//! is compared SEPARATELY and reported, and the verdict is computed from what
+//! still means what it always meant. Concretely, two tests:
+//!
+//! 1. `rust_batched_puct_matches_the_javascript_search_exactly_without_halving`
+//!    compares every field at `max_considered = 1`. With one candidate the
+//!    halving loop never executes in either engine — the JS goes straight to
+//!    `while (budget > 0) visit(survivors[0])` and the Rust to
+//!    `draining_single` — so the qtransform is never consulted and nothing is
+//!    excused from matching.
+//!
+//!    Be precise about what that buys, because "every field" is not the same as
+//!    "every field is informative". With one candidate the visit counts are the
+//!    schedule and the played action is forced, so the field through which a
+//!    descent disagreement can actually surface is `max_depth_reached` (plus the
+//!    budget, which terminal nodes consume without an evaluation). It is a
+//!    coarse observation of `select_edge`'s PUCT and FPU, the repetition window,
+//!    adjudication order and the per-ply backup — one integer per search, over
+//!    880 searches and trees up to 17 plies deep. The halving grid was no
+//!    stronger here: its extra descent-sensitive field was the visit ladder,
+//!    which is also mostly schedule. The fine-grained coverage of the descent
+//!    lives in `tests/tree_ply_cap.rs`, `tests/property_gates.rs` and the
+//!    engine's own unit tests, not in this file.
+//!
+//! 2. `the_halving_grid_still_agrees_on_everything_the_qtransform_cannot_reach`
+//!    runs the original grid and splits it. The Gumbel considered set, the root
+//!    value and the simulation accounting are asserted identical, because the
+//!    qtransform provably cannot reach them: the considered set is chosen by
+//!    `g + logit` before a single simulation runs, the root value is the
+//!    network's own evaluation of the root, and the budget is consumed by a
+//!    schedule that depends on the NUMBER of survivors, never on which. The
+//!    halving-dependent quantities — visit counts, chosen action, depth reached
+//!    — are counted and reported, and the test asserts the divergence is
+//!    NON-ZERO: a `v3` that agreed with `v1` everywhere would be a `v3` that had
+//!    been reverted.
+//!
+//! `PuctResult::improved_policy` is compared in neither, and never was. The
+//! JavaScript records normalised visit counts, and comparing an improved policy
+//! across the engines would mean comparing `Math.exp` to `f64::exp` bit for bit;
+//! `exp` is not an IEEE-754 operation any more than `Math.log` is, which is the
+//! entire reason `src/js_math.rs` exists. The production self-play driver is the
+//! Rust/wasm `SelfPlayBatch`, not this reference.
+//!
+//! The tests also report the smallest Gumbel-ranking gap they saw. That is the
 //! margin protecting the one quantity that is not bit-reproducible by
 //! construction — see `src/js_math.rs` — and printing it turns "no ordering
 //! flipped" into a number.
-//!
-//! What this file does NOT compare, and why
-//! ----------------------------------------
-//! `PuctResult::improved_policy` — the completed-Q policy target self-play
-//! records since `puct-az-tree-v2` — has no reference answer here. The
-//! JavaScript is deliberately frozen at `v1` and still records normalised visit
-//! counts; comparing an improved policy across the two engines would mean
-//! comparing `Math.exp` to `f64::exp` bit for bit, and `exp` is not an IEEE-754
-//! operation any more than `Math.log` is (which is the entire reason
-//! `src/js_math.rs` exists). Writing a `js_exp` to cross-check a training target
-//! is a larger correctness surface than the target itself, and the production
-//! self-play driver is the Rust/wasm `SelfPlayBatch`, not this reference.
-//!
-//! So the split is: everything the two engines *decide* is compared here, at
-//! full strength and unchanged by the v2 target — the improved policy is a
-//! read-out of the finished tree and moves no search decision. The improved
-//! policy itself is pinned by `src/puct.rs`'s unit tests and by
-//! `tests/selfplay_exploration.rs`. To keep the divergence from going silent,
-//! `the_javascript_reference_is_frozen_at_its_own_version` asserts the version
-//! string the reference reports.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -45,7 +83,7 @@ use wrongway_normal_duel::js_math::Lcg32;
 use wrongway_normal_duel::mock_evaluator;
 use wrongway_normal_duel::puct::{
     PuctParams, PuctResult, PuctTreeSearch, RootMode, JS_REFERENCE_SEARCH_VERSION,
-    PUCT_SEARCH_VERSION,
+    PUCT_SEARCH_VERSION, SUPERSEDED_SEARCH_VERSION,
 };
 use wrongway_normal_duel::{Config, GameState, NN_INPUT_PLANES};
 
@@ -63,6 +101,40 @@ struct Case {
     seed: u32,
 }
 
+/// Halving never runs at `max_considered = 1`, in either engine, so the
+/// qtransform is never consulted and the comparison stays at full strength.
+///
+/// The budget ladder is chosen for depth: one simulation, then three that all
+/// pour their whole budget down a single root move, which is the deepest tree
+/// this suite builds and the only place the repetition window gets more than a
+/// couple of plies to go wrong in.
+const EXACT_CASES: [Case; 4] = [
+    Case {
+        simulations: 1,
+        max_considered: 1,
+        c_puct: 1.25,
+        seed: 101,
+    },
+    Case {
+        simulations: 8,
+        max_considered: 1,
+        c_puct: 1.25,
+        seed: 202,
+    },
+    Case {
+        simulations: 24,
+        max_considered: 1,
+        c_puct: 0.75,
+        seed: 303,
+    },
+    Case {
+        simulations: 64,
+        max_considered: 1,
+        c_puct: 2.5,
+        seed: 404,
+    },
+];
+
 /// Spans the schedule's shapes: a budget below one visit per candidate, a
 /// budget that halves several times, and the single-candidate drain.
 ///
@@ -72,7 +144,11 @@ struct Case {
 /// returns a one-hot, which the cluster shard worker would record as a policy
 /// target. Parity over an input the JS side refuses is not meaningful, so the
 /// case is a budget of 1 at the same `max_considered` instead.
-const CASES: [Case; 6] = [
+///
+/// Unchanged from `v2`, deliberately: this is the grid the split is measured
+/// over, so moving it would make the divergence count incomparable with the
+/// searches these cases used to agree on exactly.
+const SPLIT_CASES: [Case; 6] = [
     Case {
         simulations: 1,
         max_considered: 4,
@@ -141,7 +217,12 @@ fn double_bits(value: &Value) -> u64 {
 ///
 /// `label` keeps two tests in the same process off each other's scratch files;
 /// cargo runs them on separate threads and the pid alone would collide.
-fn javascript_reference(config: &Config, states: &[GameState], label: &str) -> Value {
+fn javascript_reference(
+    config: &Config,
+    states: &[GameState],
+    cases: &[Case],
+    label: &str,
+) -> Value {
     let root = repository_root();
     let directory = std::env::temp_dir().join(format!(
         "normal-duel-puct-parity-{}-{label}",
@@ -151,7 +232,7 @@ fn javascript_reference(config: &Config, states: &[GameState], label: &str) -> V
     let input = directory.join("input.json");
     let output = directory.join("results.json");
 
-    let cases: Vec<Value> = CASES
+    let cases: Vec<Value> = cases
         .iter()
         .map(|case| {
             json!({
@@ -194,19 +275,20 @@ fn javascript_reference(config: &Config, states: &[GameState], label: &str) -> V
 
 /// The freeze, asserted rather than asserted-in-a-comment.
 ///
-/// The Rust search + record format moved to `puct-az-tree-v2` when the policy
-/// target became the completed-Q improved policy. The JavaScript reference did
-/// not move with it, on purpose (see the module docs). Both halves are pinned
-/// here: the reference must still report the version this crate believes it is
-/// frozen at, and the Rust side must still be on a different one — so neither a
-/// silent JS bump nor a silent revert of the target can pass.
+/// The JavaScript reference is frozen at `v1` on purpose (see the module docs)
+/// and the Rust search is on `v3`. All three halves are pinned here: the
+/// reference must still report the version this crate believes it is frozen at,
+/// the Rust side must not be back on it, and — new at `v3` — the Rust side must
+/// not have fallen back to `v2` either. `v2` is the record-format bump WITHOUT
+/// the qtransform, so a revert of D1/D2 that remembered to move the version
+/// string would land exactly there.
 ///
 /// Runs the harness over an empty grid, so it costs one node start and no
 /// searches.
 #[test]
 fn the_javascript_reference_is_frozen_at_its_own_version() {
     let config = state_pool::canonical_config();
-    let reported = javascript_reference(&config, &[], "version");
+    let reported = javascript_reference(&config, &[], &SPLIT_CASES, "version");
     assert_eq!(
         reported["version"].as_str(),
         Some(JS_REFERENCE_SEARCH_VERSION),
@@ -216,8 +298,17 @@ fn the_javascript_reference_is_frozen_at_its_own_version() {
     );
     assert_ne!(
         PUCT_SEARCH_VERSION, JS_REFERENCE_SEARCH_VERSION,
-        "the Rust record format is back on the reference's version; the two are only allowed to \
-         agree once the improved policy exists in both engines"
+        "the Rust search is back on the reference's version; the two are only allowed to agree \
+         once the qtransform and the improved policy exist in both engines"
+    );
+    assert_ne!(
+        PUCT_SEARCH_VERSION, SUPERSEDED_SEARCH_VERSION,
+        "the Rust search is back on v2, the record format WITHOUT the reference qtransform; if \
+         D1/D2 were deliberately reverted, the goldens and property suites have to go with them"
+    );
+    assert_eq!(
+        PUCT_SEARCH_VERSION, "puct-az-tree-v3",
+        "the version string names the search design; a new one needs its own parity story"
     );
 }
 
@@ -260,10 +351,9 @@ fn rust_search(config: &Config, state: &GameState, case: Case) -> PuctResult {
     search.result()
 }
 
-#[test]
-fn rust_batched_puct_matches_the_javascript_search_exactly() {
-    let config = state_pool::canonical_config();
-    let mut states = state_pool::state_pool(&config, STATES + 40);
+/// The 220 distinct mid-game states both tests run over.
+fn distinct_states(config: &Config) -> Vec<GameState> {
+    let mut states = state_pool::state_pool(config, STATES + 40);
     // "Distinct" is part of the claim, so make it true rather than likely.
     states.sort_by(|left, right| left.position_key.cmp(&right.position_key));
     states.dedup_by(|left, right| left.position_key == right.position_key);
@@ -273,48 +363,124 @@ fn rust_batched_puct_matches_the_javascript_search_exactly() {
         states.len()
     );
     states.truncate(STATES);
+    states
+}
 
-    let reference = javascript_reference(&config, &states, "grid");
+fn expected_visit_counts(expected: &Value) -> Vec<(u16, u32)> {
+    expected["visitCounts"]
+        .as_array()
+        .expect("visitCounts is an array")
+        .iter()
+        .map(|pair| {
+            let pair = pair.as_array().expect("each entry is [code, visits]");
+            (
+                pair[0].as_u64().expect("code is unsigned") as u16,
+                pair[1].as_u64().expect("visits are unsigned") as u32,
+            )
+        })
+        .collect()
+}
+
+fn expected_considered(expected: &Value) -> Vec<u16> {
+    expected["considered"]
+        .as_array()
+        .expect("considered is an array")
+        .iter()
+        .map(|code| code.as_u64().expect("code is unsigned") as u16)
+        .collect()
+}
+
+/// How close the Gumbel ranking came to a tie, over EVERY legal root action.
+///
+/// A `Math.log` disagreement is bounded by an ULP of the logit (~1e-16
+/// relative), so a gap many orders of magnitude larger is the reason no
+/// ordering can flip. The gap that matters is the one at the cut — between the
+/// worst kept candidate and the best discarded one — so the harness dumps all
+/// the scores and this takes the tightest adjacent pair anywhere in the
+/// ranking, which is a bound on it. Restricted to the considered set, as it was
+/// through `v2`, it could not see the cut at all, and at `max_considered = 1`
+/// it saw no pair and called that infinite slack.
+///
+/// Returns `(gap, ranked)`, where `ranked` is false for the twelve states in
+/// the pool that have exactly one legal action — both stocks spent and the pawn
+/// walled down to a single step. There is no ordering to protect there, and
+/// counting those as "no tie observed" would be counting them as evidence.
+fn tightest_gumbel_gap(expected: &Value, running: f64) -> (f64, bool) {
+    let mut scores: Vec<f64> = expected["allScoreBits"]
+        .as_array()
+        .expect("allScoreBits is an array")
+        .iter()
+        .map(|score| f64::from_bits(double_bits(score)))
+        .collect();
+    if scores.len() < 2 {
+        return (running, false);
+    }
+    scores.sort_by(|left, right| right.partial_cmp(left).expect("scores are finite"));
+    let mut tightest = running;
+    for pair in scores.windows(2) {
+        tightest = tightest.min(pair[0] - pair[1]);
+    }
+    (tightest, true)
+}
+
+/// The quantities the qtransform provably cannot reach, asserted identical in
+/// both tests.
+///
+/// `considered` is chosen by `g + logit` before a single simulation runs.
+/// `rootValue` is the network's evaluation of the root, taken outside the
+/// budget. `simulationsUsed` is spent by a schedule whose shape depends on the
+/// NUMBER of survivors in each round, never on which ones they are.
+fn assert_version_independent(actual: &PuctResult, expected: &Value, where_: &str) {
+    assert_eq!(
+        actual.considered,
+        expected_considered(expected),
+        "considered at {where_}"
+    );
+    assert_eq!(
+        actual.root_value.to_bits(),
+        double_bits(&expected["rootValueBits"]),
+        "rootValue at {where_}"
+    );
+    assert_eq!(
+        actual.simulations_used,
+        expected["simulationsUsed"]
+            .as_u64()
+            .expect("simulationsUsed is unsigned") as u32,
+        "simulationsUsed at {where_}"
+    );
+}
+
+#[test]
+fn rust_batched_puct_matches_the_javascript_search_exactly_without_halving() {
+    let config = state_pool::canonical_config();
+    let states = distinct_states(&config);
+
+    let reference = javascript_reference(&config, &states, &EXACT_CASES, "exact");
     let reference = reference["results"]
         .as_array()
         .expect("results is an array")
         .clone();
-    assert_eq!(reference.len(), states.len() * CASES.len());
+    assert_eq!(reference.len(), states.len() * EXACT_CASES.len());
 
     let mut compared = 0_usize;
     let mut tightest_gap = f64::INFINITY;
+    let mut ranked = 0_usize;
     let mut simulations_total = 0_u64;
+    let mut deepest = 0_u32;
 
     for (state_index, state) in states.iter().enumerate() {
-        for (case_index, case) in CASES.iter().enumerate() {
-            let expected = &reference[state_index * CASES.len() + case_index];
+        for (case_index, case) in EXACT_CASES.iter().enumerate() {
+            let expected = &reference[state_index * EXACT_CASES.len() + case_index];
             let actual = rust_search(&config, state, *case);
             let where_ = format!(
-                "state {state_index} (ply {}), case {case_index} (simulations {}, maxConsidered {})",
-                state.ply, case.simulations, case.max_considered
+                "state {state_index} (ply {}), case {case_index} (simulations {})",
+                state.ply, case.simulations
             );
 
-            let expected_counts: Vec<(u16, u32)> = expected["visitCounts"]
-                .as_array()
-                .expect("visitCounts is an array")
-                .iter()
-                .map(|pair| {
-                    let pair = pair.as_array().expect("each entry is [code, visits]");
-                    (
-                        pair[0].as_u64().expect("code is unsigned") as u16,
-                        pair[1].as_u64().expect("visits are unsigned") as u32,
-                    )
-                })
-                .collect();
-            let expected_considered: Vec<u16> = expected["considered"]
-                .as_array()
-                .expect("considered is an array")
-                .iter()
-                .map(|code| code.as_u64().expect("code is unsigned") as u16)
-                .collect();
-
+            assert_version_independent(&actual, expected, &where_);
             assert_eq!(
-                actual.visit_counts, expected_counts,
+                actual.visit_counts,
+                expected_visit_counts(expected),
                 "visitCounts at {where_}"
             );
             assert_eq!(
@@ -325,59 +491,135 @@ fn rust_batched_puct_matches_the_javascript_search_exactly() {
                 "actionCode at {where_}"
             );
             assert_eq!(
-                actual.root_value.to_bits(),
-                double_bits(&expected["rootValueBits"]),
-                "rootValue at {where_}"
-            );
-            assert_eq!(
-                actual.simulations_used,
-                expected["simulationsUsed"]
-                    .as_u64()
-                    .expect("simulationsUsed is unsigned") as u32,
-                "simulationsUsed at {where_}"
-            );
-            assert_eq!(
                 actual.max_depth_reached,
                 expected["maxDepthReached"]
                     .as_u64()
                     .expect("maxDepthReached is unsigned") as u32,
                 "maxDepthReached at {where_}"
             );
-            assert_eq!(
-                actual.considered, expected_considered,
-                "considered at {where_}"
-            );
 
-            // How close the Gumbel ranking came to a tie. A `Math.log`
-            // disagreement is bounded by an ULP of the logit (~1e-16 relative),
-            // so a gap many orders of magnitude larger is the reason no
-            // ordering can flip.
-            let mut scores: Vec<f64> = expected["scoreBits"]
-                .as_array()
-                .expect("scoreBits is an array")
-                .iter()
-                .map(|score| f64::from_bits(double_bits(score)))
-                .collect();
-            scores.sort_by(|left, right| right.partial_cmp(left).expect("scores are finite"));
-            for pair in scores.windows(2) {
-                tightest_gap = tightest_gap.min(pair[0] - pair[1]);
-            }
-
+            let (gap, has_ranking) = tightest_gumbel_gap(expected, tightest_gap);
+            tightest_gap = gap;
+            ranked += usize::from(has_ranking);
+            deepest = deepest.max(actual.max_depth_reached);
             simulations_total += u64::from(actual.simulations_used);
             compared += 1;
         }
     }
 
     println!(
-        "PUCT parity: {compared} searches over {} distinct states x {} configurations, \
-         {simulations_total} simulations, all exact. Tightest Gumbel ranking gap {tightest_gap:e}.",
+        "PUCT parity (no halving): {compared} searches over {} distinct states x {} \
+         configurations, {simulations_total} simulations, deepest tree {deepest} plies, all \
+         exact. Tightest Gumbel ranking gap {tightest_gap:e} over {ranked} ranked roots.",
         states.len(),
-        CASES.len()
+        EXACT_CASES.len()
     );
-    assert_eq!(compared, STATES * CASES.len());
+    assert_eq!(compared, STATES * EXACT_CASES.len());
+    assert!(
+        deepest >= 3,
+        "the deepest tree reached {deepest} plies, which is not deep enough for this test to be \
+         covering the descent"
+    );
+    assert!(
+        ranked * 10 > compared * 9,
+        "only {ranked} of {compared} searches had a root ranking to measure"
+    );
     assert!(
         tightest_gap > 1e-9,
         "the Gumbel ranking came within {tightest_gap:e} of a tie, which is close enough to a \
          1-ULP Math.log disagreement to be worth investigating"
+    );
+}
+
+#[test]
+fn the_halving_grid_still_agrees_on_everything_the_qtransform_cannot_reach() {
+    let config = state_pool::canonical_config();
+    let states = distinct_states(&config);
+
+    let reference = javascript_reference(&config, &states, &SPLIT_CASES, "grid");
+    let reference = reference["results"]
+        .as_array()
+        .expect("results is an array")
+        .clone();
+    assert_eq!(reference.len(), states.len() * SPLIT_CASES.len());
+
+    let mut compared = 0_usize;
+    let mut tightest_gap = f64::INFINITY;
+    let mut ranked = 0_usize;
+    let mut simulations_total = 0_u64;
+    let mut differing_counts = 0_usize;
+    let mut differing_actions = 0_usize;
+    let mut differing_depths = 0_usize;
+
+    for (state_index, state) in states.iter().enumerate() {
+        for (case_index, case) in SPLIT_CASES.iter().enumerate() {
+            let expected = &reference[state_index * SPLIT_CASES.len() + case_index];
+            let actual = rust_search(&config, state, *case);
+            let where_ = format!(
+                "state {state_index} (ply {}), case {case_index} (simulations {}, maxConsidered {})",
+                state.ply, case.simulations, case.max_considered
+            );
+
+            assert_version_independent(&actual, expected, &where_);
+
+            // By design under v3, and counted rather than asserted.
+            if actual.visit_counts != expected_visit_counts(expected) {
+                differing_counts += 1;
+            }
+            if u64::from(actual.action_code) != expected["actionCode"].as_u64().unwrap() {
+                differing_actions += 1;
+            }
+            if u64::from(actual.max_depth_reached) != expected["maxDepthReached"].as_u64().unwrap()
+            {
+                differing_depths += 1;
+            }
+
+            let (gap, has_ranking) = tightest_gumbel_gap(expected, tightest_gap);
+            tightest_gap = gap;
+            ranked += usize::from(has_ranking);
+            simulations_total += u64::from(actual.simulations_used);
+            compared += 1;
+        }
+    }
+
+    let percent = |count: usize| 100.0 * count as f64 / compared as f64;
+    println!(
+        "PUCT version split: {compared} searches over {} distinct states x {} configurations, \
+         {simulations_total} simulations. Considered set, root value and budget identical in all \
+         {compared}. Halving-dependent divergence (by design, v1 vs v3): visit counts \
+         {differing_counts} ({:.1}%), chosen action {differing_actions} ({:.1}%), depth reached \
+         {differing_depths} ({:.1}%). Tightest Gumbel ranking gap {tightest_gap:e} over \
+         {ranked} ranked roots.",
+        states.len(),
+        SPLIT_CASES.len(),
+        percent(differing_counts),
+        percent(differing_actions),
+        percent(differing_depths)
+    );
+    assert_eq!(compared, STATES * SPLIT_CASES.len());
+    assert!(
+        ranked * 10 > compared * 9,
+        "only {ranked} of {compared} searches had a root ranking to measure"
+    );
+    assert!(
+        tightest_gap > 1e-9,
+        "the Gumbel ranking came within {tightest_gap:e} of a tie, which is close enough to a \
+         1-ULP Math.log disagreement to be worth investigating"
+    );
+    // The divergence is the change, and it is PINNED, not merely required to be
+    // non-zero. Every input here is fixed -- the state pool, the case grid, the
+    // seeds, the mock evaluator -- so these are three deterministic integers,
+    // and `> 0` was far too loose to protect anything: dropping the boost from
+    // `halve` entirely, so the ranking never consults the qtransform at all,
+    // moves them to 616 / 845 / 349 and still leaves a positive count.
+    //
+    // If one of these moves, something changed the search. That is not
+    // automatically wrong -- but it is never a number to update without saying
+    // which change moved it and why the new one is right.
+    assert_eq!(
+        (differing_counts, differing_actions, differing_depths),
+        (437, 360, 233),
+        "the v1-vs-v3 divergence profile moved from (437, 360, 233); the inputs are \
+         deterministic, so a search change caused this and it needs naming"
     );
 }
