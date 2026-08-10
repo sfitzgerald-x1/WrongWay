@@ -317,7 +317,7 @@ fn completed_q(edge: &Edge, mixed: f64) -> f64 {
 /// replaces it with `1e-8` and the rescale therefore multiplies the crumb by
 /// `1e8` before the visit scale multiplies it again. Against a target consumed
 /// at `1e-3` that is nothing — 8.1e-5 worst case over the property sweep's
-/// widest shapes, 2.1e-6 at the production `maxN <= 128`. But the same vector is
+/// widest shapes, 2.9e-6 at the production `maxN <= 128`. But the same vector is
 /// added to `g + logit` in [`PuctTreeSearch::halve`], where the tightest gap the
 /// parity grid observes is `4.1e-7`, so on a degenerate root the halving cut can
 /// be decided by that noise where `v2` produced an exact tie. It is
@@ -481,6 +481,60 @@ pub fn root_qtransform(stats: &[ActionStats], raw_value: f64) -> RootQtransform 
     }
 }
 
+/// The AlphaZero policy target: `N(a) / sum_b N(b)` over one node's whole edge
+/// list, ascending by code — [`RootMode::Classic`]'s recorded target.
+///
+/// The properties this has and [`improved_policy`] does not: its concentration
+/// is bounded by 1.0 whatever the value head says, it is invariant to any
+/// monotone rescaling of Q because it never reads Q at all, and every unit of
+/// mass it moves off the prior was paid for by a real tree descent. What it
+/// gives up is coverage — an action the search never selected is targeted to
+/// exactly zero, which is only defensible at a budget large enough for the
+/// visits to be a judgement rather than a schedule.
+///
+/// Under sequential halving that condition fails badly (both finalists take the
+/// same count whoever won), which is why this is *not* offered as an option on
+/// the Gumbel root: it is the target of a different root algorithm, not a
+/// different target for the same one.
+fn visit_count_policy(edges: &[Edge]) -> Vec<(u16, f64)> {
+    let visits: u32 = edges.iter().map(|edge| edge.visits).sum();
+    if visits > 0 {
+        let total = f64::from(visits);
+        return edges
+            .iter()
+            .map(|edge| (edge.code, f64::from(edge.visits) / total))
+            .collect();
+    }
+    // No root action has been visited yet. `PuctTreeSearch::new` rejects
+    // `simulations < 1` and every simulation backs up through exactly one root
+    // edge, so a *completed* classic search cannot land here; `result()` is
+    // callable mid-search, though, and the honest answer before the first backup
+    // is the network's own prior. `expand` leaves those normalised over the
+    // legal actions, so they are already a distribution — and, unlike a one-hot
+    // fallback, one that teaches the policy head nothing rather than something
+    // false.
+    edges.iter().map(|edge| (edge.code, edge.prior)).collect()
+}
+
+/// The most-visited action, ties to the lowest code — [`RootMode::Classic`]'s
+/// played move once the temperature phase is over.
+///
+/// Edges are stored ascending by code and the comparison is strict, so the
+/// tie-break needs no extra work, exactly as in [`PuctTreeSearch::select_edge`].
+fn most_visited(edges: &[Edge]) -> u16 {
+    let mut chosen = 0_u16;
+    let mut best = 0_u32;
+    let mut found = false;
+    for edge in edges {
+        if !found || edge.visits > best {
+            chosen = edge.code;
+            best = edge.visits;
+            found = true;
+        }
+    }
+    chosen
+}
+
 /// `Math.ceil(Math.log2(Math.max(m, 2)))` without a logarithm: the smallest
 /// `r` with `2^r >= max(m, 2)`. Verified equal to the JavaScript expression for
 /// every `m` in `1..=209`, the whole reachable candidate range — an integer
@@ -592,11 +646,54 @@ impl RootContext {
     }
 }
 
+/// Which algorithm drives the **root** of the search. Everything below the root
+/// is the same tree either way: same [`PuctTreeSearch::select_edge`], same FPU,
+/// same backup, same adjudication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RootMode {
+    /// Gumbel-MuZero: one Gumbel draw per legal root action, a considered set of
+    /// `max_considered` survivors, sequential halving over them, and the
+    /// completed-Q improved policy as the recorded target.
+    ///
+    /// The default, and the production recipe. Nothing in this file may make a
+    /// Gumbel search behave differently than it did before [`RootMode`] existed;
+    /// `tests/root_mode_classic.rs` pins that to digests taken from the earlier
+    /// build.
+    #[default]
+    Gumbel,
+    /// AlphaZero-classic: plain PUCT at the root, no Gumbel draws, no considered
+    /// set, no halving, and `N(a) / sum N` over the root's visits as the
+    /// recorded target.
+    ///
+    /// This is a *control arm*, not a replacement. The Gumbel target is a
+    /// softmax whose sharpness a constant sets and no tree descent bounds; the
+    /// visit distribution is bounded at 1.0 concentration by construction and
+    /// every unit of sharpness is paid for by a simulation that could have
+    /// contradicted the prior. Running both from the same seed is what
+    /// distinguishes "the design is wrong" from "the design is
+    /// mis-parameterised", and that question cannot be answered by tuning the
+    /// Gumbel arm alone.
+    ///
+    /// [`PuctParams::max_considered`] is not read in this mode — there is no
+    /// candidate set to bound — but it is still validated, so a driver that
+    /// keeps sending the production value is not rejected for it.
+    ///
+    /// Costs more per position for the same quality of target: the visit
+    /// distribution over ~40 legal actions is only informative at a budget that
+    /// can actually spread over them, which is why the arm is specified at 512
+    /// simulations rather than the Gumbel arm's 128.
+    Classic,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PuctParams {
     pub simulations: u32,
+    /// Size of the Gumbel considered set. Read only by [`RootMode::Gumbel`].
     pub max_considered: u32,
     pub c_puct: f64,
+    /// Which root algorithm to run. Defaults to [`RootMode::Gumbel`], so every
+    /// caller that predates this field gets exactly the search it had.
+    pub root_mode: RootMode,
 }
 
 impl Default for PuctParams {
@@ -605,6 +702,7 @@ impl Default for PuctParams {
             simulations: 32,
             max_considered: 8,
             c_puct: DEFAULT_C_PUCT,
+            root_mode: RootMode::Gumbel,
         }
     }
 }
@@ -723,6 +821,13 @@ pub struct PuctResult {
     ///
     /// Ascending by code, and normalised in that order, so the float rounding a
     /// consumer sees does not depend on iteration order.
+    ///
+    /// Under [`RootMode::Classic`] this field carries that root's own target
+    /// instead — `N(a) / sum N`, see [`visit_count_policy`]. The name is kept
+    /// because the *contract* is unchanged and it is the contract self-play
+    /// depends on: a normalised distribution over exactly the legal root
+    /// actions, ascending by code. What the search recorded as its opinion is
+    /// read from here whichever root produced it.
     pub improved_policy: Vec<(u16, f64)>,
     pub root_value: f64,
     pub simulations_used: u32,
@@ -957,11 +1062,28 @@ impl PuctTreeSearch {
                     return Ok(true);
                 }
                 Phase::Ready => {
-                    let Some(candidate) = self.next_candidate() else {
-                        self.phase = Phase::Done;
-                        return Ok(false);
+                    // The only place the two root algorithms differ: which root
+                    // edge the next simulation starts down, and when to stop.
+                    let edge = match self.params.root_mode {
+                        RootMode::Gumbel => {
+                            let Some(candidate) = self.next_candidate() else {
+                                self.phase = Phase::Done;
+                                return Ok(false);
+                            };
+                            self.candidates[candidate].edge
+                        }
+                        // Plain PUCT: no schedule to consult, so the budget is
+                        // the whole stopping rule, and the root is selected by
+                        // the same `select_edge` every other node uses.
+                        RootMode::Classic => {
+                            if self.budget <= 0 {
+                                self.phase = Phase::Done;
+                                return Ok(false);
+                            }
+                            self.select_edge(0)
+                        }
                     };
-                    if self.begin_visit(config, candidate)? {
+                    if self.begin_visit(config, edge)? {
                         self.encode(config, self.pending_leaf, features);
                         self.phase = Phase::LeafAwaiting;
                         return Ok(true);
@@ -1025,8 +1147,7 @@ impl PuctTreeSearch {
         match self.phase {
             Phase::RootAwaiting => {
                 self.expand(config, 0, policy, value)?;
-                self.root_value = value;
-                self.seed_candidates();
+                self.setup_root(value);
                 self.phase = Phase::Ready;
                 Ok(())
             }
@@ -1050,17 +1171,36 @@ impl PuctTreeSearch {
     /// decided.
     #[must_use]
     pub fn result(&self) -> PuctResult {
-        let winner = self
-            .survivors
-            .first()
-            .map_or(0, |index| self.candidates[*index].code);
         // The root's edge list is every legal root action, in the ascending code
         // order `legal_action_codes_fast` produced, so slicing it is already the
-        // improved policy's domain and ordering. An unexpanded root has no edges
+        // policy target's domain and ordering. An unexpanded root has no edges
         // and yields an empty policy.
         let root = self.nodes[0];
         let root_edges =
             &self.edges[root.edges_start as usize..(root.edges_start + root.edges_len) as usize];
+        if self.params.root_mode == RootMode::Classic {
+            // No candidate set: the classic root considers every legal action,
+            // so `visit_counts` and `considered` cover the whole edge list. Most
+            // of those counts are zero at a realistic budget, which is exactly
+            // what makes the target's support a measurement rather than a
+            // schedule.
+            return PuctResult {
+                action_code: most_visited(root_edges),
+                visit_counts: root_edges
+                    .iter()
+                    .map(|edge| (edge.code, edge.visits))
+                    .collect(),
+                improved_policy: visit_count_policy(root_edges),
+                root_value: self.root_value,
+                simulations_used: self.used,
+                max_depth_reached: self.max_depth,
+                considered: root_edges.iter().map(|edge| edge.code).collect(),
+            };
+        }
+        let winner = self
+            .survivors
+            .first()
+            .map_or(0, |index| self.candidates[*index].code);
         PuctResult {
             action_code: winner,
             visit_counts: self
@@ -1085,6 +1225,47 @@ impl PuctTreeSearch {
     /* -------------------------------------------------------------- *
      * Root setup
      * -------------------------------------------------------------- */
+
+    /// Everything that happens once, at the root, after the network has spoken.
+    ///
+    /// Both root modes funnel through here, which makes it the right *call site*
+    /// for D3's Dirichlet floor (`P'(a) = (1 - eps) * P(a) + eps * eta_a`, root
+    /// only, before the Gumbel draws): it is the one point where the root's
+    /// priors are complete and nothing downstream has read them yet — the Gumbel
+    /// draws below take `edge.prior` through `js_log`, and the classic root takes
+    /// it in `select_edge`.
+    ///
+    /// **It is a call site, not a drop-in.** Two things D3 must do that this
+    /// function does not already provide, named here so they are not discovered
+    /// late:
+    ///
+    /// 1. *No seed reaches here.* The key has to be `mix(game_seed, ply,
+    ///    DIRICHLET_TAG)`, and a search holds only the live [`Lcg32`] state and
+    ///    `nodes[0].ply` — the game's seed never arrives. D3 has to carry it in
+    ///    (a [`PuctParams`] or [`RootContext`] field) and re-plumb
+    ///    [`crate::selfplay`] and the wasm options DTO, the same plumbing
+    ///    `root_mode` needed.
+    /// 2. *Noising the edges in place would noise the training target too.*
+    ///    [`improved_policy`] reads `edge.prior` as its logit source, so writing
+    ///    the mixture back into `self.edges[root range]` would make b2's recorded
+    ///    target a softmax over *noised* logits rather than over the network's
+    ///    prior — Dirichlet is meant to perturb what the search explores, not
+    ///    what the net is asked to imitate. D3 needs either an un-noised copy of
+    ///    the root priors for the target, or the noise applied only on the
+    ///    selection path.
+    ///
+    /// Deferred on scope, not on feasibility: D3 is its own change in the plan,
+    /// with its own determinism suite (`eps = 0` must consume no draw from
+    /// anywhere, and rejection sampling for `alpha < 1` consumes a variable
+    /// number of draws, so it needs a stream of its own rather than the game
+    /// stream whose offset is a pure function of the ply index). This arm's
+    /// design includes it; this commit does not implement it.
+    fn setup_root(&mut self, value: f64) {
+        self.root_value = value;
+        if self.params.root_mode == RootMode::Gumbel {
+            self.seed_candidates();
+        }
+    }
 
     /// One Gumbel per legal root action, drawn in ascending code order — the
     /// draw order is part of the contract, because the same seed has to
@@ -1221,10 +1402,14 @@ impl PuctTreeSearch {
      * Descent
      * -------------------------------------------------------------- */
 
-    /// Start one simulation through `candidate`. Returns `true` when the
-    /// descent paused at an unexpanded leaf, `false` when it completed against
-    /// a terminal node and has already been backed up.
-    fn begin_visit(&mut self, config: &Config, candidate: usize) -> Result<bool> {
+    /// Start one simulation down root `edge` (an index into [`Self::edges`]).
+    /// Returns `true` when the descent paused at an unexpanded leaf, `false`
+    /// when it completed against a terminal node and has already been backed up.
+    ///
+    /// Takes the edge rather than a candidate index because the classic root has
+    /// no candidates; the budget accounting and the repetition bookkeeping below
+    /// are identical for both root modes and are deliberately not duplicated.
+    fn begin_visit(&mut self, config: &Config, edge: u32) -> Result<bool> {
         self.budget -= 1;
         self.used += 1;
 
@@ -1233,7 +1418,6 @@ impl PuctTreeSearch {
         self.window_from = 0;
         self.root_window_active = true;
 
-        let edge = self.candidates[candidate].edge;
         let child = self.step_into(config, 0, edge)?;
         self.descend(config, child)
     }
@@ -1806,6 +1990,91 @@ mod tests {
         assert!(clamp_value(f64::NAN).is_nan());
     }
 
+    /// The classic target is the visit distribution, exactly, and the tie-break
+    /// on the played move is the lowest code — the same rule `select_edge` uses.
+    ///
+    /// A real search almost never produces a tie at the maximum (PUCT keeps
+    /// pushing the leader), so this is where the rule can be exercised at all: a
+    /// sweep of 1..260 simulations from the opening produced no tied maximum,
+    /// which is precisely why the integration test cannot cover it and why a
+    /// `>=` here would otherwise be invisible.
+    #[test]
+    fn most_visited_breaks_ties_to_the_lowest_code() {
+        let tied = [
+            edge(3, 0.2, 7, 0.0),
+            edge(11, 0.5, 7, 0.0),
+            edge(40, 0.3, 2, 0.0),
+        ];
+        // Anti-vacuity: this only tests a tie-break if there is a tie, and only
+        // tests the *lowest* code if the tie is not already won by position.
+        assert_eq!(tied[0].visits, tied[1].visits, "the fixture has no tie");
+        assert!(
+            tied[1].prior > tied[0].prior,
+            "the tie must not be breakable by prior"
+        );
+        assert_eq!(most_visited(&tied), 3);
+
+        // A strictly greater count wins wherever it sits in the list.
+        assert_eq!(
+            most_visited(&[edge(3, 0.2, 7, 0.0), edge(11, 0.2, 8, 0.0)]),
+            11
+        );
+        assert_eq!(
+            most_visited(&[edge(3, 0.2, 9, 0.0), edge(11, 0.2, 8, 0.0)]),
+            3
+        );
+        // An all-unvisited root is a tie at zero: still the lowest code, never
+        // an arbitrary one.
+        assert_eq!(
+            most_visited(&[edge(5, 0.9, 0, 0.0), edge(9, 0.1, 0, 0.0)]),
+            5
+        );
+    }
+
+    #[test]
+    fn the_classic_target_is_exactly_the_visit_share() {
+        let policy = visit_count_policy(&[
+            edge(3, 0.7, 6, 0.0),
+            edge(11, 0.2, 2, 0.0),
+            edge(40, 0.1, 0, 0.0),
+        ]);
+        // 8 visits: 6/8, 2/8, and an unvisited action at exactly zero. Exact
+        // equality, not a tolerance -- these are dyadic rationals.
+        assert_eq!(policy, vec![(3, 0.75), (11, 0.25), (40, 0.0)]);
+        // The prior is not consulted: 0.7 against 0.2 did not move the split.
+        let reprioritised = visit_count_policy(&[
+            edge(3, 0.1, 6, 0.0),
+            edge(11, 0.8, 2, 0.0),
+            edge(40, 0.1, 0, 0.0),
+        ]);
+        assert_eq!(policy, reprioritised);
+    }
+
+    /// The zero-visit fallback, pinned rather than merely argued for.
+    ///
+    /// This codebase lost 114 iterations to a silent one-hot policy target
+    /// (`effective_visit_counts` under the v1 format), so the shape of this
+    /// fallback is not a detail: a one-hot here would be that same defect
+    /// wearing the new target's name. It returns the network's own prior, which
+    /// teaches the policy head nothing rather than something false.
+    #[test]
+    fn a_classic_target_with_no_visits_is_the_prior_and_never_a_one_hot() {
+        let edges = [
+            edge(2, 0.5, 0, 0.0),
+            edge(8, 0.3, 0, 0.0),
+            edge(40, 0.2, 0, 0.0),
+        ];
+        let policy = visit_count_policy(&edges);
+        assert_eq!(policy, vec![(2, 0.5), (8, 0.3), (40, 0.2)]);
+        let support = policy.iter().filter(|(_, p)| *p > 0.0).count();
+        assert_eq!(
+            support, 3,
+            "an unvisited classic root must not collapse onto one action"
+        );
+        // And an empty root is empty, not a one-hot on code 0.
+        assert!(visit_count_policy(&[]).is_empty());
+    }
+
     #[test]
     fn repetition_window_counts_and_resets() {
         let mut window = RepetitionWindow::fresh(7);
@@ -1856,6 +2125,10 @@ mod tests {
                 simulations: 64,
                 max_considered,
                 c_puct: DEFAULT_C_PUCT,
+                // Explicit, not defaulted: the whole point of these two tests is
+                // the sequential-halving ranking, which `RootMode::Classic` does
+                // not run at all.
+                root_mode: RootMode::Gumbel,
             },
             Lcg32::new(seed),
         )
@@ -2025,7 +2298,7 @@ mod tests {
         // So: eight candidates, one visit each, Q-values clustered in
         // [0.2000, 0.2175] and a raw root value of 1.0. `v_mix` lands at 0.2967,
         // above every measured Q, which makes the unconsidered actions the top
-        // of the root-scoped range -- a span of 0.0978 against the survivors'
+        // of the root-scoped range -- a span of 0.09667 against the survivors'
         // own 0.0175.
         for index in 0..search.candidates.len() {
             let q = 0.2 + 0.0025 * (index as f64);

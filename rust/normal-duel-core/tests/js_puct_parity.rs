@@ -82,8 +82,8 @@ use serde_json::{json, Value};
 use wrongway_normal_duel::js_math::Lcg32;
 use wrongway_normal_duel::mock_evaluator;
 use wrongway_normal_duel::puct::{
-    PuctParams, PuctResult, PuctTreeSearch, JS_REFERENCE_SEARCH_VERSION, PUCT_SEARCH_VERSION,
-    SUPERSEDED_SEARCH_VERSION,
+    PuctParams, PuctResult, PuctTreeSearch, RootMode, JS_REFERENCE_SEARCH_VERSION,
+    PUCT_SEARCH_VERSION, SUPERSEDED_SEARCH_VERSION,
 };
 use wrongway_normal_duel::{Config, GameState, NN_INPUT_PLANES};
 
@@ -321,6 +321,11 @@ fn rust_search(config: &Config, state: &GameState, case: Case) -> PuctResult {
             simulations: case.simulations,
             max_considered: case.max_considered,
             c_puct: case.c_puct,
+            // The oracle is the frozen JavaScript, which has one root algorithm.
+            // Spelled out rather than left to `Default` so the parity suite is a
+            // statement about the Gumbel root, not about whatever the default
+            // happens to be.
+            root_mode: RootMode::Gumbel,
         },
         Lcg32::new(case.seed),
     )

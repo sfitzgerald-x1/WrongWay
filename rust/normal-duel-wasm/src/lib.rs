@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wasm_bindgen::prelude::*;
 use wrongway_normal_duel::js_math::Lcg32;
-use wrongway_normal_duel::puct::{PuctParams, PuctTreeSearch};
+use wrongway_normal_duel::puct::{PuctParams, PuctTreeSearch, RootMode};
 use wrongway_normal_duel::selfplay::{
     Exploration, GameOutcome, SelfPlayBatch, SelfPlayOptions, RECORD_FEATURES, RECORD_FLOATS,
     RECORD_META_FIELDS, RECORD_POLICY,
@@ -377,14 +377,30 @@ pub fn normal_duel_search_for(request_json: &str) -> std::result::Result<String,
 
 /// Options DTO for [`NormalDuelSelfPlayBatch`]. JSON here is fine: it is read
 /// once at construction, off the hot path.
+///
+/// `deny_unknown_fields` for the same reason [`SearchOptionsRequest`] has it:
+/// the wire contract must not silently accept a misspelled tuning request.
+/// Every field here except `games`, `simulations` and `maxConsidered` has a
+/// default, so without it a typo is indistinguishable from an omission and the
+/// batch runs the default instead of what was asked for. That is not
+/// hypothetical for `rootMode`: `TRAINING-DESIGN-FIX.md` writes the option
+/// `root_mode` in prose, and snake_case, wrong case, or any other near-miss all
+/// used to parse cleanly and select the Gumbel arm — so a b3 shard could have
+/// been the Gumbel arm at 512 simulations, under the b3 label, and nothing in
+/// the records would have said so.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SelfPlayOptionsDto {
     games: usize,
     simulations: u32,
     max_considered: u32,
     #[serde(default = "default_c_puct")]
     c_puct: f64,
+    /// `"gumbel"` (default) or `"classic"`. Absent means Gumbel, so a driver
+    /// that predates the classic arm sends the same wire format and gets the
+    /// same search.
+    #[serde(default)]
+    root_mode: RootModeDto,
     /// `"visitTemperature"` (default) or `"uniformEpsilon"`. Spelled out rather
     /// than a bool so a third recipe does not have to break the wire format.
     #[serde(default)]
@@ -401,6 +417,49 @@ struct SelfPlayOptionsDto {
     seed_base: u32,
     #[serde(default)]
     openings: Vec<Vec<u16>>,
+}
+
+/// Kept as a `From` rather than inlined into the constructor so the wire
+/// format's *meaning* can be tested natively: [`NormalDuelSelfPlayBatch::new`]
+/// returns a `JsValue`, which is not constructible off wasm32, so a test that
+/// went through the constructor could not run under `cargo test`. An option the
+/// boundary parses and then drops is the failure `contradictory_exploration`
+/// exists for, and this one would not be visible from the JS side either -- the
+/// batch would simply run the wrong arm and report nothing unusual.
+impl From<SelfPlayOptionsDto> for SelfPlayOptions {
+    fn from(dto: SelfPlayOptionsDto) -> Self {
+        Self {
+            games: dto.games,
+            simulations: dto.simulations,
+            max_considered: dto.max_considered,
+            c_puct: dto.c_puct,
+            root_mode: dto.root_mode.into(),
+            exploration: dto.exploration.into(),
+            epsilon: dto.epsilon,
+            temperature: dto.temperature,
+            temperature_moves: dto.temperature_moves,
+            ply_cap: dto.ply_cap,
+            seed_base: dto.seed_base,
+            openings: dto.openings,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum RootModeDto {
+    #[default]
+    Gumbel,
+    Classic,
+}
+
+impl From<RootModeDto> for RootMode {
+    fn from(dto: RootModeDto) -> Self {
+        match dto {
+            RootModeDto::Gumbel => RootMode::Gumbel,
+            RootModeDto::Classic => RootMode::Classic,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -477,21 +536,8 @@ impl NormalDuelSelfPlayBatch {
         let config = parse_config(config_json).map_err(js_error)?;
         let dto: SelfPlayOptionsDto = serde_json::from_str(options_json)
             .map_err(|_| js_error("invalid_options".to_owned()))?;
-        let options = SelfPlayOptions {
-            games: dto.games,
-            simulations: dto.simulations,
-            max_considered: dto.max_considered,
-            c_puct: dto.c_puct,
-            exploration: dto.exploration.into(),
-            epsilon: dto.epsilon,
-            temperature: dto.temperature,
-            temperature_moves: dto.temperature_moves,
-            ply_cap: dto.ply_cap,
-            seed_base: dto.seed_base,
-            openings: dto.openings,
-        };
         let inner =
-            SelfPlayBatch::new(&config, options).map_err(|error| js_error(error.to_string()))?;
+            SelfPlayBatch::new(&config, dto.into()).map_err(|error| js_error(error.to_string()))?;
         Ok(Self { inner })
     }
 
@@ -700,6 +746,14 @@ impl NormalDuelSearch {
             simulations: dto.simulations,
             max_considered: dto.max_considered,
             c_puct: dto.c_puct,
+            // Not an option here, deliberately. `NormalDuelSearch` is the
+            // matchplay/parity entry point: it is what
+            // `tests/normal-duel-wasm-search-wrapper-parity.test.mjs` compares
+            // against the frozen JavaScript reference, which has one root
+            // algorithm. The classic arm is a *training* control and reaches the
+            // engine through `NormalDuelSelfPlayBatch`, which is the only driver
+            // that produces records.
+            root_mode: RootMode::Gumbel,
         };
         let inner = PuctTreeSearch::from_state(&config, &state, params, Lcg32::new(dto.seed))
             .map_err(|error| js_error(error.reason().to_owned()))?;
@@ -1168,5 +1222,88 @@ mod tests {
             search_for_impl(&invalid_deadline.to_string()),
             Err("invalid_search_budget".into())
         );
+    }
+
+    /// The classic arm's only switch is this JSON key, and a boundary that
+    /// parsed it into nothing would run the Gumbel arm under the classic arm's
+    /// name -- a clean-looking run answering the wrong question.
+    #[test]
+    fn self_play_options_carry_the_root_mode_across_the_json_boundary() {
+        let base = json!({"games": 2, "simulations": 8, "maxConsidered": 4});
+        let decode = |value: &Value| -> std::result::Result<SelfPlayOptions, ()> {
+            serde_json::from_value::<SelfPlayOptionsDto>(value.clone())
+                .map(Into::into)
+                .map_err(|_| ())
+        };
+
+        // Absent means Gumbel: a driver that predates the arm is unaffected.
+        assert_eq!(
+            decode(&base).expect("defaults parse").root_mode,
+            RootMode::Gumbel
+        );
+
+        let mut classic = base.clone();
+        classic["rootMode"] = json!("classic");
+        assert_eq!(
+            decode(&classic).expect("classic parses").root_mode,
+            RootMode::Classic
+        );
+
+        let mut gumbel = base.clone();
+        gumbel["rootMode"] = json!("gumbel");
+        assert_eq!(
+            decode(&gumbel).expect("gumbel parses").root_mode,
+            RootMode::Gumbel
+        );
+
+        // A misspelled VALUE is refused, not defaulted. `invalid_options` at
+        // construction is a driver bug an operator can see; silently running the
+        // other arm is not.
+        for spelling in ["Classic", "az-classic", "", "puct"] {
+            let mut bogus = base.clone();
+            bogus["rootMode"] = json!(spelling);
+            assert!(
+                decode(&bogus).is_err(),
+                "rootMode {spelling:?} should be refused"
+            );
+        }
+    }
+
+    /// A misspelled KEY is the same hazard one level up, and the more likely
+    /// one: every optional field here has a default, so an unrecognised key that
+    /// merely parses is indistinguishable from a field the driver never sent.
+    ///
+    /// `root_mode` is called out because `TRAINING-DESIGN-FIX.md` writes the
+    /// option that way in prose. A driver author copying it from the design doc
+    /// must get `invalid_options`, not a b3 run that is quietly the Gumbel arm
+    /// at 512 simulations — nothing downstream could tell the difference.
+    #[test]
+    fn a_misspelled_self_play_option_key_is_refused_rather_than_defaulted() {
+        let base = json!({"games": 2, "simulations": 8, "maxConsidered": 4});
+        let parses = |value: &Value| serde_json::from_value::<SelfPlayOptionsDto>(value.clone());
+        assert!(parses(&base).is_ok(), "the base options must still parse");
+
+        for key in [
+            "root_mode",
+            "rootmode",
+            "ROOTMODE",
+            "RootMode",
+            "temperature_moves",
+            "totallyBogusKey",
+        ] {
+            let mut bogus = base.clone();
+            bogus[key] = json!("classic");
+            assert!(
+                parses(&bogus).is_err(),
+                "unknown key {key:?} must be refused, not silently ignored"
+            );
+        }
+
+        // The camelCase spellings the wire format actually defines still parse,
+        // so the guard above is rejecting typos rather than the contract.
+        let mut spelled_correctly = base;
+        spelled_correctly["rootMode"] = json!("classic");
+        spelled_correctly["temperatureMoves"] = json!(4);
+        assert!(parses(&spelled_correctly).is_ok());
     }
 }
