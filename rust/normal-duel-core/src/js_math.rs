@@ -198,6 +198,21 @@ impl Lcg32 {
         self.state
     }
 
+    /// One uniform draw in `(0, 1)`, consuming exactly one `next_u32`.
+    ///
+    /// This is the expression [`Self::gumbel`] has always used, named so a
+    /// second consumer — the Dirichlet root noise's gamma sampler — takes its
+    /// uniforms in exactly the same way rather than in a second, subtly
+    /// different one. The half-word offset keeps the result strictly inside the
+    /// open interval: `0.5 / 2^32` at the bottom, `1 - 0.5 / 2^32` at the top,
+    /// so a caller may take a logarithm of it or of `1 - it` without a guard.
+    ///
+    /// The divisor is a power of two, so the quotient is exact in f64 and
+    /// identical in JavaScript.
+    pub fn unit_interval(&mut self) -> f64 {
+        (f64::from(self.next_u32()) + 0.5) / 4_294_967_296.0
+    }
+
     /// One standard Gumbel draw, consuming exactly one `next_u32`.
     ///
     /// `u` is placed strictly inside `(0, 1)` so `-log(-log(u))` is finite. The
@@ -210,8 +225,7 @@ impl Lcg32 {
     // to preserve.
     #[allow(clippy::neg_cmp_op_on_partial_ord)]
     pub fn gumbel(&mut self) -> f64 {
-        let raw = self.next_u32();
-        let mut u = (f64::from(raw) + 0.5) / 4_294_967_296.0;
+        let mut u = self.unit_interval();
         if !(u > 0.0) {
             u = f64::from_bits(1); // Number.MIN_VALUE
         }
@@ -268,6 +282,33 @@ mod tests {
         assert!(js_log(f64::NAN).is_nan());
         // Subnormal input takes the scale-up path.
         assert!((js_log(f64::from_bits(1)) - (-744.440_071_921_381_3)).abs() < 1e-9);
+    }
+
+    /// The uniform lives strictly inside `(0, 1)` at both ends of the word
+    /// range, which is what lets a caller take `log(u)` and `log(1 - u)`
+    /// without a guard.
+    #[test]
+    fn unit_interval_stays_strictly_inside_the_open_interval() {
+        // The extreme words, 0 and 2^32 - 1, are both reachable: the LCG is a
+        // bijection on u32, so each has exactly one predecessor, found with
+        // 1664525^-1 = 4276115653 (mod 2^32).
+        let predecessor =
+            |word: u32| -> u32 { word.wrapping_sub(1_013_904_223).wrapping_mul(4_276_115_653) };
+        let mut lowest = Lcg32::new(predecessor(0));
+        assert_eq!(lowest.unit_interval(), 0.5 / 4_294_967_296.0);
+
+        let mut highest = Lcg32::new(predecessor(u32::MAX));
+        let u = highest.unit_interval();
+        assert_eq!(u, (f64::from(u32::MAX) + 0.5) / 4_294_967_296.0);
+        assert!(u > 0.0 && u < 1.0, "u = {u}");
+        assert!(1.0 - u > 0.0);
+
+        // And it consumes exactly one word, in the same order `gumbel` does.
+        let mut a = Lcg32::new(4242);
+        let mut b = Lcg32::new(4242);
+        let word = b.next_u32();
+        assert_eq!(a.unit_interval(), (f64::from(word) + 0.5) / 4_294_967_296.0);
+        assert_eq!(a, b);
     }
 
     #[test]

@@ -219,6 +219,9 @@ fn search(root_mode: RootMode, simulations: u32, seed: u32) -> (PuctResult, Lcg3
         max_considered: 8,
         c_puct: 1.25,
         root_mode,
+        // D3's floor off: this file is about the root ALGORITHM, and the noise
+        // is tested against both algorithms in `tests/dirichlet_root.rs`.
+        ..PuctParams::default()
     };
     let mut tree = PuctTreeSearch::from_state(&config, &state, params, Lcg32::new(seed))
         .expect("an ongoing 9x9 state starts a search");
@@ -582,6 +585,7 @@ fn a_classic_result_read_before_the_first_backup_is_the_prior_not_a_one_hot() {
             max_considered: 8,
             c_puct: 1.25,
             root_mode: RootMode::Classic,
+            ..PuctParams::default()
         },
         Lcg32::new(5),
     )

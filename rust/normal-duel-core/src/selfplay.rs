@@ -73,6 +73,13 @@
 //! finalists, and covers every legal action, which stops targeting unexamined
 //! moves to zero.
 //!
+//! [`SelfPlayOptions::dirichlet_epsilon`] does not change any of that. The
+//! floor perturbs the priors the search *selects* on; the target is still the
+//! improved policy over the network's own priors, so a b2 shard's records are
+//! the same kind of thing a b1 shard's are — they differ in which positions the
+//! search chose to spend its budget on, not in what the network is asked to
+//! imitate at those positions.
+//!
 //! Exploration records the *search's* target for the state actually visited
 //! even when the played move is not the search's argmax. The label answers
 //! "what did search think here", and that question does not change because a
@@ -154,6 +161,22 @@ pub struct SelfPlayOptions {
     /// second implementation for this arm, and it is pinned by
     /// `tests/root_mode_classic.rs`.
     pub root_mode: RootMode,
+    /// D3's Dirichlet root floor: `P'(a) = (1 - eps) * P(a) + eps * eta_a` over
+    /// the root's legal actions, `eta ~ Dir(alpha)`, applied to what the search
+    /// *explores* and never to what it *records*.
+    ///
+    /// `0.0` — the default — is byte-for-byte absent: no stream is created, no
+    /// draw is taken, and the shard is identical to one produced by a build
+    /// without D3. The b2 arm runs [`crate::puct::DEFAULT_DIRICHLET_EPSILON`].
+    ///
+    /// Applies under BOTH root modes. Under Gumbel it perturbs the logit the
+    /// Gumbel draw is added to; under Classic it perturbs `P` in the PUCT term,
+    /// which is AlphaZero's own placement.
+    pub dirichlet_epsilon: f64,
+    /// D3's concentration, read only when [`Self::dirichlet_epsilon`] is
+    /// positive and then required to lie in `(0, 1)`. Defaults to
+    /// [`crate::puct::DEFAULT_DIRICHLET_ALPHA`].
+    pub dirichlet_alpha: f64,
     /// Which exploration recipe drives the played move.
     pub exploration: Exploration,
     /// Probability of playing a uniformly random legal move instead of the
@@ -202,6 +225,8 @@ impl Default for SelfPlayOptions {
             max_considered: 8,
             c_puct: crate::puct::DEFAULT_C_PUCT,
             root_mode: RootMode::Gumbel,
+            dirichlet_epsilon: 0.0,
+            dirichlet_alpha: crate::puct::DEFAULT_DIRICHLET_ALPHA,
             exploration: Exploration::VisitTemperature,
             epsilon: 0.0,
             temperature: 1.0,
@@ -292,6 +317,12 @@ struct Game {
     position: SearchPosition,
     ply: u64,
     window: RepetitionWindow,
+    /// The number this game's main stream was constructed from, kept because
+    /// D3's Dirichlet is keyed on `(game_seed, ply)` and `rng` has advanced past
+    /// it by the first search. It is the seed, not the live state: the noise at
+    /// a ply must not depend on how many words the game happened to consume
+    /// before reaching it.
+    seed: u32,
     rng: Lcg32,
     search: Option<PuctTreeSearch>,
     plies: Vec<PendingPly>,
@@ -306,6 +337,7 @@ impl Game {
     fn start(config: &Config, options: &SelfPlayOptions, index: usize) -> Result<Self> {
         let state = crate::create_initial_state(config)?;
         let position = SearchPosition::from_position(config, &state.position)?;
+        let seed = options.seed_base.wrapping_add(index as u32);
         let mut game = Self {
             index,
             position,
@@ -316,7 +348,8 @@ impl Game {
                 position.pawns.b,
                 position.turn,
             )),
-            rng: Lcg32::new(options.seed_base.wrapping_add(index as u32)),
+            seed,
+            rng: Lcg32::new(seed),
             search: None,
             plies: Vec::new(),
             outcome: GameOutcome::Ongoing,
@@ -410,6 +443,11 @@ impl Game {
                         max_considered: options.max_considered,
                         c_puct: options.c_puct,
                         root_mode: options.root_mode,
+                        // `(seed, ply)` and not the live `rng`: D3's noise is a
+                        // pure function of which game and which ply this is.
+                        game_seed: self.seed,
+                        dirichlet_epsilon: options.dirichlet_epsilon,
+                        dirichlet_alpha: options.dirichlet_alpha,
                     },
                     self.rng,
                 )?);
@@ -690,6 +728,25 @@ impl SelfPlayBatch {
             && !(options.temperature.is_finite() && options.temperature > 0.0)
         {
             return Err(PuctError::InvalidEvaluation);
+        }
+        // D3's floor, checked here as well as in `PuctTreeSearch::new`. The
+        // search's own check is the real guard -- it is what every entry point
+        // funnels through -- but it would not fire until the first root of the
+        // first game was expanded, i.e. after a driver had already allocated a
+        // shard's worth of buffers and run a network forward pass. Rejecting a
+        // malformed `alpha` at construction makes it a startup error the operator
+        // sees instead of a mid-shard one.
+        if !options.dirichlet_epsilon.is_finite()
+            || !(0.0..=1.0).contains(&options.dirichlet_epsilon)
+        {
+            return Err(PuctError::InvalidDirichlet);
+        }
+        if options.dirichlet_epsilon > 0.0
+            && !(options.dirichlet_alpha.is_finite()
+                && options.dirichlet_alpha > 0.0
+                && options.dirichlet_alpha < 1.0)
+        {
+            return Err(PuctError::InvalidDirichlet);
         }
         let games = (0..options.games)
             .map(|index| Game::start(config, &options, index))
