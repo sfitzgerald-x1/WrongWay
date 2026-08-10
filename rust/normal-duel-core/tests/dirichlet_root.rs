@@ -24,7 +24,7 @@ use wrongway_normal_duel::js_math::Lcg32;
 use wrongway_normal_duel::mock_evaluator;
 use wrongway_normal_duel::puct::{
     dirichlet_stream_seed, root_dirichlet, PuctParams, PuctResult, PuctTreeSearch, RootMode,
-    DEFAULT_DIRICHLET_ALPHA, DEFAULT_DIRICHLET_EPSILON,
+    DEFAULT_DIRICHLET_ALPHA, DEFAULT_DIRICHLET_EPSILON, MIN_DIRICHLET_ALPHA,
 };
 use wrongway_normal_duel::selfplay::{
     Exploration, GameOutcome, SelfPlayBatch, SelfPlayOptions, RECORD_FEATURES, RECORD_POLICY,
@@ -146,8 +146,18 @@ fn gumbel_temperature_options() -> SelfPlayOptions {
 
 /// **The pre-D3 baseline.** These are `GUMBEL_ARGMAX_DIGEST` and
 /// `GUMBEL_TEMPERATURE_DIGEST` from `tests/root_mode_classic.rs`, over the same
-/// two option sets — computed on `scott/completed-q-targets` at 043b28c, a
-/// commit on which none of this file's code existed.
+/// two option sets, as they stand at **b27911c** — the base of this branch and
+/// the parent of the commit that added D3, so a commit on which none of this
+/// file's code existed.
+///
+/// Get the provenance right, because there are two generations of these
+/// constants and citing the wrong one makes a genuine pin look fabricated. They
+/// were `0x7977_465b_8b0d_d648` / `0xcb4d_f111_6f90_19e2` at 043b28c, before
+/// D1/D2; the `v3` qtransform then changed the Gumbel search's decisions on
+/// purpose and both moved. The values below are the post-`v3` re-baseline. See
+/// the long note above `GUMBEL_ARGMAX_DIGEST` in `tests/root_mode_classic.rs`
+/// for what that re-baselining does and does not attest — this file inherits
+/// exactly that, plus "and D3 at `eps = 0` did not move it either".
 ///
 /// Copied rather than shared because integration tests are separate binaries.
 /// The copy cannot rot silently: if this file's `digest`, `run` or option
@@ -159,9 +169,19 @@ const PRE_D3_TEMPERATURE_DIGEST: u64 = 0x8eb8_8c62_f02a_f7c5;
 /// Claim 1: `eps = 0` is not "a mixture with weight zero", it is *absent*.
 ///
 /// Every `alpha` in the sweep is a value that would produce wildly different
-/// noise if it were read at all — 0.02 is near-degenerate, 0.99 is nearly
-/// uniform — and a NaN alpha would poison every prior it reached. All of them
-/// must reproduce a shard byte-for-byte identical to the pre-D3 build's.
+/// noise if it were read at all — 0.02 is nearly one-hot, 0.99 is nearly
+/// uniform — and all of them must reproduce a shard byte-for-byte identical to
+/// the pre-D3 build's.
+///
+/// **The `NaN` row is weaker than it looks and is kept as documentation of
+/// intent rather than as a discriminator.** `NaN` gammas make the total
+/// non-finite, `root_dirichlet`'s guard returns the uniform vector, and
+/// `0.0 * uniform` is `0.0` — so even an implementation that computed the
+/// mixture at `eps = 0` would leave the priors bit-identical and this digest
+/// would still pass. What actually catches that is the
+/// `root_selection_priors.is_empty()` assertion in `puct.rs`'s
+/// `the_floor_mixes_into_a_copy_and_leaves_the_networks_prior_in_the_edges`,
+/// which was confirmed by mutation to be its unique catcher.
 #[test]
 fn zero_epsilon_reproduces_the_pre_d3_build_byte_for_byte() {
     for alpha in [DEFAULT_DIRICHLET_ALPHA, 0.02, 0.5, 0.99, f64::NAN] {
@@ -527,6 +547,15 @@ fn the_noise_is_keyed_on_the_game_and_the_ply() {
     assert_ne!(base, root_dirichlet(1000, 6, DEFAULT_DIRICHLET_ALPHA, 40));
 
     // No collisions across a whole shard's worth of keys: 64 games x 200 plies.
+    //
+    // Scope this claim honestly. The key is 32 bits, so 12,800 of them have a
+    // birthday-collision probability of about 2% -- this asserts that THIS
+    // seed_base is collision-free, not that the keying is collision-free in
+    // general, and it would be within its rights to fail on some other base.
+    // A collision costs two roots out of 12,800 sharing a noise vector, which is
+    // a rounding error in an exploration floor and not a determinism problem;
+    // widening the key would mean widening `Lcg32`, which is fixed by the
+    // JavaScript reference.
     let mut seeds: Vec<u32> = Vec::with_capacity(64 * 200);
     for game in 0..64_u32 {
         for ply in 0..200_u64 {
@@ -617,6 +646,85 @@ fn alpha_controls_how_concentrated_the_noise_is() {
     }
 }
 
+/// **The uniform fallback is reachable, and it inverts `alpha`'s meaning.**
+///
+/// `sample_gamma_below_one` computes `p^(1 / alpha)`, which underflows to
+/// exactly `0.0` with probability `10^(-308 * alpha)` per component. Below about
+/// `alpha = 5e-3` whole draws underflow, `root_dirichlet` divides by zero-sum
+/// and returns UNIFORM — the flattest noise there is — to a caller who asked for
+/// the sparsest.
+///
+/// This is why [`MIN_DIRICHLET_ALPHA`] exists, and the test is written from both
+/// ends: the branch is reached through the unvalidated public entry point, and
+/// the search refuses to go anywhere near it.
+#[test]
+fn a_tiny_alpha_degenerates_to_uniform_which_is_why_the_search_bounds_it() {
+    // Reached, not argued. At 1e-6 every component underflows on almost every
+    // key; at 1e-12 on all of them.
+    let uniform = vec![1.0 / 40.0; 40];
+    assert_eq!(root_dirichlet(0, 0, 1e-6, 40), uniform);
+    assert_eq!(root_dirichlet(0, 0, 1e-12, 40), uniform);
+    assert_eq!(root_dirichlet(7, 3, 1e-12, 2), vec![0.5, 0.5]);
+
+    // The inversion, stated as the property that makes it a defect rather than
+    // a curiosity: a SMALLER alpha is supposed to be SPARSER, and past the cliff
+    // it is flatter instead.
+    let top = |alpha: f64| -> f64 {
+        let mut total = 0.0_f64;
+        for key in 0..400_u32 {
+            total += root_dirichlet(key, 1, alpha, 40)
+                .iter()
+                .copied()
+                .fold(0.0_f64, f64::max);
+        }
+        total / 400.0
+    };
+    let bounded = top(MIN_DIRICHLET_ALPHA);
+    let past_the_cliff = top(1e-6);
+    // At the bound the sampler is still faithful: Python's `random.gammavariate`
+    // normalised the same way gives a mean top component of 0.799 for Dir(0.01)
+    // over 40, against this implementation's 0.807 (400 keys, so ~0.01 of
+    // sampling error). Sparse, as asked for.
+    assert!(
+        (bounded - 0.799).abs() < 0.03,
+        "at the bound the mean top component is {bounded}; an independent sampler gives 0.799"
+    );
+    assert!(
+        past_the_cliff < 0.2,
+        "at 1e-6 the noise should have collapsed to uniform, not {past_the_cliff}"
+    );
+    assert!(
+        past_the_cliff < bounded,
+        "the inversion this bound exists for is not present in this fixture"
+    );
+    // It is a collapse rather than a drift: most keys come back EXACTLY uniform,
+    // and the residue above 0.025 is the minority of keys where at least one
+    // component survived the underflow.
+    let flat = vec![1.0 / 40.0; 40];
+    let degenerate = (0..400_u32)
+        .filter(|key| root_dirichlet(*key, 1, 1e-6, 40) == flat)
+        .count();
+    assert!(
+        degenerate > 360,
+        "only {degenerate} of 400 keys collapsed to uniform at alpha 1e-6"
+    );
+
+    // Nothing degenerates at or above the bound: 4000 keys at each of the three
+    // root sizes this engine produces, and not one uniform draw.
+    for alpha in [MIN_DIRICHLET_ALPHA, 0.02, DEFAULT_DIRICHLET_ALPHA] {
+        for count in [2_usize, 40, 131] {
+            let flat = vec![1.0 / count as f64; count];
+            let degenerate = (0..4000_u32)
+                .filter(|key| root_dirichlet(*key, u64::from(key % 7), alpha, count) == flat)
+                .count();
+            assert_eq!(
+                degenerate, 0,
+                "alpha {alpha} degenerated on {degenerate} of 4000 keys at count {count}"
+            );
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ *
  * Options validation
  * ------------------------------------------------------------------ */
@@ -658,12 +766,20 @@ fn a_malformed_floor_is_rejected() {
         (f64::NAN, DEFAULT_DIRICHLET_ALPHA),
         (f64::INFINITY, DEFAULT_DIRICHLET_ALPHA),
         // alpha is only read when the floor is on, and then it must be a
-        // concentration the one sampler this crate has can produce.
+        // concentration the one sampler this crate has can produce FAITHFULLY.
+        // Both bounds are the sampler's, not the design's: `>= 1` needs a second
+        // algorithm, and below `MIN_DIRICHLET_ALPHA` the `p^(1/alpha)` underflow
+        // silently turns the sparsest request into the flattest answer -- see
+        // `a_tiny_alpha_degenerates_to_uniform_which_is_why_the_search_bounds_it`.
         (0.25, 0.0),
         (0.25, -0.5),
         (0.25, 1.0),
         (0.25, 4.0),
         (0.25, f64::NAN),
+        (0.25, 5e-3),
+        (0.25, 1e-3),
+        (0.25, 1e-6),
+        (0.25, f64::MIN_POSITIVE),
     ] {
         assert_eq!(
             batch(epsilon, alpha).map_err(|error| error.reason()),
@@ -681,8 +797,10 @@ fn a_malformed_floor_is_rejected() {
     for (epsilon, alpha) in [
         (0.0, f64::NAN),
         (0.0, 0.0),
+        (0.0, 1e-9),
         (1.0, DEFAULT_DIRICHLET_ALPHA),
         (DEFAULT_DIRICHLET_EPSILON, 0.999),
+        (DEFAULT_DIRICHLET_EPSILON, MIN_DIRICHLET_ALPHA),
     ] {
         assert!(
             batch(epsilon, alpha).is_ok() && tree(epsilon, alpha).is_ok(),

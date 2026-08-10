@@ -174,7 +174,9 @@ pub struct SelfPlayOptions {
     /// which is AlphaZero's own placement.
     pub dirichlet_epsilon: f64,
     /// D3's concentration, read only when [`Self::dirichlet_epsilon`] is
-    /// positive and then required to lie in `(0, 1)`. Defaults to
+    /// positive and then required to lie in
+    /// `[MIN_DIRICHLET_ALPHA, 1)` — see [`crate::puct::MIN_DIRICHLET_ALPHA`],
+    /// which is a numerical bound and not a taste one. Defaults to
     /// [`crate::puct::DEFAULT_DIRICHLET_ALPHA`].
     pub dirichlet_alpha: f64,
     /// Which exploration recipe drives the played move.
@@ -743,7 +745,7 @@ impl SelfPlayBatch {
         }
         if options.dirichlet_epsilon > 0.0
             && !(options.dirichlet_alpha.is_finite()
-                && options.dirichlet_alpha > 0.0
+                && options.dirichlet_alpha >= crate::puct::MIN_DIRICHLET_ALPHA
                 && options.dirichlet_alpha < 1.0)
         {
             return Err(PuctError::InvalidDirichlet);

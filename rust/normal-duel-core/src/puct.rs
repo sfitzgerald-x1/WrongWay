@@ -133,32 +133,89 @@ pub const DEFAULT_C_PUCT: f64 = 1.25;
 /// value the b2 arm is specified to run.
 pub const DEFAULT_DIRICHLET_EPSILON: f64 = 0.25;
 
-/// The Dirichlet concentration D3 specifies, `10 / mean_legal`.
+/// The Dirichlet concentration D3 specifies, `10 / mean_legal`, which the plan
+/// writes as "~0.15 on this board".
 ///
-/// The plan writes that as "~0.15 on this board" and this constant is that
-/// number, but the derivation deserves recording because it does not reproduce
-/// from anything measured here: `0.15` implies a mean legal-action count of
-/// about 67, while the mean this engine actually plays at is **44.5** over a
-/// mock-network self-play run (369 recorded positions, min 1, max 131) and
-/// **40.4** on the live shard `crate::selfplay`'s module docs quote. The formula
-/// on either of those gives `0.22`-`0.25`.
+/// **Which mean, and why it is not the whole-game one.** This board has no
+/// single branching factor, so `10 / b` needs the phase named or it is not
+/// defined. Measured over a 32-game mock-network run (1362 recorded positions),
+/// the legal count falls *linearly* from 131 at ply 0 to 66.6 at ply 19 — each
+/// wall placed removes about three anchors from the legal set — and then falls
+/// off a cliff: 23.0 at ply 20, 4.7 at ply 22, and 2.5-3.0 from ply 24 to the
+/// end. That cliff is the `10 + 10` wall stock being spent. Twenty plies of wall
+/// placements exhaust it, after which only pawn moves are legal and the position
+/// has two or three of them.
 ///
-/// The plan's number is kept as the default anyway, deliberately: it is what the
-/// b2 arm is pre-committed to and a default that silently disagreed with the
-/// design doc would be worse than one that is documented as approximate. A
-/// smaller alpha is the more aggressive floor (more mass on fewer actions), so
-/// this errs toward the sparser noise. The value is an option precisely so the
-/// range can be swept.
+/// So the distribution is bimodal, with modes near 100 and near 3, and its
+/// **median is 4**. The whole-game mean is 48.7 in that run and 44.5 in another,
+/// but it is an average across the cliff rather than a branching factor: it
+/// mostly measures how many near-terminal plies the sample happened to contain,
+/// and it moves with game length rather than with the game. Deriving `10 / b`
+/// from it would pick an arbitrary point on a wide range.
+///
+/// Over the phase where the search actually has a choice to make — before the
+/// stock runs out, plus the handful of plies after it — the mean is stable:
+/// **68.4 over `ply < 30`**, and `10 / 68.4 = 0.146`. That is the plan's 0.15,
+/// and `~67` is exactly the branching factor it implies. AlphaZero's `10 / b`
+/// heuristic is about typical-game branching, which is this number and not the
+/// resign-length average.
+///
+/// The value is still an option so the range can be swept; see
+/// [`MIN_DIRICHLET_ALPHA`] for the bottom of the range and why it exists.
 pub const DEFAULT_DIRICHLET_ALPHA: f64 = 0.15;
+
+/// The smallest concentration the sampler can honour, below which it silently
+/// means the OPPOSITE of what it says.
+///
+/// [`sample_gamma_below_one`] computes `x = p^(1 / alpha)`, so a component
+/// underflows to exactly `0.0` when `p < 10^(-308 * alpha)` — a probability of
+/// `10^(-308 * alpha)` per component. When *every* component underflows the sum
+/// is zero and [`root_dirichlet`] falls back to the uniform vector, which is the
+/// flattest noise there is: a caller reaching for a sparser floor gets a flatter
+/// one, and gets it on some fraction of roots rather than all of them, so the
+/// arm is quietly a mixture of two different experiments.
+///
+/// Measured, 4000 keys per cell, as the fraction of draws that come back
+/// uniform:
+///
+/// ```text
+/// alpha    count 2     count 40    count 131
+/// 2e-2     0           0           0            (no component underflowed at all)
+/// 1e-2     0           0           0            (6e-4 of components zero)
+/// 5e-3     4/4000      0           0
+/// 3e-3     38/4000     0           0
+/// 1e-3     901/4000    0           0
+/// 1e-4     3448/4000   204/4000    0
+/// 1e-6     3996/4000   3894/4000   3671/4000
+/// 1e-12    4000/4000   4000/4000   4000/4000
+/// ```
+///
+/// `1e-2` is therefore the bound: nothing degenerates there, the per-component
+/// underflow rate is `8.3e-4` (closed form) against a measured `6e-4`, and an
+/// all-zero draw needs every component to underflow — `7e-7` at a two-action
+/// root and unreachable at a realistic one. The plan's `0.15` and the tests'
+/// `0.02` sit far above it.
+///
+/// This is a bound on what the *search* will accept, not on the arithmetic:
+/// [`root_dirichlet`] is public and unvalidated, so the uniform fallback is
+/// reachable through it and is tested through it.
+pub const MIN_DIRICHLET_ALPHA: f64 = 0.01;
 
 /// Domain separator for the Dirichlet's own draw stream, so its key cannot
 /// collide with any other keyed stream this codebase grows later. The bytes are
 /// `"DIR1"`.
 const DIRICHLET_TAG: u32 = 0x4449_5231;
 
-/// Cap on the gamma sampler's rejection loop. See [`sample_gamma_below_one`]
-/// for the acceptance rate; the cap exists so that a wasm self-play worker can
-/// never hang instead of finishing a shard, not because it is expected to bind.
+/// Cap on the gamma sampler's rejection loop.
+///
+/// Genuinely unreachable, and measured rather than argued: over 50,000 draws at
+/// each of `alpha` 0.02, 0.15, 0.5, 0.9 and 0.999 the acceptance rate is 0.982,
+/// 0.885, 0.747, 0.722 and 0.730, and the worst case observed is 3, 6, 9, 10 and
+/// 10 attempts. At the floor of that acceptance range, 128 consecutive
+/// rejections is a `0.28^128` event, about `1e-71`.
+/// `the_gamma_samplers_rejection_loop_never_approaches_its_cap` holds it there.
+/// The cap exists so that a wasm self-play worker cannot hang instead of
+/// finishing a shard, not because it is expected to bind.
 const GAMMA_MAX_ATTEMPTS: u32 = 128;
 
 /// Murmur3's 32-bit finalizer: the avalanche step, used here to key one stream
@@ -219,9 +276,13 @@ pub fn dirichlet_stream_seed(game_seed: u32, ply: u64) -> u32 {
 /// every cheap normal generator needs either a trigonometric pair or a second
 /// rejection loop; GS needs only uniforms, a logarithm, an exponential and a
 /// power. The restriction to `alpha < 1` is not a limitation in this codebase —
-/// [`PuctTreeSearch::new`] rejects anything else, and `10 / mean_legal` is
-/// `0.25` at its largest here — but it IS a restriction, and adding `alpha >= 1`
-/// later means adding a second sampler, not relaxing a bound.
+/// [`PuctTreeSearch::new`] rejects anything else — but it IS a restriction, and
+/// adding `alpha >= 1` later means adding a second sampler, not relaxing a
+/// bound.
+///
+/// The bottom of the range is a different matter and is a real defect of this
+/// method rather than a scoping decision: `p^(1 / alpha)` underflows for small
+/// `alpha`, and the consequence is documented on [`MIN_DIRICHLET_ALPHA`].
 ///
 /// **Portability.** [`js_log`] is bit-portable, so it is used for the logarithm.
 /// `exp` and `powf` are libm and are not; a target whose `exp` differs by an ULP
@@ -273,12 +334,26 @@ fn sample_gamma_below_one(rng: &mut Lcg32, alpha: f64) -> f64 {
 /// implementation to drift.
 ///
 /// The components are drawn in index order and normalised by their sum, which is
-/// the standard construction. The guard on that sum is not decorative at
-/// `alpha = 0.15`: the gammas are heavily skewed and most of them are tiny, so a
-/// degenerate draw is worth handling explicitly. A non-finite or non-positive
-/// total falls back to the uniform vector — the noise that changes nothing about
-/// the prior's *shape* — rather than to a division that would poison every
-/// prior with NaN.
+/// the standard construction.
+///
+/// **The zero-sum guard is reachable, and it inverts the meaning of `alpha` when
+/// it fires.** [`sample_gamma_below_one`] computes `p^(1 / alpha)`, which
+/// underflows to exactly `0.0` with probability `10^(-308 * alpha)` per
+/// component; when every component underflows the total is `0.0` and this
+/// function returns the UNIFORM vector — the flattest noise available — to a
+/// caller who asked for the sparsest. See [`MIN_DIRICHLET_ALPHA`] for the
+/// measured table and for the bound that keeps the search out of that region.
+/// This function is deliberately not bounded, so the branch stays reachable and
+/// testable: `root_dirichlet(0, 0, 1e-6, 40)` takes it.
+///
+/// A non-finite total reaches the same fallback, which is how an `alpha` of
+/// `NaN` produces a uniform vector rather than poisoning every prior with `NaN`.
+/// Note the consequence for `eps = 0`: `0.0 * uniform` is `0.0`, so a
+/// `NaN`-alpha draw that reached the mixture would still leave the priors
+/// untouched — the guard, not the early return, is what makes that case
+/// harmless, and only the `root_selection_priors.is_empty()` assertion in
+/// `the_floor_mixes_into_a_copy_and_leaves_the_networks_prior_in_the_edges`
+/// distinguishes the two.
 #[must_use]
 pub fn root_dirichlet(game_seed: u32, ply: u64, alpha: f64, count: usize) -> Vec<f64> {
     if count == 0 {
@@ -890,8 +965,10 @@ pub struct PuctParams {
     /// does NOT touch: the recorded policy target.
     pub dirichlet_epsilon: f64,
     /// D3's concentration. Read only when [`Self::dirichlet_epsilon`] is
-    /// positive, and then required to lie in `(0, 1)` — see
-    /// [`sample_gamma_below_one`] for why the upper bound is real.
+    /// positive, and then required to lie in `[MIN_DIRICHLET_ALPHA, 1)`. Both
+    /// bounds are properties of the sampler rather than of the design: see
+    /// [`sample_gamma_below_one`] for the upper one and
+    /// [`MIN_DIRICHLET_ALPHA`] for the lower.
     pub dirichlet_alpha: f64,
 }
 
@@ -1183,7 +1260,7 @@ impl PuctTreeSearch {
         }
         if params.dirichlet_epsilon > 0.0
             && !(params.dirichlet_alpha.is_finite()
-                && params.dirichlet_alpha > 0.0
+                && params.dirichlet_alpha >= MIN_DIRICHLET_ALPHA
                 && params.dirichlet_alpha < 1.0)
         {
             return Err(PuctError::InvalidDirichlet);
@@ -2878,6 +2955,134 @@ mod tests {
              noised one is {noised}",
             search.select_edge(0)
         );
+    }
+
+    /// **Root only.** The mixture reaches the root's edge list and no other
+    /// node's, which is the "root only" of D3's one-line specification.
+    ///
+    /// Every other test would survive its removal: the digests and the
+    /// floored-vs-unfloored comparisons all move whether the noise is applied at
+    /// one node or at every node, so "root only" is currently a property nothing
+    /// NAMES. This names it, at the two places a prior is read below the root —
+    /// `select_edge`'s ranking and the FPU's charge — and it is the same class of
+    /// gap as the `select_edge` near-miss above, one rung less severe.
+    #[test]
+    fn the_floor_reaches_the_root_and_no_other_node() {
+        let config = canonical_config();
+        let policy = sloped_policy(&config);
+        let mut search = expanded_root_with(
+            &config,
+            PuctParams {
+                simulations: 48,
+                root_mode: RootMode::Classic,
+                ..floored_params(DEFAULT_DIRICHLET_EPSILON, 1234)
+            },
+            99,
+            &policy,
+            0.0,
+        );
+        let mut features = vec![0.0_f32; NN_INPUT_PLANES * config.cells()];
+        let mut leaf_policy = vec![0.0_f32; config.policy_size()];
+        while search
+            .next_leaf(&config, &mut features)
+            .expect("the search runs to completion")
+        {
+            let value = crate::mock_evaluator::evaluate(&features, &mut leaf_policy);
+            search
+                .submit(&config, &leaf_policy, value)
+                .expect("the mock evaluation is well formed");
+        }
+
+        // The root has a mixture and it is not the bare prior.
+        assert!(!search.root_selection_priors.is_empty());
+        assert!(search.selection_priors(0) == search.root_selection_priors.as_slice());
+
+        // Every expanded node below the root selects on `edge.prior` itself.
+        let mut checked = 0_usize;
+        for node in 1..search.nodes.len() as u32 {
+            let entry = search.nodes[node as usize];
+            if !entry.expanded || entry.edges_len == 0 {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                search.selection_priors(node).is_empty(),
+                "node {node} was handed a noise vector"
+            );
+            let start = entry.edges_start;
+            for index in start..start + entry.edges_len {
+                assert_eq!(
+                    search.selection_prior(node, index),
+                    search.edges[index as usize].prior,
+                    "node {node} edge {index} selects on something other than the network's prior"
+                );
+            }
+        }
+        assert!(
+            checked > 5,
+            "only {checked} non-root nodes were expanded; this case cannot discriminate"
+        );
+
+        // And the discriminator for the root itself: had the mixture been
+        // applied everywhere, a child's priors would differ from the network's
+        // by about as much as the root's do.
+        let count = search.nodes[0].edges_len as usize;
+        let drift: f64 = (0..count)
+            .map(|index| (search.root_selection_priors[index] - search.edges[index].prior).abs())
+            .sum();
+        assert!(
+            drift > 0.1,
+            "the root's own mixture moved the priors by only {drift}; this case cannot tell \
+             root-only from nowhere-at-all"
+        );
+    }
+
+    /// The rejection loop's cap is unreachable, measured rather than argued.
+    ///
+    /// [`GAMMA_MAX_ATTEMPTS`] is a hang guard whose fallback returns a value
+    /// outside the accept region, so "it never fires" is a claim the sampler's
+    /// correctness rests on. The attempt count is recovered exactly: GS consumes
+    /// two words per attempt, and [`Lcg32`] is a bijection, so replaying the
+    /// stream from the pre-call state counts them.
+    #[test]
+    fn the_gamma_samplers_rejection_loop_never_approaches_its_cap() {
+        const DRAWS: u64 = 20_000;
+        for alpha in [
+            MIN_DIRICHLET_ALPHA,
+            0.02,
+            DEFAULT_DIRICHLET_ALPHA,
+            0.5,
+            0.999,
+        ] {
+            let mut rng = Lcg32::new(12_345);
+            let mut attempts_total = 0_u64;
+            let mut worst = 0_u64;
+            for _ in 0..DRAWS {
+                let before = rng;
+                let draw = sample_gamma_below_one(&mut rng, alpha);
+                assert!(draw.is_finite() && draw >= 0.0);
+                let mut shadow = before;
+                let mut words = 0_u64;
+                while shadow != rng {
+                    shadow.next_u32();
+                    words += 1;
+                    assert!(words < 4 * u64::from(GAMMA_MAX_ATTEMPTS), "runaway replay");
+                }
+                assert_eq!(words % 2, 0, "GS takes exactly two words per attempt");
+                attempts_total += words / 2;
+                worst = worst.max(words / 2);
+            }
+            let acceptance = DRAWS as f64 / attempts_total as f64;
+            assert!(
+                acceptance > 0.7,
+                "alpha {alpha} accepted {acceptance} of its attempts"
+            );
+            assert!(
+                worst * 4 < u64::from(GAMMA_MAX_ATTEMPTS),
+                "alpha {alpha} needed {worst} attempts against a cap of {GAMMA_MAX_ATTEMPTS}; \
+                 the cap is supposed to be unreachable, not merely large"
+            );
+        }
     }
 
     /// The FPU's visited-prior accounting reads the mixture too, so the classic
