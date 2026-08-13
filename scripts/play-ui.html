@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WrongWay &mdash; play the network</title>
+<style>
+  :root { --bg:#111; --fg:#e8e8e8; --dim:#8a8a8a; --line:#2b2b2b; --panel:#171717;
+          --cell:#1d1d1d; --cellhi:#20402c; --wall:#e0a94f; --wallhi:#4a3a1a;
+          --me:#4fa3ff; --ai:#ff6b8a; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex;
+           gap:18px; align-items:center; flex-wrap:wrap; }
+  h1 { font-size:15px; margin:0; font-weight:700; letter-spacing:.5px; }
+  .wrap { display:flex; gap:20px; padding:16px; align-items:flex-start; flex-wrap:wrap; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:12px; }
+  /* 9 cells + 8 gutters on each axis. Cells are the big tracks, wall slots thin. */
+  #board { display:grid; grid-template-columns:repeat(9, 44px 10px); grid-template-rows:repeat(9, 44px 10px);
+           gap:0; background:#141414; padding:8px; border:1px solid var(--line); border-radius:6px; }
+  #board > * { grid-column:span 1; }
+  .cell { background:var(--cell); border-radius:3px; display:flex; align-items:center;
+          justify-content:center; font-size:10px; color:#3a3a3a; cursor:default; }
+  .cell.goalA { box-shadow: inset 0 -2px 0 rgba(79,163,255,.45); }
+  .cell.goalB { box-shadow: inset 0 2px 0 rgba(255,107,138,.45); }
+  .cell.target { background:var(--cellhi); cursor:pointer; outline:1px solid #3e7f56; }
+  .cell.target:hover { background:#2b5a3c; }
+  .pawn { width:28px; height:28px; border-radius:50%; display:flex; align-items:center;
+          justify-content:center; font-size:11px; font-weight:700; color:#08131f; }
+  .pawn.A { background:var(--me); } .pawn.B { background:var(--ai); }
+  .slot { background:transparent; border-radius:2px; }
+  .slot.open { cursor:pointer; }
+  .slot.open:hover { background:var(--wallhi); }
+  .slot.set { background:var(--wall); }
+  label { color:var(--dim); }
+  input[type=range] { width:150px; vertical-align:middle; }
+  button { background:#222; color:var(--fg); border:1px solid #333; border-radius:5px;
+           padding:6px 12px; cursor:pointer; font:inherit; }
+  button:hover { background:#2b2b2b; }
+  .kv { display:grid; grid-template-columns:auto auto; gap:2px 12px; }
+  .kv .k { color:var(--dim); }
+  .big { font-size:22px; font-weight:700; }
+  #status { min-height:20px; }
+  .warn { color:#ffb454; }
+  .win { color:#5ddc9a; } .lose { color:#ff6b8a; }
+  #log { max-height:220px; overflow:auto; color:var(--dim); font-size:12px; }
+  .note { color:var(--dim); font-size:12px; max-width:330px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>WrongWay &mdash; play the network</h1>
+  <span>
+    <label for="sims">simulations/move</label>
+    <input id="sims" type="range" min="16" max="4096" step="16" value="128">
+    <b id="simsVal">128</b>
+    <span id="simsEta" class="note"></span>
+  </span>
+  <span>
+    <label for="side">you play</label>
+    <select id="side"><option value="A">A (blue, moves first)</option><option value="B">B (pink)</option></select>
+  </span>
+  <button id="new">new game</button>
+</header>
+
+<div class="wrap">
+  <div>
+    <div id="board"></div>
+    <div id="status" class="panel" style="margin-top:12px"></div>
+  </div>
+  <div class="panel">
+    <div class="kv">
+      <span class="k">network</span><span id="net">&hellip;</span>
+      <span class="k">wasm</span><span id="wasm">&hellip;</span>
+      <span class="k">your walls</span><span id="stockYou">&mdash;</span>
+      <span class="k">its walls</span><span id="stockAi">&mdash;</span>
+      <span class="k">last think</span><span id="think">&mdash;</span>
+      <span class="k">its eval</span><span id="eval">&mdash;</span>
+    </div>
+    <p class="note" style="margin-top:12px">
+      Click a highlighted square to move. Click a thin gap to place a wall.
+      Walls block movement across that edge and cannot seal an opponent off entirely.
+    </p>
+    <p class="note">
+      <b>Its eval</b> is the network's own value at the root, from <i>its</i> point of
+      view: +1 means it thinks it is winning. Watch it flip as you cut its route.
+    </p>
+    <div id="log" style="margin-top:10px"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let G = null, busy = false;
+
+// Measured on an M5 Max: ~5.5 ms per simulation end to end (1.9 ms of that is the
+// forward on MPS). Shown so the slider's cost is visible before you drag it.
+const MS_PER_SIM = 5.5;
+function updateEta() {
+  const n = Number($('sims').value);
+  $('simsVal').textContent = n;
+  const s = n * MS_PER_SIM / 1000;
+  $('simsEta').textContent = '~' + (s < 1 ? Math.round(s * 1000) + ' ms' : s.toFixed(1) + ' s') + '/move';
+}
+$('sims').addEventListener('input', updateEta);
+updateEta();
+
+function wallsSet(state) { return new Set(state.position.walls); }
+
+function render() {
+  const b = $('board');
+  b.innerHTML = '';
+  if (!G) return;
+  const st = G.state, me = G.humanSide, ai = me === 'A' ? 'B' : 'A';
+  const walls = wallsSet(st);
+  const myTurn = st.position.turn === me && st.outcome.kind === 'ongoing';
+
+  // Legal pawn destinations and wall slots, straight from the engine's list --
+  // the UI never decides legality itself.
+  const targets = new Set();
+  const openWalls = new Set();
+  if (myTurn) for (const a of G.legal) {
+    if (a.kind === 'pawn') targets.add(a.to.r + ',' + a.to.c);
+    else if (a.kind === 'wall') openWalls.add(a.wall);
+  }
+
+  // 17x17 grid: even indices are cells, odd are wall gutters.
+  for (let gr = 0; gr < 17; gr++) {
+    for (let gc = 0; gc < 17; gc++) {
+      const r = gr >> 1, c = gc >> 1;
+      const cellRow = gr % 2 === 0, cellCol = gc % 2 === 0;
+      let el;
+      if (cellRow && cellCol) {
+        el = document.createElement('div');
+        el.className = 'cell';
+        if (r === 0) el.classList.add('goalA');
+        if (r === 8) el.classList.add('goalB');
+        const pA = st.position.pawns.A, pB = st.position.pawns.B;
+        if (pA.r === r && pA.c === c) el.innerHTML = '<div class="pawn A">A</div>';
+        else if (pB.r === r && pB.c === c) el.innerHTML = '<div class="pawn B">B</div>';
+        else if (targets.has(r + ',' + c)) {
+          el.classList.add('target');
+          el.onclick = () => send({ kind: 'pawn', to: { r, c } });
+        }
+      } else if (!cellRow && !cellCol) {
+        el = document.createElement('div');
+        el.className = 'slot';                     // wall post, never clickable
+      } else {
+        // Horizontal gutter under row r -> 'H-r-c'; vertical gutter right of
+        // column c -> 'V-r-c'. A wall occupies two adjacent gutter cells, so a
+        // slot is painted if either candidate name covers it.
+        const isH = !cellRow;
+        el = document.createElement('div');
+        el.className = 'slot';
+        const names = isH ? [`H-${r}-${c}`, `H-${r}-${c - 1}`] : [`V-${r}-${c}`, `V-${r - 1}-${c}`];
+        if (names.some((n) => walls.has(n))) el.classList.add('set');
+        else {
+          const open = names.find((n) => openWalls.has(n));
+          if (open) { el.classList.add('open'); el.onclick = () => send({ kind: 'wall', wall: open }); }
+        }
+      }
+      b.appendChild(el);
+    }
+  }
+
+  $('stockYou').textContent = st.position.stock[me];
+  $('stockAi').textContent = st.position.stock[ai];
+  const s = $('status');
+  if (st.outcome.kind === 'win') {
+    const won = st.outcome.winner === me;
+    s.innerHTML = `<span class="big ${won ? 'win' : 'lose'}">${won ? 'you win' : 'the network wins'}</span>`
+                + `<br><span class="note">${st.outcome.reason}</span>`;
+  } else if (st.outcome.kind === 'draw') {
+    s.innerHTML = `<span class="big warn">draw</span><br><span class="note">${st.outcome.reason}</span>`;
+  } else if (busy) {
+    s.innerHTML = `<span class="warn">thinking at ${G.sims} simulations&hellip;</span>`;
+  } else {
+    s.innerHTML = myTurn ? 'your move &mdash; ply ' + st.ply
+                         : 'waiting on the network &mdash; ply ' + st.ply;
+  }
+}
+
+function log(line) {
+  const d = document.createElement('div');
+  d.textContent = line;
+  $('log').prepend(d);
+}
+
+async function send(action) {
+  if (busy || !G) return;
+  busy = true; render();
+  try {
+    const r = await fetch('/api/move', { method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ id: G.id, action, sims: Number($('sims').value) }) });
+    const data = await r.json();
+    if (data.error) { log('error: ' + data.error); return; }
+    G = data;
+    if (data.ai) {
+      const a = data.ai;
+      $('think').textContent = `${a.ms} ms / ${a.sims} sims`;
+      $('eval').textContent = (a.rootValue >= 0 ? '+' : '') + a.rootValue.toFixed(3);
+      log(`ai: ${describe(a.action)}  ${a.ms}ms  ${a.sims} sims  v=${a.rootValue.toFixed(3)}`);
+    }
+  } catch (e) { log('error: ' + e.message); }
+  finally { busy = false; render(); }
+}
+
+function describe(a) {
+  return a.kind === 'pawn' ? `pawn -> ${a.to.r},${a.to.c}` : `wall ${a.wall}`;
+}
+
+async function newGame() {
+  busy = true;
+  $('status').textContent = 'starting…';
+  const r = await fetch('/api/new', { method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ humanSide: $('side').value, sims: Number($('sims').value) }) });
+  G = await r.json();
+  busy = false;
+  $('log').innerHTML = '';
+  if (G.ai) log(`ai opens: ${describe(G.ai.action)}  ${G.ai.ms}ms`);
+  render();
+}
+$('new').addEventListener('click', newGame);
+
+fetch('/api/health').then((r) => r.json()).then((h) => {
+  $('wasm').textContent = h.wasm || '?';
+  $('net').textContent = h.network
+    ? `${h.network.version} (${h.network.device})` : 'unreachable';
+}).catch(() => { $('net').textContent = 'unreachable'; });
+
+newGame();
+</script>
+</body>
+</html>

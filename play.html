@@ -1,0 +1,722 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<meta name="theme-color" content="#070c16">
+<title>Quoridor Zero &mdash; play the network</title>
+<link rel="icon" href="/icon-192.png">
+<style>
+/* Palette, board skin and stone colours are the app's own (board_midnight, PC/PD).
+   This page shares the app's LOOK and its rules engine, and none of its
+   player-vs-player machinery: no Firebase, no lobbies, no auth, no websocket. */
+:root{
+  --bg:#070c16; --card:#161e33; --border:#252d44; --muted:#94a3b8; --subtle:#64748b;
+  --goal:#0d2a1c;
+  --a:#ef4444; --a-d:#7f1d1d;          /* red  */
+  --b:#3b82f6; --b-d:#1e3a5f;          /* blue */
+  --wall:#e0a94f; --wall-d:#7c5312;
+  --board:linear-gradient(170deg,#101426,#0a0d1c 52%,#05070f);
+  --line:rgba(140,160,220,0.10);
+  --cell:46px; --gap:9px;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:var(--bg);color:#e8edf7;
+  font:15px/1.55 system-ui,-apple-system,sans-serif;padding:16px 14px 36px}
+h1{font-size:22px;margin:0;font-weight:800;letter-spacing:-.2px}
+header{max-width:940px;margin:0 auto 16px;display:flex;flex-direction:column;
+  align-items:center;gap:7px;text-align:center}
+.chip{font:600 10px/1 ui-monospace,Menlo,monospace;color:var(--muted);
+  border:1px solid var(--border);border-radius:999px;padding:5px 9px;white-space:nowrap}
+/* two columns: board on the left, everything measured on the right */
+/* One screen: standings | board | analysis. The board is fixed width, so the two
+   side columns take the slack and everything stays visible without scrolling. */
+#page{max-width:1300px;margin:0 auto;display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap}
+#lb{flex:1 1 290px;min-width:262px;display:flex;flex-direction:column;gap:10px}
+#left{flex:0 0 auto}
+#right{flex:1 1 300px;min-width:268px;display:flex;flex-direction:column;gap:10px}
+/* Compressed for the sidebar: the standings are context, not the main event. */
+#lb table{font-size:10px}
+#lb th{font-size:8px;padding:2px 4px}
+#lb td{padding:2px 4px}
+#lb .card{padding:10px 11px}
+#lb .tot div{padding:7px 4px}
+#lb .tot b{font-size:16px}
+#lb .tot span{font-size:8px}
+#lb td.nm{max-width:0;width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#lb td,#lb th{white-space:nowrap}
+#meName{max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:inline-block;
+  vertical-align:bottom}
+.card{background:var(--card);border:1px solid var(--border);border-radius:14px;padding:12px 14px}
+.card h2{font:700 10px/1 ui-monospace,Menlo,monospace;color:var(--subtle);
+  margin:0 0 9px;letter-spacing:1.2px;text-transform:uppercase}
+/* ---- wall counters above the board, like the app's counter ---- */
+#tally{display:flex;gap:10px;margin-bottom:10px}
+.side{flex:1;display:flex;align-items:center;gap:9px;background:var(--card);
+  border:1px solid var(--border);border-radius:12px;padding:9px 11px;
+  transition:border-color .2s,box-shadow .2s}
+.side.on{border-color:rgba(255,255,255,.28);box-shadow:0 0 0 1px rgba(255,255,255,.07) inset}
+.dot{width:16px;height:16px;border-radius:50%;flex:0 0 auto}
+.dot.A{background:radial-gradient(circle at 34% 30%,#ff7a7a,var(--a) 55%,var(--a-d))}
+.dot.B{background:radial-gradient(circle at 34% 30%,#7cb0ff,var(--b) 55%,var(--b-d))}
+.who{font:700 11px/1.2 system-ui;flex:1;min-width:0}
+.who em{display:block;font:600 9px/1.3 ui-monospace,Menlo,monospace;
+  color:var(--subtle);font-style:normal}
+.bricks{display:flex;align-items:center;gap:5px;font:800 13px/1 ui-monospace,Menlo,monospace}
+.bricks svg{opacity:.9}
+#sTop .bricks svg{color:var(--a)}
+#sBot .bricks svg{color:var(--b)}
+/* ---- board ---- */
+/* The board is the focus of the page, so it gets a real frame rather than a hairline:
+   a brighter rim, a crisp dark outer edge to separate it from the background, a soft
+   outward glow, and inset highlight/shadow so the frame reads as raised rather than
+   drawn on. */
+#wrap{position:relative;background:var(--board);
+  border:2px solid rgba(150,175,235,.30);
+  border-radius:18px;padding:14px;
+  box-shadow:
+    0 0 0 1px rgba(0,0,0,.65),
+    0 0 26px rgba(90,130,225,.16),
+    0 24px 60px rgba(0,0,0,.62),
+    inset 0 1px 0 rgba(255,255,255,.10),
+    inset 0 -1px 0 rgba(0,0,0,.55)}
+#grid{position:relative;width:calc(9*var(--cell) + 8*var(--gap));
+  height:calc(9*var(--cell) + 8*var(--gap))}
+.sq{position:absolute;width:var(--cell);height:var(--cell);border-radius:7px;
+  background:rgba(255,255,255,.028);border:1px solid rgba(255,255,255,.045);
+  transition:background .12s,transform .12s}
+/* Goal rows carry a gradient that falls AWAY from the edge each side is running at,
+   so the pull of the board reads at a glance: red's target is the top row, blue's the
+   bottom. The far end of each gradient lands on the same tint as an ordinary square so
+   the row blends into the board instead of ending on a hard line. */
+.sq.gA{background:linear-gradient(180deg,rgba(239,68,68,.20),rgba(239,68,68,.05) 62%,
+    rgba(255,255,255,.028));
+  box-shadow:inset 0 -3px 0 rgba(239,68,68,.35)}
+.sq.gB{background:linear-gradient(0deg,rgba(59,130,246,.20),rgba(59,130,246,.05) 62%,
+    rgba(255,255,255,.028));
+  box-shadow:inset 0 3px 0 rgba(59,130,246,.35)}
+.sq.tgt{cursor:pointer}
+.sq.tgt::after{content:'';position:absolute;left:50%;top:50%;width:13px;height:13px;
+  margin:-6.5px 0 0 -6.5px;border-radius:50%;background:rgba(255,255,255,.5)}
+.sq.tgt:hover{background:rgba(255,255,255,.11);transform:scale(1.05)}
+.pawn{position:absolute;width:calc(var(--cell) - 12px);height:calc(var(--cell) - 12px);
+  border-radius:50%;z-index:3;display:flex;align-items:center;justify-content:center;
+  font:800 9px/1 system-ui;color:#fff;
+  transition:left .2s cubic-bezier(.4,1.3,.5,1),top .2s cubic-bezier(.4,1.3,.5,1)}
+.pawn.A{background:radial-gradient(circle at 34% 30%,#ff7a7a,var(--a) 55%,var(--a-d));
+  box-shadow:0 3px 10px rgba(239,68,68,.5),inset 0 1px 0 rgba(255,255,255,.35)}
+.pawn.B{background:radial-gradient(circle at 34% 30%,#7cb0ff,var(--b) 55%,var(--b-d));
+  box-shadow:0 3px 10px rgba(59,130,246,.5),inset 0 1px 0 rgba(255,255,255,.35)}
+.wall{position:absolute;border-radius:4px;z-index:2;
+  /* Neutral gold is the FALLBACK only: a wall whose placer is unknown (a position
+     loaded without its history) should not be attributed to either side. */
+  background:linear-gradient(180deg,#f2c368,var(--wall) 45%,var(--wall-d));
+  box-shadow:0 2px 8px rgba(0,0,0,.5),inset 0 1px 0 rgba(255,255,255,.4);
+  animation:pop .18s ease}
+.wall.wA{background:linear-gradient(180deg,#ff8f8f,var(--a) 45%,var(--a-d));
+  box-shadow:0 2px 8px rgba(0,0,0,.5),0 0 10px rgba(239,68,68,.25),inset 0 1px 0 rgba(255,255,255,.4)}
+.wall.wB{background:linear-gradient(180deg,#8fbcff,var(--b) 45%,var(--b-d));
+  box-shadow:0 2px 8px rgba(0,0,0,.5),0 0 10px rgba(59,130,246,.25),inset 0 1px 0 rgba(255,255,255,.4)}
+@keyframes pop{from{transform:scale(.6);opacity:0}to{transform:scale(1);opacity:1}}
+.slot{position:absolute;z-index:1;border-radius:4px;cursor:pointer;background:transparent}
+.slot:hover{background:rgba(224,169,79,.34)}
+#grid.meA .slot:hover{background:rgba(239,68,68,.38)}
+#grid.meB .slot:hover{background:rgba(59,130,246,.38)}
+#status{margin-top:11px;text-align:center;font-weight:700;min-height:24px}
+.thinking{color:var(--b)}.win{color:#4ade80}.lose{color:var(--a)}.draw{color:var(--wall)}
+/* ---- confidence ---- */
+#gauge{position:relative;height:26px;border-radius:8px;overflow:hidden;
+  background:linear-gradient(90deg,#2a1520,#141d33);border:1px solid var(--border)}
+#gfill{position:absolute;inset:0 auto 0 0;transition:width .45s cubic-bezier(.4,1.2,.5,1)}
+#gmid{position:absolute;left:50%;top:0;bottom:0;width:1px;background:rgba(255,255,255,.32)}
+#glab{position:absolute;inset:0;display:flex;align-items:center;justify-content:space-between;
+  padding:0 8px;font:800 10px/1 ui-monospace,Menlo,monospace;
+  text-shadow:0 1px 3px rgba(0,0,0,.85);pointer-events:none}
+#spark{display:block;width:100%;height:54px;margin-top:9px;
+  background:rgba(255,255,255,.02);border-radius:7px}
+.kv{display:flex;justify-content:space-between;gap:10px;
+  font:600 11px/1.75 ui-monospace,Menlo,monospace}
+.kv span{color:var(--subtle)}
+#hist{max-height:210px;overflow:auto;font:600 11px/1.65 ui-monospace,Menlo,monospace}
+#hist div{display:flex;gap:8px;padding:1px 0;border-bottom:1px solid rgba(255,255,255,.04)}
+#hist b{width:22px;color:var(--subtle);font-weight:600}
+#hist .mv{flex:1}
+#hist .A .mv{color:#fca5a5}#hist .B .mv{color:#93c5fd}
+#hist .ev{color:var(--subtle)}
+button{background:#232c44;color:#e8edf7;border:1px solid #38415c;border-radius:9px;
+  padding:10px 12px;font:700 12px/1 system-ui;cursor:pointer;width:100%}
+button:hover{background:#2b3550}
+button.primary{background:linear-gradient(135deg,#2563eb,#4f46e5);border-color:transparent}
+/* Forfeit is red at rest. A resignation is not undoable, so it still takes a
+   second click -- and the armed state has to look clearly different from the
+   resting one, or the confirm step reads as decoration. */
+button.danger{background:linear-gradient(135deg,#b3261f,#7f1d1d);border-color:#8f2b22;
+  color:#ffeaea}
+button.danger:hover{background:linear-gradient(135deg,#c62d24,#8d1f1f)}
+button.arm{background:linear-gradient(135deg,#ef4444,#b91c1c);border-color:transparent;
+  color:#fff;box-shadow:0 0 0 3px rgba(239,68,68,.28)}
+button.arm:hover{background:linear-gradient(135deg,#f45b5b,#c62d24)}
+.hint{color:var(--subtle);font-size:11px;line-height:1.5}
+/* ---- home ---- */
+#home{max-width:720px;margin:0 auto;display:flex;flex-direction:column;gap:12px}
+.row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+input[type=text]{flex:1 1 160px;background:#0e1424;color:#e8edf7;border:1px solid var(--border);
+  border-radius:9px;padding:10px 12px;font:600 13px/1 system-ui}
+input[type=text]:focus{outline:none;border-color:#3b82f6}
+table{width:100%;border-collapse:collapse;font:600 11px/1.7 ui-monospace,Menlo,monospace}
+th{text-align:left;color:var(--subtle);font-weight:600;padding:2px 6px;
+  border-bottom:1px solid var(--border);text-transform:uppercase;letter-spacing:.8px;font-size:9px}
+td{padding:3px 6px;border-bottom:1px solid rgba(255,255,255,.04)}
+/* Numeric columns: the header has to be right-aligned TOO. `td.n` alone left the
+   headings hanging left of their own values, because the bare `th` rule wins for
+   header cells. Fixed narrow widths keep the numbers as a tight block instead of
+   letting the player column push them apart. */
+th.n,td.n{text-align:right;white-space:nowrap}
+th.n{width:44px}
+th.n:last-child{width:58px}
+td:first-child,th:first-child{padding-left:2px}
+.rank{color:var(--subtle);width:20px}
+.res-win{color:#4ade80}.res-loss{color:var(--a)}.res-draw{color:var(--wall)}
+.res-forfeit{color:#f97316}
+.tot{display:flex;gap:10px}
+.tot div{flex:1;text-align:center;background:#0e1424;border:1px solid var(--border);
+  border-radius:11px;padding:10px 6px}
+.tot b{display:block;font:800 20px/1.2 system-ui}
+.tot span{font:600 9px/1 ui-monospace;color:var(--subtle);text-transform:uppercase;letter-spacing:.9px}
+.err{color:#fca5a5;font-size:11px}
+/* Expand control: a link, not a button -- it reveals rows, it does not act. */
+button.link{background:none;border:0;color:var(--muted);padding:5px 0 0;width:auto;
+  font:700 10px/1 ui-monospace,Menlo,monospace;cursor:pointer;text-transform:uppercase;
+  letter-spacing:.8px}
+button.link:hover{background:none;color:#cbd5e1;text-decoration:underline}
+@media(max-width:1260px){#lb,#left,#right{flex:1 1 100%}}
+@media(max-width:520px){:root{--cell:33px;--gap:7px}}
+</style>
+</head>
+<body>
+<header>
+  <h1>Quoridor Zero</h1>
+  <div class="chip" id="ckpt">loading&hellip;</div>
+</header>
+
+<div id="page">
+  <div id="lb">
+    <div class="card">
+      <div class="kv" style="font-size:12px"><span id="authTitle">you</span>
+        <b id="meName">—</b></div>
+      <div class="hint" id="meRec"></div>
+      <div class="hint" id="noId" style="display:none">Not identified — open this site
+        by its tailnet hostname so Tailscale can vouch for you.</div>
+    </div>
+    <div class="card">
+      <h2>everyone vs the network</h2>
+      <div class="tot">
+        <div><b id="tHum">0</b><span>human</span></div>
+        <div><b id="tBot">0</b><span>network</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>last 10 games</h2>
+      <table><thead><tr><th>when</th><th>player</th><th>result</th></tr></thead>
+        <tbody id="recentBody"><tr><td colspan="3" style="color:var(--subtle)">no games yet</td></tr></tbody></table>
+    </div>
+    <div class="card">
+      <h2>all-time record</h2>
+      <table><thead><tr><th></th><th>player</th><th class="n">W</th><th class="n">L</th></tr></thead>
+        <tbody id="lbBody"><tr><td colspan="5" style="color:var(--subtle)">no games yet</td></tr></tbody></table>
+      <button id="lbMore" class="link" style="display:none"></button>
+    </div>
+  </div>
+  <div id="left">
+    <!-- Wall counts sit above the board, as in the app, so the resource you spend
+         is next to the thing you spend it on. -->
+    <div id="tally">
+      <div class="side" id="sTop">
+        <div class="dot B" id="dTop"></div>
+        <div class="who" id="nTop">network<em id="gTop"></em></div>
+        <div class="bricks"><svg width="12" height="12" viewBox="0 0 24 24"><g fill="currentColor">
+          <rect x="2" y="4" width="9" height="6" rx="1"/><rect x="13" y="4" width="9" height="6" rx="1"/>
+          <rect x="7" y="12" width="10" height="6" rx="1"/></g></svg><span id="wTop">10</span></div>
+      </div>
+      <div class="side" id="sBot">
+        <div class="dot A" id="dBot"></div>
+        <div class="who" id="nBot">you<em id="gBot"></em></div>
+        <div class="bricks"><svg width="12" height="12" viewBox="0 0 24 24"><g fill="currentColor">
+          <rect x="2" y="4" width="9" height="6" rx="1"/><rect x="13" y="4" width="9" height="6" rx="1"/>
+          <rect x="7" y="12" width="10" height="6" rx="1"/></g></svg><span id="wBot">10</span></div>
+      </div>
+    </div>
+    <div id="wrap"><div id="grid"></div></div>
+    <div id="status">starting&hellip;</div>
+  </div>
+
+  <div id="right">
+    <div class="card">
+      <h2>who is winning</h2>
+      <div id="gauge"><div id="gfill"></div><div id="gmid"></div>
+        <div id="glab"><span id="glabL">you</span><span id="glabR">network</span></div></div>
+      <svg id="spark" viewBox="0 0 300 54" preserveAspectRatio="none"
+           aria-label="network confidence across the game"></svg>
+      <div class="hint" id="ghint">The network's own value estimate, sampled each time it
+        moves. One forward pass at the position &mdash; not the search's verdict.</div>
+    </div>
+
+    <div class="card">
+      <h2>model</h2>
+      <div class="kv"><span>checkpoint</span><b id="mCk">&mdash;</b></div>
+      <div class="kv"><span>device</span><b id="mDev">&mdash;</b></div>
+      <div class="kv"><span>last think</span><b id="mMs">&mdash;</b></div>
+      <div class="kv"><span>avg / move</span><b id="mAvg">&mdash;</b></div>
+    </div>
+
+    <div class="card">
+      <h2>history</h2>
+      <div id="hist"><div style="border:0;color:var(--subtle)">no moves yet</div></div>
+    </div>
+
+    <button id="act" class="danger">Forfeit</button>
+    <button id="resume" class="primary" style="margin-top:8px;display:none">Resume</button>
+    <div class="hint">Click a highlighted square to move, or a gap between squares to
+      place a wall. Sides are drawn at random each game. A wall can never seal a
+      player off entirely.</div>
+  </div>
+</div>
+
+<script type="module">
+import { createInitialState, applyAction, legalActions }
+  from '/js/normal-duel-engine.mjs';
+
+// Written out rather than imported from tests/: this page should not depend on test
+// fixtures, and it documents exactly the variant the network was trained on.
+// firstPlayer is A BY RULE -- see newGame() for how sides are randomised.
+const CONFIG = Object.freeze({
+  ruleset: 'normal-duel-v1', rows: 9, columns: 9,
+  start: { A: { r: 8, c: 4 }, B: { r: 0, c: 4 } },
+  goalRows: { A: 0, B: 8 }, initialStock: { A: 10, B: 10 },
+  jumpRule: 'permissive-adjacent-exit-v1', repetitionThreshold: 3,
+  plyCap: 200, firstPlayer: 'A'
+});
+// Fixed at 512, and not surfaced in the UI. This is the budget the checkpoint's
+// targets were generated at; whether more search helps above it is still being
+// measured, so the site neither exposes nor advertises the number.
+const SIMS = 512;
+
+const $ = (id) => document.getElementById(id);
+const px = (n) => `${n}px`;
+const cssVar = (n) => parseFloat(getComputedStyle(document.documentElement).getPropertyValue(n));
+const at = (i) => i * (cssVar('--cell') + cssVar('--gap'));
+
+let state, human = 'A', history = [], busy = false, trend = [], times = [];
+// ---- identity and results -------------------------------------------------
+// There is no sign-in. Tailscale authenticates the device before HTTP exists and
+// tailscaled stamps the user onto the proxied request, so the server knows who is
+// calling and the browser cannot claim to be anyone else. Nothing is stored here.
+
+// An in-progress game survives a refresh. Only the SIDE and the MOVE LIST are
+// stored: the rules state, the confidence trend and the timings are all derived, so
+// replaying the list through the engine reproduces the position exactly and there is
+// no second source of truth to drift.
+const SKEY = 'qz_game';
+let me = null, recorded = false, ckptLabel = '';
+let lbPlayers = [], lbExpanded = false;
+const LB_FOLD = 10;
+
+function renderPlayers() {
+  const rows = lbExpanded ? lbPlayers : lbPlayers.slice(0, LB_FOLD);
+  $('lbBody').innerHTML = rows.length ? rows.map((p, i) =>
+    `<tr><td class="rank">${i + 1}</td><td class="nm">${esc(p.name)}</td>`
+    + `<td class="n">${p.w}</td><td class="n">${p.l}</td></tr>`).join('')
+    : '<tr><td colspan="4" style="color:var(--subtle)">no games yet</td></tr>';
+  const hidden = lbPlayers.length - LB_FOLD;
+  const more = $('lbMore');
+  if (hidden > 0) {
+    more.style.display = '';
+    more.textContent = lbExpanded ? 'show top 10' : `show all ${lbPlayers.length}`;
+  } else {
+    more.style.display = 'none';
+  }
+}
+const show = (id, on) => { $(id).style.display = on ? '' : 'none'; };
+
+function saveGame() {
+  try {
+    if (!state) return;
+    localStorage.setItem(SKEY, JSON.stringify({
+      v: 1, human, forfeited, trend, times,
+      history, over: over(), ts: Date.now()
+    }));
+  } catch { /* a full or blocked localStorage must not break play */ }
+}
+
+function restoreGame() {
+  let d;
+  try { d = JSON.parse(localStorage.getItem(SKEY) || 'null'); } catch { return false; }
+  if (!d || d.v !== 1 || !Array.isArray(d.history) || d.over) return false;
+  try {
+    human = d.human === 'B' ? 'B' : 'A';
+    state = createInitialState(CONFIG);
+    for (const m of d.history) {
+      if (m.type === 'move') state = applyAction(CONFIG, state, { kind: 'pawn', to: { r: m.r, c: m.c } });
+      else if (m.type === 'wall') state = applyAction(CONFIG, state, { kind: 'wall', wall: m.k });
+    }
+    history = d.history; trend = d.trend || []; times = d.times || [];
+    forfeited = !!d.forfeited; armed = false; recorded = false; stalled = false;
+  } catch {
+    // A stored game that no longer replays (a rules change, a corrupted entry) is
+    // discarded rather than half-loaded into an inconsistent board.
+    localStorage.removeItem(SKEY);
+    return false;
+  }
+  return true;
+}
+
+
+
+async function refreshBoard() {
+  try {
+    const d = await fetch('/api/leaderboard').then(r => r.json());
+    $('tHum').textContent = d.totals.humanWins;
+    $('tBot').textContent = d.totals.botWins;
+    lbPlayers = d.players;
+    renderPlayers();
+    $('recentBody').innerHTML = d.recent.length ? d.recent.map((g) =>
+      `<tr><td>${ago(g.ts)}</td><td class="nm">${esc(g.name)}</td>`
+      + `<td class="res-${g.result}">${g.result === 'win' ? 'beat it'
+        : g.result === 'forfeit' ? 'forfeited' : 'lost'}</td></tr>`).join('')
+      : '<tr><td colspan="3" style="color:var(--subtle)">no games yet</td></tr>';
+    if (me) {
+      const mine = d.players.find(p => p.name === me.name);
+      $('meRec').textContent = mine
+        ? `${mine.w}W ${mine.l}L over ${mine.games} game${mine.games === 1 ? '' : 's'}`
+        : 'no games yet';
+    }
+    renderIdentity();
+  } catch (e) {
+    // Reported where there is somewhere to report it. Writing to an element that no
+    // longer exists would throw INSIDE the catch and hide the real failure.
+    $('meRec').textContent = `standings unavailable: ${e.message}`;
+  }
+}
+
+const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+function ago(ts) {
+  const s2 = Math.max(0, (Date.now() - new Date(ts).getTime()) / 1000);
+  if (s2 < 60) return 'just now';
+  if (s2 < 3600) return `${Math.floor(s2 / 60)}m ago`;
+  if (s2 < 86400) return `${Math.floor(s2 / 3600)}h ago`;
+  return `${Math.floor(s2 / 86400)}d ago`;
+}
+
+function renderIdentity() {
+  show('noId', !me);
+  if (!me) { $('authTitle').textContent = 'not identified'; return; }
+  $('authTitle').textContent = 'you';
+  $('meName').textContent = me.name;
+}
+
+
+async function reportResult(result) {
+  if (recorded || !me) return;
+  recorded = true;
+  try {
+    await fetch('/api/result', { method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ result, side: human, plies: state.ply,
+                             checkpoint: ckptLabel, sims: SIMS }) });
+    refreshBoard();      // the standings are on screen now, so keep them current
+  } catch { /* the game still stands locally; the record is not worth a crash */ }
+}
+// Resigning is a real outcome, not a reset: the game is over and lost. Tracked
+// separately from state.outcome because the rules engine only produces outcomes
+// from legal actions, and there is no "resign" action in the ruleset.
+let forfeited = false, armed = false;
+// Set when the network's move could not be obtained. The game is NOT over -- it is
+// the network's turn and nothing is driving it -- so the player needs a way back in.
+// Without this a single dropped request froze the game permanently.
+let stalled = false;
+const over = () => forfeited || state.outcome.kind !== 'ongoing';
+
+function drawSpark() {
+  const el = $('spark');
+  if (trend.length < 2) { el.innerHTML = ''; return; }
+  const W = 300, H = 54, n = trend.length;
+  const x = (i) => (i / (n - 1)) * W;
+  const y = (v) => H - ((v + 1) / 2) * H;      // network confidence upward
+  const pts = trend.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(' ');
+  el.innerHTML =
+    `<line x1="0" y1="${H / 2}" x2="${W}" y2="${H / 2}" stroke="rgba(255,255,255,.18)" stroke-dasharray="3 3"/>`
+    + `<path d="M0,${H} L${pts.split(' ').join(' L')} L${W},${H} Z" fill="rgba(59,130,246,.15)"/>`
+    + `<polyline points="${pts}" fill="none" stroke="#60a5fa" stroke-width="2"/>`
+    + `<circle cx="${x(n - 1).toFixed(1)}" cy="${y(trend[n - 1]).toFixed(1)}" r="3.2" fill="#60a5fa"/>`;
+}
+
+// The value is always from the mover's perspective and we only ask on the network's
+// turn, so it is the NETWORK's confidence regardless of which colour it drew.
+function showConfidence(v) {
+  const bot = (v + 1) / 2;
+  const botIsA = human === 'B';
+  $('gfill').style.width = `${(1 - bot) * 100}%`;
+  $('gfill').style.background = botIsA
+    ? 'linear-gradient(90deg,var(--b),#7cb0ff)' : 'linear-gradient(90deg,var(--a),#f87171)';
+  $('glabL').textContent = `you ${Math.round((1 - bot) * 100)}%`;
+  $('glabR').textContent = `network ${Math.round(bot * 100)}%`;
+  drawSpark();
+}
+
+function renderHistory() {
+  const h = $('hist');
+  if (!history.length) { h.innerHTML = '<div style="border:0;color:var(--subtle)">no moves yet</div>'; return; }
+  h.innerHTML = history.map((m, i) => {
+    const who = m.p === human ? 'you' : 'net';
+    const txt = m.type === 'forfeit' ? 'forfeited'
+      : m.type === 'wall' ? `wall ${m.k}` : `→ r${m.r}c${m.c}`;
+    const ev = m.ev !== undefined ? `${m.ev >= 0 ? '+' : ''}${m.ev.toFixed(2)}` : '';
+    return `<div class="${m.p}"><b>${i + 1}</b><span class="mv">${who} ${txt}</span>`
+      + `<span class="ev">${ev}</span></div>`;
+  }).reverse().join('');
+}
+
+function draw() {
+  const g = $('grid');
+  g.innerHTML = '';
+  // The rules state carries a flat list of wall keys with no placer, so ownership
+  // is reconstructed from the move history -- which is also why a wall shows
+  // neutral if its placement was never recorded.
+  const owner = new Map();
+  for (const m of history) if (m.type === 'wall') owner.set(m.k, m.p);
+  g.className = human === 'A' ? 'meA' : 'meB';
+  const p = state.position;
+  const mine = p.turn === human && state.outcome.kind === 'ongoing' && !busy && !forfeited;
+  const acts = mine ? legalActions(CONFIG, state) : [];
+  const targets = new Set(acts.filter(a => a.kind === 'pawn').map(a => `${a.to.r},${a.to.c}`));
+  const openWalls = new Set(acts.filter(a => a.kind === 'wall').map(a => a.wall));
+
+  for (let r = 0; r < 9; r++) for (let c = 0; c < 9; c++) {
+    const d = document.createElement('div');
+    d.className = 'sq' + (r === 0 ? ' gA' : r === 8 ? ' gB' : '');
+    d.style.left = px(at(c)); d.style.top = px(at(r));
+    if (targets.has(`${r},${c}`)) {
+      d.classList.add('tgt');
+      d.onclick = () => play({ kind: 'pawn', to: { r, c } });
+    }
+    g.appendChild(d);
+  }
+  // Walls are bars drawn OVER the grid: a wall spans two squares plus the gap
+  // between them, which a cell-per-gutter layout cannot represent honestly.
+  const T = Math.max(5, Math.round(cssVar('--gap') * 0.8));
+  const bar = (w, cls, click) => {
+    const [kind, rs, cs2] = w.split('-');
+    const r = +rs, c = +cs2, span = 2 * cssVar('--cell') + cssVar('--gap');
+    const e = document.createElement('div');
+    e.className = cls;
+    if (kind === 'H') {
+      e.style.left = px(at(c)); e.style.width = px(span);
+      e.style.top = px(at(r) + cssVar('--cell') + (cssVar('--gap') - T) / 2); e.style.height = px(T);
+    } else {
+      e.style.top = px(at(r)); e.style.height = px(span);
+      e.style.left = px(at(c) + cssVar('--cell') + (cssVar('--gap') - T) / 2); e.style.width = px(T);
+    }
+    if (click) e.onclick = click;
+    g.appendChild(e);
+  };
+  for (const w of p.walls) {
+    const who = owner.get(w);
+    bar(w, 'wall' + (who ? ` w${who}` : ''), null);
+  }
+  for (const w of openWalls) bar(w, 'slot', () => play({ kind: 'wall', wall: w }));
+
+  for (const who of ['A', 'B']) {
+    const e = document.createElement('div');
+    e.className = `pawn ${who}`;
+    e.style.left = px(at(p.pawns[who].c) + 6);
+    e.style.top = px(at(p.pawns[who].r) + 6);
+    e.textContent = who === human ? 'YOU' : '';
+    g.appendChild(e);
+  }
+
+  // Top row of the tally is whoever is heading UP the board (goal row 0), which is
+  // always A; bottom is B. Which of them is you depends on the draw.
+  const bot = human === 'A' ? 'B' : 'A';
+  $('dTop').className = 'dot A'; $('dBot').className = 'dot B';
+  $('nTop').firstChild.textContent = human === 'A' ? 'you' : 'network';
+  $('nBot').firstChild.textContent = human === 'B' ? 'you' : 'network';
+  $('gTop').textContent = 'red · to the top row';
+  $('gBot').textContent = 'blue · to the bottom row';
+  $('wTop').textContent = p.stock.A;
+  $('wBot').textContent = p.stock.B;
+  $('sTop').classList.toggle('on', p.turn === 'A');
+  $('sBot').classList.toggle('on', p.turn === 'B');
+
+  // Report once per game, from the player's point of view.
+  if (over() && !recorded && me) {
+    reportResult(forfeited ? 'forfeit'
+      : state.outcome.kind === 'draw' ? 'draw'
+      : state.outcome.winner === human ? 'win' : 'loss');
+  }
+  show('resume', stalled && !over());
+  const st = $('status');
+  if (forfeited) {
+    st.className = 'lose'; st.textContent = 'you forfeited — the network wins';
+  } else if (state.outcome.kind === 'win') {
+    const won = state.outcome.winner === human;
+    st.className = won ? 'win' : 'lose';
+    st.textContent = won ? 'you win' : 'the network wins';
+  } else if (state.outcome.kind === 'draw') {
+    st.className = 'draw'; st.textContent = `draw — ${state.outcome.reason}`;
+  } else if (busy) {
+    st.className = 'thinking'; st.textContent = 'thinking…';
+  } else {
+    st.className = ''; st.textContent = mine ? 'your move' : 'the network is to move';
+  }
+  // One button: resign while a game is live, start another once it is decided.
+  const b = $('act');
+  if (over()) {
+    b.textContent = 'new game'; b.className = 'primary'; armed = false;
+  } else {
+    b.textContent = armed ? 'Click again to confirm' : 'Forfeit';
+    b.className = armed ? 'arm' : 'danger';
+  }
+  renderHistory();
+  saveGame();
+}
+
+function record(action, by, ev) {
+  const m = action.kind === 'pawn'
+    ? { type: 'move', p: by, r: action.to.r, c: action.to.c }
+    : { type: 'wall', p: by, k: action.wall };
+  if (ev !== undefined) m.ev = ev;
+  history.push(m);
+  state = applyAction(CONFIG, state, action);
+}
+
+// A move can take seconds, so a hung socket must not wait forever, and a dropped
+// request must not end the game. Transient failures (network error, 5xx, timeout)
+// are retried with backoff; a 4xx is a real refusal -- a wrong board or a history
+// that does not replay -- and retrying it would just fail identically.
+async function requestMove(signal) {
+  const r = await fetch('/api/bestmove', {
+    method: 'POST', signal, headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      // The server replays this history to rebuild the rules state, so it carries
+      // only the fields it expects; `ev` and `forfeit` are ours and are filtered.
+      history: history.filter(m => m.type === 'move' || m.type === 'wall')
+        .map(({ type, p, r: rr, c, k }) => ({ type, p, r: rr, c, k })),
+      sims: SIMS, seed: history.length + 1,
+      board: { map: 'duel', duelSize: 'standard', initialStock: 10 },
+      expect: { pawns: state.position.pawns, walls: state.position.walls,
+                stock: state.position.stock, turn: state.position.turn }
+    })
+  });
+  const d = await r.json().catch(() => ({ error: `http_${r.status}` }));
+  if (!r.ok || d.error) {
+    const err = new Error(d.detail || d.error || `http_${r.status}`);
+    err.permanent = r.status >= 400 && r.status < 500;
+    throw err;
+  }
+  return d;
+}
+
+async function askNetwork() {
+  if (busy) return;
+  busy = true; stalled = false; draw();
+  const ATTEMPTS = 4;
+  try {
+    for (let i = 1; i <= ATTEMPTS; i += 1) {
+      const ctl = new AbortController();
+      // Generous: 512 simulations is ~5s on CPU, and a cold server is slower still.
+      const timer = setTimeout(() => ctl.abort(), 20000 + SIMS * 40);
+      try {
+        const d = await requestMove(ctl.signal);
+        clearTimeout(timer);
+        times.push(d.ms);
+        $('mMs').textContent = `${d.ms} ms`;
+        $('mAvg').textContent = `${Math.round(times.reduce((a, b) => a + b, 0) / times.length)} ms`;
+        trend.push(d.rootValue);
+        record(d.action, state.position.turn, d.rootValue);
+        showConfidence(d.rootValue);
+        return;
+      } catch (e) {
+        clearTimeout(timer);
+        if (e.permanent || i === ATTEMPTS) {
+          stalled = true;
+          $('status').className = 'lose';
+          $('status').textContent = e.permanent
+            ? `the network refused this position: ${e.message}`
+            : `lost contact with the network — press resume`;
+          return;
+        }
+        $('status').className = 'thinking';
+        $('status').textContent = `reconnecting (${i}/${ATTEMPTS - 1})…`;
+        await new Promise((z) => setTimeout(z, 400 * 2 ** (i - 1)));
+      }
+    }
+  } finally { busy = false; draw(); }
+}
+
+async function play(action) {
+  if (busy || forfeited || state.position.turn !== human) return;
+  armed = false;                          // making a move cancels a pending forfeit
+  record(action, human);
+  draw();
+  if (state.outcome.kind === 'ongoing') await askNetwork();
+}
+
+async function newGame() {
+  // Sides are drawn at random, which is how "who moves first" is randomised. A
+  // moves first BY RULE -- the rules config says so and the server replays every
+  // history against it, so flipping firstPlayer would make each replay illegal on
+  // its first entry. Randomising the COLOUR you play gives the same coin flip
+  // without contradicting the engine.
+  human = Math.random() < 0.5 ? 'A' : 'B';
+  state = createInitialState(CONFIG);
+  history = []; trend = []; times = [];
+  forfeited = false; armed = false; recorded = false; stalled = false;
+  $('mMs').textContent = '—'; $('mAvg').textContent = '—';
+  showConfidence(0);
+  draw();
+  if (state.position.turn !== human) await askNetwork();
+}
+$('act').addEventListener('click', () => {
+  if (over()) { newGame(); return; }
+  if (busy) return;                       // never resign mid-think by accident
+  if (!armed) { armed = true; draw(); return; }
+  forfeited = true; armed = false;
+  history.push({ type: 'forfeit', p: human });
+  draw();
+});
+
+$('lbMore').addEventListener('click', () => { lbExpanded = !lbExpanded; renderPlayers(); });
+$('resume').addEventListener('click', () => { if (!over()) askNetwork(); });
+document.addEventListener('visibilitychange', () => {
+  // Recover a turn that was dropped while the tab was hidden or the machine asleep.
+  if (document.visibilityState === 'visible' && stalled && !over() && !busy) askNetwork();
+});
+
+fetch('/api/me').then(r => r.json()).then(d => {
+  me = d.user;
+  refreshBoard();
+}).catch(() => refreshBoard());
+
+fetch('/api/health').then(r => r.json()).then(h => {
+  const n = h.network || {}, m = h.meta || {};
+  // No network means no opponent: this site has no built-in bot to stand in, so say
+  // so plainly instead of rendering "? · ?" as though a checkpoint were loaded.
+  if (!h.network) { $('ckpt').textContent = 'network unreachable'; return; }
+  $('ckpt').textContent = `${n.version || '?'} · ${n.device || '?'}`;
+  $('mCk').textContent = m.label || n.version || '—';
+  $('mDev').textContent = n.device || '—';
+  ckptLabel = m.label || n.version || '';
+}).catch(() => { $('ckpt').textContent = 'network unreachable'; });
+
+refreshBoard();
+if (restoreGame()) {
+  showConfidence(trend.length ? trend[trend.length - 1] : 0);
+  draw();
+  // A turn that was in flight when the page went away is re-driven here.
+  if (!over() && state.position.turn !== human) askNetwork();
+} else {
+  newGame();
+}
+</script>
+</body>
+</html>
