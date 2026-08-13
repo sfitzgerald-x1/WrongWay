@@ -4640,6 +4640,10 @@ function App(){
   const lastOnlineTs=useRef(0);
   const xpBeforeMatchRef=useRef(null);
   const pendingXpUpdateRef=useRef(null);
+  // A LOCAL generation counter for the AI effect's cancellation gate, deliberately
+  // separate from `gameNum` (which is peer-synced). Bumped by initGame, so any run still
+  // in flight from a previous game can tell that it no longer owns the board.
+  const aiGen=useRef(0);
   const S=useRef({});
   S.current={pA,pB,walls,barrLeft,turn,winner,moveHist,gameMode,lobbyId,onlineRole,rematchA,rematchB,rematchDeclined,oppLeft,gameNum,chaosItem,goldenWalls,hammers,hammerHeld,hammerUsed,hammerMode,chaosMode,dropMode,gaveUp,gameTimeMode,isRanked,rankedMode,rankedMyRating,rankedOppRating,rankedOppKey,playerNames,selectedMap,duelSize,initialStock:gameBarr,screen,bugOpen,repOpen,repSrc};
   // UI-Testhaken (?uitest=ban|warn): rein lokale Dummy-Overlays fuer Design-Sichtung, keine Datenwege
@@ -5144,7 +5148,17 @@ function App(){
     setDragging(null);setPreviewKey(null);setSnapPos(null);
     setRematchA(false);setRematchB(false);setRematchDeclined(null);setOppLeft(false);
     setChatMsgs([]);setChatInput('');
+    // BACK TO 0, and it must stay that way. `gameNum` is NOT a local counter: it is the
+    // shared online ROUND number, published to Firebase by doSync and consumed as
+    // remote-authoritative by the realtime listener. The reset is load-bearing -- with
+    // oldGN === 0 the first snapshot always survives the `newGN < oldGN` guard and can
+    // never take the "new round" branch, after which both clients converge on the host's
+    // number. Making it monotonic to serve the AI effect broke that: a client that had
+    // played a local game first would reject every snapshot of a later online match
+    // (dead board), or publish a larger number and trip the host into the new-round
+    // branch mid-game, wiping the move list. The AI effect gets its own counter below.
     setGameNum(0);
+    aiGen.current += 1;
     if(mode!=='online')setPlayerNames({A:null,B:null});
     if(mode==='online'&&lid){
       const acc=accRef.current;
@@ -5582,11 +5596,57 @@ function App(){
   },[gameMode,screen]);
 
   // ── AI ──
+  // ── Neural opponent (local) ──────────────────────────────────────────────
+  // 'neural' asks the trained network for the move instead of the hand-written
+  // heuristics. The network runs in a local server (scripts/play-server.mjs plus
+  // local-infer-mps.py); nothing here talks to the internet, and the online modes
+  // are untouched.
+  //
+  // The server REPLAYS moveHist to rebuild the engine state, because the rules
+  // engine ties ply/historyStartPly/stock together and a position alone is not a
+  // valid state. So the whole history goes over, and the server refuses the request
+  // if replaying it does not reproduce the position we think we are in -- better a
+  // fallback than a move chosen for a different board.
+  const NEURAL_SIMS_KEY='ww_neural_sims';
+  const[neuralSims,setNeuralSims]=useState(()=>{
+    const v=Number(localStorage.getItem(NEURAL_SIMS_KEY)); return v>=16?v:128;});
+  useEffect(()=>{localStorage.setItem(NEURAL_SIMS_KEY,String(neuralSims));},[neuralSims]);
+  const[neuralInfo,setNeuralInfo]=useState(null);
+  const neuralMove=async(st,w,aiGoal,stillOurs=()=>true)=>{
+    const hist=(st.moveHist||[]).filter(m=>m&&(m.type==='move'||m.type==='wall'));
+    const body={history:hist,sims:neuralSims,seed:hist.length+1,
+      board:{map:st.selectedMap,duelSize:st.duelSize,initialStock:st.initialStock,
+             chaos:!!st.chaosMode,hammer:!!st.hammerMode,drop:!!st.dropMode},
+      expect:{pawns:{A:st.pA,B:st.pB},walls:[...w],
+              stock:{A:st.barrLeft.A,B:st.barrLeft.B},turn:'B'}};
+    const r=await fetch('/api/bestmove',{method:'POST',
+      headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    const data=await r.json();
+    if(data.error)throw new Error(data.error);
+    // Gated: this is a post-await state write, so a run whose game has already been
+    // abandoned would otherwise repaint the ms/sims/value panel of the new one.
+    if(stillOurs())setNeuralInfo({ms:data.ms,sims:data.sims,value:data.rootValue});
+    if(data.action.kind==='pawn')return{type:'move',pos:{r:data.action.to.r,c:data.action.to.c}};
+    // The app stores the COMPLETE wall set and diffs it to find the new key.
+    return{type:'barricade',walls:new Set([...w,data.action.wall])};
+  };
+
   useEffect(()=>{
     if(gameMode!=='pvc'||turn!=='B'||winner||screen!=='game')return;
     setAiThinking(true);
-    const delay=aiDifficulty==='hard'?1100:aiDifficulty==='easy'?500:700;
-    const t=setTimeout(()=>{
+    const delay=aiDifficulty==='neural'?0:aiDifficulty==='hard'?1100:aiDifficulty==='easy'?500:700;
+    // CANCELLATION. The neural path awaits, so clearTimeout alone stopped being
+    // sufficient the moment this callback became async: a move can be in flight for
+    // seconds (and up to ~65s across retries), and when it resolves it unconditionally
+    // writes pawn, walls and move history built from the snapshot it captured. If the
+    // player left the game meanwhile -- back to the menu, new match -- those writes
+    // landed in the NEW game. `alive` is closed over by this run only and cleared by
+    // the cleanup, so every post-await write is gated on it.
+    let alive=true;
+    const genAtStart=aiGen.current;
+    const stillOurs=()=>alive&&aiGen.current===genAtStart
+      &&S.current.screen==='game'&&!S.current.winner;
+    const t=setTimeout(async()=>{
       const st=S.current;
       let a=st.pA,b=st.pB,w=new Set(st.walls),bl=st.barrLeft,moves=[...st.moveHist];
       const hms=st.hammers,hh=st.hammerHeld||{A:false,B:false};
@@ -5605,9 +5665,15 @@ function App(){
         const m=moves[i];
         if(m.type==='move'&&m.p==='B')recentAi.push({r:m.r,c:m.c});
       }
+      // The hammer heuristics below are the BUILT-IN bot, and under 'neural' they must
+      // not run at all. They sit before the neural call and assign `d`, so with hammer
+      // mode on they played a hand-written move while the difficulty said 'neural' --
+      // recorded as the network's game. The network's rules contain no hammer actions
+      // anyway, so there is nothing here for it to do.
+      const neural=aiDifficulty==='neural';
       // Hammer gratis nutzen, falls die AI sich selbst befreien kann
       let heldB=!!hh.B;
-      if(st.hammerMode&&heldB){
+      if(!neural&&st.hammerMode&&heldB){
         const bk=aiHammerBreak(b,w,aiGoal);
         if(bk){
           w.delete(bk);
@@ -5619,7 +5685,7 @@ function App(){
       }
       // Zug bestimmen: smarte Hammer-Logik
       let d=null;
-      if(st.hammerMode&&!heldB&&hms&&hms.length){
+      if(!neural&&st.hammerMode&&!heldB&&hms&&hms.length){
         const nh=nearestHammer(b,w,hms);
         const ownPath=bfsPath(b,w,aiGoal);
         const humPath=bfsPath(a,w,humGoal);
@@ -5640,6 +5706,68 @@ function App(){
           if(!(step.r===a.r&&step.c===a.c))d={type:'move',pos:step};
         }
       }
+      if(!d&&aiDifficulty==='neural'){
+        // NEVER substitute the heuristic bot. Picking 'neural' is a claim about WHICH
+        // opponent you are playing, and quietly swapping in the built-in bot answers
+        // instantly and reasonably well -- the game looks fine, the result gets
+        // recorded, and it was never the network's game. A banner did not fix that:
+        // the substituted moves still counted. So retry with backoff, and if the
+        // network stays down, the bot does not move. A stuck turn is honest; a
+        // different opponent is not.
+        const wait=(ms)=>new Promise(z=>setTimeout(z,ms));
+        const warn=(msg,fatal)=>{
+          let el=document.getElementById('ww-neural-warn');
+          if(!el){
+            el=document.createElement('div');
+            el.id='ww-neural-warn';
+            el.style.cssText='position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:9999;'
+              +'color:#fff;font:600 12px/1.4 system-ui,sans-serif;padding:10px 14px;'
+              +'border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.45);max-width:88vw;text-align:center';
+            document.body.appendChild(el);
+          }
+          el.style.background=fatal?'#7f1d1d':'#78350f';
+          el.textContent=msg;
+        };
+        const ATTEMPTS=12;
+        for(let i=1;i<=ATTEMPTS;i+=1){
+          try{ d=await neuralMove(st,w,aiGoal,stillOurs); break; }
+          catch(err){
+            if(!stillOurs()){setAiThinking(false);return;}
+            // A deterministic refusal is not a network outage: unsupported_board and
+            // history_replay_mismatch will fail identically twelve times and then be
+            // reported as "unreachable", which names the wrong cause. Say what it is,
+            // once, and stop.
+            if(/unsupported_board|history_replay_mismatch|blitz/.test(err.message)){
+              warn('The network cannot play this board ('+err.message+'). It plays the '
+                +'9x9 duel board with 10 walls a side and no hammer/chaos/drop modes.',true);
+              setAiThinking(false);
+              return;
+            }   // the game moved on
+            setNeuralInfo(null);
+            console.warn('neural opponent unavailable (attempt '+i+'):',err.message);
+            if(i===ATTEMPTS){
+              warn('The neural opponent is unreachable ('+err.message+'). It will not move, '
+                +'and the built-in bot will not play in its place. Reload once the network is back.',true);
+              setAiThinking(false);
+              return;                       // leave the turn unplayed, deliberately
+            }
+            warn('Neural opponent unreachable — retrying ('+i+'/'+(ATTEMPTS-1)+')…',false);
+            await wait(Math.min(8000,500*2**(i-1)));
+            // Also after the backoff: without this a dead run kept hammering
+            // /api/bestmove for up to ~65 s after the player had left the game.
+            if(!stillOurs()){setAiThinking(false);return;}
+          }
+        }
+        const done=document.getElementById('ww-neural-warn');
+        if(done)done.remove();
+        // The awaits above are the only ones in this callback, so this is the single
+        // point where a stale run must stop before it writes anything.
+        if(!stillOurs()){setAiThinking(false);return;}
+      }
+      // A neural game NEVER falls through to the built-in bot. Without this, any path
+      // that leaves `d` null -- including a bug in the block above -- silently hands
+      // the turn to the heuristic, which is the whole failure being fixed.
+      if(!d&&neural){setAiThinking(false);return;}
       if(!d){
         _hamCtx=st.hammerMode?buildHamCtx(hms,hh,a,b):null;
         // Duell-Modus: dedizierte aggressive/strategische KI (A*-Distanz, Blocken/Vordrang)
@@ -5658,7 +5786,7 @@ function App(){
       // Greift NUR wenn der Bot mehrere Züge in Folge keinen Distanz-Fortschritt macht.
       // Dann wird der deterministische BFS-Schritt erzwungen → garantiert Fortschritt, kein Kreiseln.
       // Strategische Barrikaden-Züge und Item-Pickups bleiben unangetastet.
-      if(d&&d.type==='move'){
+      if(d&&d.type==='move'&&aiDifficulty!=='neural'){
         const beforeP=bfsPath(b,w,aiGoal);
         const beforeD=beforeP?beforeP.length-1:Infinity;
         const afterP=bfsPath(d.pos,w,aiGoal);
@@ -5719,7 +5847,7 @@ function App(){
       }else{setWalls(w);setMoveHist(moves);setHammerHeld(nextHeld);}
       setTurn('A');setAiThinking(false);
     },delay);
-    return()=>clearTimeout(t);
+    return()=>{alive=false;clearTimeout(t);};
   },[turn,gameMode,winner,screen,aiDifficulty]);
 
   // ── Online realtime listener ──
@@ -8797,13 +8925,46 @@ function App(){
           {[
             {k:'easy',color:'#16a34a',bg:'linear-gradient(135deg,#16a34a,#15803d)'},
             {k:'normal',color:'#eab308',bg:'linear-gradient(135deg,#eab308,#ca8a04)'},
-            {k:'hard',color:'#ef4444',bg:'linear-gradient(135deg,#ef4444,#dc2626)'}
+            {k:'hard',color:'#ef4444',bg:'linear-gradient(135deg,#ef4444,#dc2626)'},
+            {k:'neural',color:'#5ddc9a',bg:'linear-gradient(135deg,#0ea5e9,#6366f1)'}
           ].map(d=>(
             <MenuItem key={d.k}
               icon={<DotIcon size={18} color="#fff"/>} iconBg={d.bg}
               title={t(d.k)} desc={t(d.k+'Desc')}
-              onClick={()=>{setAiDifficulty(d.k);initGame('pvc',undefined,null,false,undefined,false,selectedMap);}}/>
+              onClick={()=>{setAiDifficulty(d.k);
+                if(d.k==='neural'){setSelectedMap('duel');setDuelSize('standard');
+                  // Also force OFF the variants the trained rules do not contain. The
+                  // server refuses them with a deterministic 400, so leaving one on
+                  // started a game whose every bot turn retried twelve times and then
+                  // died -- and the network cannot play them anyway.
+                  setHammerMode(false);setChaosMode(false);setDropMode(false);
+                  // NOT setGameBarr(10): initGame is a closure over the CURRENT render's
+                  // gameBarr, so the setter cannot affect the game started on the next
+                  // line. It would leave barrLeft at the user's 12 while the request
+                  // claims 10, turning a clear "trained with 10 walls a side" 400 into a
+                  // history_replay_mismatch on the bot's first turn. The server's guard
+                  // is the honest place for this until initGame takes a stock override.
+                  initGame('pvc',undefined,null,false,undefined,false,'duel','standard','A');}
+                else initGame('pvc',undefined,null,false,undefined,false,selectedMap);}}/>
           ))}
+          {/* Search budget for the neural opponent: this is the strength dial.
+              Measured on this machine at ~5.5 ms per simulation, so the estimate
+              shown is what you will actually wait for each of its moves. */}
+          <div style={{marginTop:4,padding:'10px 12px',borderRadius:12,
+                       background:'rgba(99,102,241,0.10)',border:'1px solid rgba(99,102,241,0.35)'}}>
+            <div style={{display:'flex',justifyContent:'space-between',fontSize:11,fontWeight:800,
+                         opacity:.85,marginBottom:6}}>
+              <span>NEURAL SEARCH</span>
+              <span>{neuralSims} sims &middot; ~{neuralSims*5.5<1000
+                ? Math.round(neuralSims*5.5)+' ms' : (neuralSims*5.5/1000).toFixed(1)+' s'}/move</span>
+            </div>
+            <input type="range" min="16" max="4096" step="16" value={neuralSims}
+              onChange={e=>setNeuralSims(Number(e.target.value))}
+              style={{width:'100%'}}/>
+            <div style={{fontSize:10,opacity:.6,marginTop:4}}>
+              More simulations play stronger and think longer.
+            </div>
+          </div>
         </div>
       </div>
     </div>

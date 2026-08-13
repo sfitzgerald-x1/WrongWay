@@ -859,6 +859,45 @@ impl PuctTreeSearch {
         &self.nodes[0].position
     }
 
+    /// Visits sitting under the node reached by walking `codes` from the root, or
+    /// `None` when that path was never expanded.
+    ///
+    /// READ-ONLY DIAGNOSTIC. It exists to answer one question before any tree-reuse
+    /// machinery is built: if the next search inherited this subtree instead of
+    /// starting from zero, how many visits would it inherit? Playing our move and the
+    /// opponent's reply gives a two-code path, and the child's visit count is exactly
+    /// the inheritance.
+    ///
+    /// This measures the CEILING on what reuse could save, not what it would save. An
+    /// inherited visit is worth less than a fresh one: Gumbel's schedule would still
+    /// have to be re-run at the new root, so the statistics inform the search rather
+    /// than replacing simulations. A small number here therefore rules reuse out; a
+    /// large number does not rule it in.
+    ///
+    /// See `docs/tree-reuse-plan.md` for the decision rule this feeds.
+    #[must_use]
+    pub fn subtree_visits_after(&self, codes: &[u16]) -> Option<u32> {
+        let mut node = 0u32;
+        for code in codes {
+            let n = self.nodes[node as usize];
+            if !n.expanded {
+                return None;
+            }
+            let start = n.edges_start as usize;
+            let edge = (start..start + n.edges_len as usize)
+                .find(|i| self.edges[*i].code == *code)?;
+            let child = self.edges[edge].child;
+            if child == NO_CHILD {
+                // The move is legal and was scored, but never actually visited, so
+                // there is no subtree. Zero is the honest answer, not None -- the
+                // distinction matters when reading the distribution.
+                return Some(0);
+            }
+            node = child;
+        }
+        Some(self.nodes[node as usize].visits)
+    }
+
     /* -------------------------------------------------------------- *
      * Root setup
      * -------------------------------------------------------------- */
