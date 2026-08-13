@@ -527,6 +527,25 @@ impl NormalDuelSelfPlayBatch {
     // Re-read these after *every* call into wasm: a moved buffer and a grown
     // heap are indistinguishable from JS otherwise.
 
+    /// Visits under the node reached by playing `codes` from the root; `-1` when that
+    /// path was never expanded.
+    ///
+    /// READ-ONLY DIAGNOSTIC for the tree-reuse question: with `codes = [our move,
+    /// their reply]`, this is exactly what the next search would inherit if it reused
+    /// this tree rather than rebuilding. It changes no search state.
+    ///
+    /// Returns i32 rather than Option<u32> because `-1` survives the JS boundary as a
+    /// plain number, and "never expanded" (-1) must stay distinguishable from
+    /// "expanded but never visited" (0) -- collapsing those would flatter reuse.
+    #[wasm_bindgen(js_name = subtreeVisitsAfter)]
+    #[must_use]
+    pub fn subtree_visits_after(&self, codes: &[u16]) -> i32 {
+        self.inner
+            .subtree_visits_after(codes)
+            .and_then(|v| i32::try_from(v).ok())
+            .unwrap_or(-1)
+    }
+
     #[wasm_bindgen(js_name = featuresPtr)]
     #[must_use]
     pub fn features_ptr(&self) -> u32 {

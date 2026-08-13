@@ -156,7 +156,7 @@ function inferOne(features) {
  *   net_mask_empty     a leaf handed to us always has a legal move, so an empty mask
  *                      means pendingLeafMask() is not filling the buffer
  *   net_degenerate     a leaf with legal moves must gain prior mass, and the legal
- *                      logits must not be flat (tolerated singly, refused in bulk)
+ *                      logits must not be flat (up to two tolerated, refused in bulk)
  *   net_never_consulted no leaf was network-informed
  *   net_input_ignored  every leaf returned bit-identical logits, so the network is
  *                      not reading the position it was given

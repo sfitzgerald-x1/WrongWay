@@ -422,10 +422,15 @@ async function reportResult(result) {
   if (recorded || !me) return;
   recorded = true;
   try {
-    await fetch('/api/result', { method: 'POST',
+    // r.ok is CHECKED. fetch() resolves for 401/400/500 and only rejects on a
+    // transport failure, so the catch below could not see the very case it was added
+    // for -- a deployment where /api/result 401s looked exactly like success.
+    const r = await fetch('/api/result', { method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ result, side: human, plies: state.ply,
                              checkpoint: ckptLabel, sims: SIMS }) });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok || d.error) throw new Error(d.error || `http_${r.status}`);
     refreshBoard();      // the standings are on screen now, so keep them current
   } catch (e) {
     // The game still stands locally, so this must not throw -- but it must not be

@@ -31,14 +31,23 @@ export function createNetGuard(policyLen) {
   let blind = 0;         // leaves with legal moves but no prior mass at all
   let flat = 0;          // leaves whose legal logits were bit-identical
   let maskEmpty = 0;     // leaves handed out with NO legal move in the mask
+  let narrowFlat = 0;    // flat, but with < 3 legal moves: tolerated, and not evidence
   let firstSignature = null;
   let allIdentical = true;
 
   return {
     get leaves() { return leaves; },
+    get narrowFlat() { return narrowFlat; },
     get netLeaves() { return informed; },
     /** True once the network is known to be broken, so the caller can stop early. */
-    get doomed() { return maskEmpty > 0 || blind > 0; },
+    get doomed() {
+      // Includes the flat and constant-response trips, not just the two per-leaf ones.
+      // Omitting them meant the canonical broken networks -- all-zero logits, and a
+      // fixed vector for every position -- consumed the ENTIRE budget before refusing,
+      // times the client's twelve retries. That is what this exists to prevent.
+      return maskEmpty > 0 || blind > 0 || flat >= 3
+        || (leaves >= 8 && allIdentical);
+    },
 
     /**
      * Turn one raw response into the probabilities `submit()` wants, and record what
@@ -71,6 +80,12 @@ export function createNetGuard(policyLen) {
         }
       }
       if (sum > 0) for (let i = 0; i < policyLen; i += 1) probs[i] /= sum;
+      // NOT normalisable means NOT submittable. With only SOME legal logits NaN, sum is
+      // NaN, the NaN entries survived unnormalised, and the caller still submitted them
+      // -- so Rust rejected them with an opaque invalid_evaluation instead of this
+      // module reporting net_degenerate. Zeroing keeps submit()'s contract (non-negative
+      // probabilities); the leaf is already counted as blind, so the move still refuses.
+      else probs.fill(0);
 
       // legal === 0 is NOT a terminal leaf: next_leaf() scores terminal leaves
       // internally and never hands them out, so a leaf we were given always has a
@@ -81,8 +96,14 @@ export function createNetGuard(policyLen) {
       // `legal >= 3`, not `> 1`: with two legal moves -- a late-game pawn in a corridor
       // with both sides out of stock -- two float32 logits coinciding is a coincidence,
       // not evidence. Requiring three keeps the test out of the endgame.
-      else if (legal >= 3 && max === min) flat += 1;
-      else informed += 1;
+      else if (max === min) {
+        // Flat legal logits. Only counted as a violation when there were >= 3 legal
+        // moves: with two, a float32 coincidence is ordinary. But a narrow flat leaf is
+        // not EVIDENCE either, so it goes in its own bucket rather than inflating
+        // netLeaves, which is reported to the caller as evidence-of-network.
+        if (legal >= 3) flat += 1;
+        else narrowFlat += 1;
+      } else informed += 1;
 
       // Cross-leaf signature over the WHOLE response. Masking it would be wrong: the
       // legal SET differs per leaf, so a network returning one constant vector would
@@ -130,8 +151,9 @@ export function createNetGuard(policyLen) {
       // recover: both clients derive the seed from the move number, so a retry rebuilds
       // the identical tree, reaches the identical leaf and fails identically -- one
       // float32 collision (~1e-7 per leaf) killed the turn for good, and a reload
-      // replayed it. A broken network is flat on essentially every leaf, so a fraction
-      // test separates the two while leaving the coincidence survivable.
+      // replayed it. A broken network is flat on essentially every leaf, so a
+      // count-plus-all-decided test separates the two while leaving one or two
+      // coincidences survivable. (It is a count, not a fraction.)
       const decided = informed + flat;
       if (flat > 0 && (flat >= 3 || flat === decided)) {
         throw new NetGuardError('net_degenerate',

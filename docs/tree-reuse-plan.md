@@ -35,7 +35,36 @@ justify a wasm API change. That is a claim we can settle for a few hours of work
 instead of arguing about, which is why step 0 exists and why nothing else starts
 until it reports.
 
-## Step 0 — measure the inheritance before building it (half a day)
+## Step 0 RESULT — measured, and the verdict is "self-play only"
+
+Done. `scripts/tree-reuse-probe.mjs`, driving the real `d3-iter-150` network, with
+`PuctTreeSearch::subtree_visits_after` behind `NormalDuelSearch.subtreeVisitsAfter`.
+
+| budget | transitions | p10 | p25 | **p50** | p75 | p90 | max |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 512 sims / 12 considered | 125 | 0.2% | 8.8% | **23.4%** | 28.9% | 34.8% | 49.8% |
+| 128 sims / 12 considered | 126 | 0.0% | 7.0% | **20.3%** | 32.8% | 34.4% | 49.2% |
+
+**Verdict by the rule below: 10–25% → build it for self-play, not for the play site.**
+23.4% sits just under the boundary, and it is not rounded up: the rule was written down
+in advance precisely so a number this close to the line would not be argued across it.
+
+Two things the measurement corrected in this plan's own reasoning:
+
+- **The predicted failure did not happen.** The plan expected the reply to often be
+  absent from the tree entirely. It never was — 0% of transitions in both runs. The
+  reason is a mistake in the original argument: the opponent's reply is a child of *the
+  move we searched hardest*, not a root candidate we might have discarded, so the
+  relevant subtree is the best-explored part of the tree rather than the worst.
+- **The distribution is wide, not bimodal.** The plan predicted bimodality and asked for
+  percentiles on that basis. Percentiles were still the right call, but for a different
+  reason: a quarter of transitions inherit under 9% while a tenth inherit over a third.
+
+Not measured: the play-site regime (a human opponent, who is not choosing from any
+candidate set). The rule already excludes the play site, so that gap does not change the
+decision — but it means there is no number for it, and none should be invented.
+
+## Step 0 — the design, as it was pre-registered (half a day)
 
 Add a diagnostic that answers one question: **at the moment a search begins, how many
 visits would it have inherited from the previous search?**

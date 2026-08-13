@@ -8909,7 +8909,12 @@ function App(){
                   // started a game whose every bot turn retried twelve times and then
                   // died -- and the network cannot play them anyway.
                   setHammerMode(false);setChaosMode(false);setDropMode(false);
-                  setGameBarr(10);   // the network was trained at 10 walls a side
+                  // NOT setGameBarr(10): initGame is a closure over the CURRENT render's
+                  // gameBarr, so the setter cannot affect the game started on the next
+                  // line. It would leave barrLeft at the user's 12 while the request
+                  // claims 10, turning a clear "trained with 10 walls a side" 400 into a
+                  // history_replay_mismatch on the bot's first turn. The server's guard
+                  // is the honest place for this until initGame takes a stock override.
                   initGame('pvc',undefined,null,false,undefined,false,'duel','standard','A');}
                 else initGame('pvc',undefined,null,false,undefined,false,selectedMap);}}/>
           ))}
