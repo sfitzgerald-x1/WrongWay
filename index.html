@@ -5582,11 +5582,44 @@ function App(){
   },[gameMode,screen]);
 
   // ── AI ──
+  // ── Neural opponent (local) ──────────────────────────────────────────────
+  // 'neural' asks the trained network for the move instead of the hand-written
+  // heuristics. The network runs in a local server (scripts/play-server.mjs plus
+  // local-infer-mps.py); nothing here talks to the internet, and the online modes
+  // are untouched.
+  //
+  // The server REPLAYS moveHist to rebuild the engine state, because the rules
+  // engine ties ply/historyStartPly/stock together and a position alone is not a
+  // valid state. So the whole history goes over, and the server refuses the request
+  // if replaying it does not reproduce the position we think we are in -- better a
+  // fallback than a move chosen for a different board.
+  const NEURAL_SIMS_KEY='ww_neural_sims';
+  const[neuralSims,setNeuralSims]=useState(()=>{
+    const v=Number(localStorage.getItem(NEURAL_SIMS_KEY)); return v>=16?v:128;});
+  useEffect(()=>{localStorage.setItem(NEURAL_SIMS_KEY,String(neuralSims));},[neuralSims]);
+  const[neuralInfo,setNeuralInfo]=useState(null);
+  const neuralMove=async(st,w,aiGoal)=>{
+    const hist=(st.moveHist||[]).filter(m=>m&&(m.type==='move'||m.type==='wall'));
+    const body={history:hist,sims:neuralSims,seed:hist.length+1,
+      board:{map:st.selectedMap,duelSize:st.duelSize,initialStock:st.initialStock,
+             chaos:!!st.chaosMode,hammer:!!st.hammerMode,drop:!!st.dropMode},
+      expect:{pawns:{A:st.pA,B:st.pB},walls:[...w],
+              stock:{A:st.barrLeft.A,B:st.barrLeft.B},turn:'B'}};
+    const r=await fetch('/api/bestmove',{method:'POST',
+      headers:{'content-type':'application/json'},body:JSON.stringify(body)});
+    const data=await r.json();
+    if(data.error)throw new Error(data.error);
+    setNeuralInfo({ms:data.ms,sims:data.sims,value:data.rootValue});
+    if(data.action.kind==='pawn')return{type:'move',pos:{r:data.action.to.r,c:data.action.to.c}};
+    // The app stores the COMPLETE wall set and diffs it to find the new key.
+    return{type:'barricade',walls:new Set([...w,data.action.wall])};
+  };
+
   useEffect(()=>{
     if(gameMode!=='pvc'||turn!=='B'||winner||screen!=='game')return;
     setAiThinking(true);
-    const delay=aiDifficulty==='hard'?1100:aiDifficulty==='easy'?500:700;
-    const t=setTimeout(()=>{
+    const delay=aiDifficulty==='neural'?0:aiDifficulty==='hard'?1100:aiDifficulty==='easy'?500:700;
+    const t=setTimeout(async()=>{
       const st=S.current;
       let a=st.pA,b=st.pB,w=new Set(st.walls),bl=st.barrLeft,moves=[...st.moveHist];
       const hms=st.hammers,hh=st.hammerHeld||{A:false,B:false};
@@ -5640,6 +5673,47 @@ function App(){
           if(!(step.r===a.r&&step.c===a.c))d={type:'move',pos:step};
         }
       }
+      if(!d&&aiDifficulty==='neural'){
+        // NEVER substitute the heuristic bot. Picking 'neural' is a claim about WHICH
+        // opponent you are playing, and quietly swapping in the built-in bot answers
+        // instantly and reasonably well -- the game looks fine, the result gets
+        // recorded, and it was never the network's game. A banner did not fix that:
+        // the substituted moves still counted. So retry with backoff, and if the
+        // network stays down, the bot does not move. A stuck turn is honest; a
+        // different opponent is not.
+        const wait=(ms)=>new Promise(z=>setTimeout(z,ms));
+        const warn=(msg,fatal)=>{
+          let el=document.getElementById('ww-neural-warn');
+          if(!el){
+            el=document.createElement('div');
+            el.id='ww-neural-warn';
+            el.style.cssText='position:fixed;left:50%;transform:translateX(-50%);bottom:18px;z-index:9999;'
+              +'color:#fff;font:600 12px/1.4 system-ui,sans-serif;padding:10px 14px;'
+              +'border-radius:10px;box-shadow:0 6px 24px rgba(0,0,0,.45);max-width:88vw;text-align:center';
+            document.body.appendChild(el);
+          }
+          el.style.background=fatal?'#7f1d1d':'#78350f';
+          el.textContent=msg;
+        };
+        const ATTEMPTS=12;
+        for(let i=1;i<=ATTEMPTS;i+=1){
+          try{ d=await neuralMove(st,w,aiGoal); break; }
+          catch(err){
+            setNeuralInfo(null);
+            console.warn('neural opponent unavailable (attempt '+i+'):',err.message);
+            if(i===ATTEMPTS){
+              warn('The neural opponent is unreachable ('+err.message+'). It will not move, '
+                +'and the built-in bot will not play in its place. Reload once the network is back.',true);
+              setAiThinking(false);
+              return;                       // leave the turn unplayed, deliberately
+            }
+            warn('Neural opponent unreachable — retrying ('+i+'/'+(ATTEMPTS-1)+')…',false);
+            await wait(Math.min(8000,500*2**(i-1)));
+          }
+        }
+        const done=document.getElementById('ww-neural-warn');
+        if(done)done.remove();
+      }
       if(!d){
         _hamCtx=st.hammerMode?buildHamCtx(hms,hh,a,b):null;
         // Duell-Modus: dedizierte aggressive/strategische KI (A*-Distanz, Blocken/Vordrang)
@@ -5658,7 +5732,7 @@ function App(){
       // Greift NUR wenn der Bot mehrere Züge in Folge keinen Distanz-Fortschritt macht.
       // Dann wird der deterministische BFS-Schritt erzwungen → garantiert Fortschritt, kein Kreiseln.
       // Strategische Barrikaden-Züge und Item-Pickups bleiben unangetastet.
-      if(d&&d.type==='move'){
+      if(d&&d.type==='move'&&aiDifficulty!=='neural'){
         const beforeP=bfsPath(b,w,aiGoal);
         const beforeD=beforeP?beforeP.length-1:Infinity;
         const afterP=bfsPath(d.pos,w,aiGoal);
@@ -8797,13 +8871,35 @@ function App(){
           {[
             {k:'easy',color:'#16a34a',bg:'linear-gradient(135deg,#16a34a,#15803d)'},
             {k:'normal',color:'#eab308',bg:'linear-gradient(135deg,#eab308,#ca8a04)'},
-            {k:'hard',color:'#ef4444',bg:'linear-gradient(135deg,#ef4444,#dc2626)'}
+            {k:'hard',color:'#ef4444',bg:'linear-gradient(135deg,#ef4444,#dc2626)'},
+            {k:'neural',color:'#5ddc9a',bg:'linear-gradient(135deg,#0ea5e9,#6366f1)'}
           ].map(d=>(
             <MenuItem key={d.k}
               icon={<DotIcon size={18} color="#fff"/>} iconBg={d.bg}
               title={t(d.k)} desc={t(d.k+'Desc')}
-              onClick={()=>{setAiDifficulty(d.k);initGame('pvc',undefined,null,false,undefined,false,selectedMap);}}/>
+              onClick={()=>{setAiDifficulty(d.k);
+                if(d.k==='neural'){setSelectedMap('duel');setDuelSize('standard');
+                  initGame('pvc',undefined,null,false,undefined,false,'duel','standard','A');}
+                else initGame('pvc',undefined,null,false,undefined,false,selectedMap);}}/>
           ))}
+          {/* Search budget for the neural opponent: this is the strength dial.
+              Measured on this machine at ~5.5 ms per simulation, so the estimate
+              shown is what you will actually wait for each of its moves. */}
+          <div style={{marginTop:4,padding:'10px 12px',borderRadius:12,
+                       background:'rgba(99,102,241,0.10)',border:'1px solid rgba(99,102,241,0.35)'}}>
+            <div style={{display:'flex',justifyContent:'space-between',fontSize:11,fontWeight:800,
+                         opacity:.85,marginBottom:6}}>
+              <span>NEURAL SEARCH</span>
+              <span>{neuralSims} sims &middot; ~{neuralSims*5.5<1000
+                ? Math.round(neuralSims*5.5)+' ms' : (neuralSims*5.5/1000).toFixed(1)+' s'}/move</span>
+            </div>
+            <input type="range" min="16" max="4096" step="16" value={neuralSims}
+              onChange={e=>setNeuralSims(Number(e.target.value))}
+              style={{width:'100%'}}/>
+            <div style={{fontSize:10,opacity:.6,marginTop:4}}>
+              More simulations play stronger and think longer.
+            </div>
+          </div>
         </div>
       </div>
     </div>
