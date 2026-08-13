@@ -527,7 +527,6 @@ impl NormalDuelSelfPlayBatch {
     // Re-read these after *every* call into wasm: a moved buffer and a grown
     // heap are indistinguishable from JS otherwise.
 
-
     #[wasm_bindgen(js_name = featuresPtr)]
     #[must_use]
     pub fn features_ptr(&self) -> u32 {

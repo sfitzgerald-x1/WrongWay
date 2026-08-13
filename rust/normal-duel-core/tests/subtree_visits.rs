@@ -157,7 +157,9 @@ fn a_two_ply_path_is_bounded_by_its_one_ply_prefix() {
     let (tree, config) = run(512, 12);
     let result = tree.result();
     let ours = result.action_code;
-    let parent = tree.subtree_visits_after(&[ours]).expect("our move is present");
+    let parent = tree
+        .subtree_visits_after(&[ours])
+        .expect("our move is present");
 
     let state = create_initial_state(&config).expect("initial state");
     let legal = legal_action_codes(&config, &state).expect("legal codes");
@@ -176,4 +178,3 @@ fn a_two_ply_path_is_bounded_by_its_one_ply_prefix() {
         "no reply was found in the tree at all; the two-ply walk never succeeded"
     );
 }
-
