@@ -320,9 +320,12 @@ for (const c of CASES) {
   let ok;
   let saw;
   if (c.want === 'move') {
-    ok = status === 200 && body && body.action && body.netLeaves > 0;
-    saw = ok ? `move served, netLeaves=${body.netLeaves}/${body.leaves}`
-             : `status ${status} ${err || JSON.stringify(body)}`;
+    // sims === SIMS matters: a mutation that made `doomed` trip spuriously served a
+    // move from a search truncated to 3 of 16 simulations and this case still passed,
+    // because it only looked for a legal action and netLeaves > 0.
+    ok = status === 200 && body && body.action && body.netLeaves > 0 && body.sims === SIMS;
+    saw = ok ? `move served, netLeaves=${body.netLeaves}/${body.leaves}, sims=${body.sims}`
+             : `status ${status} sims=${body && body.sims} ${err || JSON.stringify(body)}`;
   } else {
     ok = status === 500 && err.startsWith(c.want);
     saw = status === 200 ? `SERVED A MOVE (${JSON.stringify(body.action)})` : `${status} ${err}`;

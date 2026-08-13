@@ -4640,6 +4640,10 @@ function App(){
   const lastOnlineTs=useRef(0);
   const xpBeforeMatchRef=useRef(null);
   const pendingXpUpdateRef=useRef(null);
+  // A LOCAL generation counter for the AI effect's cancellation gate, deliberately
+  // separate from `gameNum` (which is peer-synced). Bumped by initGame, so any run still
+  // in flight from a previous game can tell that it no longer owns the board.
+  const aiGen=useRef(0);
   const S=useRef({});
   S.current={pA,pB,walls,barrLeft,turn,winner,moveHist,gameMode,lobbyId,onlineRole,rematchA,rematchB,rematchDeclined,oppLeft,gameNum,chaosItem,goldenWalls,hammers,hammerHeld,hammerUsed,hammerMode,chaosMode,dropMode,gaveUp,gameTimeMode,isRanked,rankedMode,rankedMyRating,rankedOppRating,rankedOppKey,playerNames,selectedMap,duelSize,initialStock:gameBarr,screen,bugOpen,repOpen,repSrc};
   // UI-Testhaken (?uitest=ban|warn): rein lokale Dummy-Overlays fuer Design-Sichtung, keine Datenwege
@@ -5144,12 +5148,17 @@ function App(){
     setDragging(null);setPreviewKey(null);setSnapPos(null);
     setRematchA(false);setRematchB(false);setRematchDeclined(null);setOppLeft(false);
     setChatMsgs([]);setChatInput('');
-    // MONOTONIC, not reset to 0. The AI effect closes over gameNum to detect "this is
-    // a different game now", and resetting it to 0 every time made that check
-    // 0 === 0 for every local game -- dead code in exactly the mode it was written for.
-    // The dep array happens to cover today's exits, but an in-game "new game" that kept
-    // the same turn/screen/winner would have slipped a stale write through.
-    setGameNum((g) => (g || 0) + 1);
+    // BACK TO 0, and it must stay that way. `gameNum` is NOT a local counter: it is the
+    // shared online ROUND number, published to Firebase by doSync and consumed as
+    // remote-authoritative by the realtime listener. The reset is load-bearing -- with
+    // oldGN === 0 the first snapshot always survives the `newGN < oldGN` guard and can
+    // never take the "new round" branch, after which both clients converge on the host's
+    // number. Making it monotonic to serve the AI effect broke that: a client that had
+    // played a local game first would reject every snapshot of a later online match
+    // (dead board), or publish a larger number and trip the host into the new-round
+    // branch mid-game, wiping the move list. The AI effect gets its own counter below.
+    setGameNum(0);
+    aiGen.current += 1;
     if(mode!=='online')setPlayerNames({A:null,B:null});
     if(mode==='online'&&lid){
       const acc=accRef.current;
@@ -5634,8 +5643,8 @@ function App(){
     // landed in the NEW game. `alive` is closed over by this run only and cleared by
     // the cleanup, so every post-await write is gated on it.
     let alive=true;
-    const gameAtStart=S.current.gameNum;
-    const stillOurs=()=>alive&&S.current.gameNum===gameAtStart
+    const genAtStart=aiGen.current;
+    const stillOurs=()=>alive&&aiGen.current===genAtStart
       &&S.current.screen==='game'&&!S.current.winner;
     const t=setTimeout(async()=>{
       const st=S.current;
@@ -5723,7 +5732,17 @@ function App(){
         for(let i=1;i<=ATTEMPTS;i+=1){
           try{ d=await neuralMove(st,w,aiGoal,stillOurs); break; }
           catch(err){
-            if(!stillOurs()){setAiThinking(false);return;}   // the game moved on
+            if(!stillOurs()){setAiThinking(false);return;}
+            // A deterministic refusal is not a network outage: unsupported_board and
+            // history_replay_mismatch will fail identically twelve times and then be
+            // reported as "unreachable", which names the wrong cause. Say what it is,
+            // once, and stop.
+            if(/unsupported_board|history_replay_mismatch|blitz/.test(err.message)){
+              warn('The network cannot play this board ('+err.message+'). It plays the '
+                +'9x9 duel board with 10 walls a side and no hammer/chaos/drop modes.',true);
+              setAiThinking(false);
+              return;
+            }   // the game moved on
             setNeuralInfo(null);
             console.warn('neural opponent unavailable (attempt '+i+'):',err.message);
             if(i===ATTEMPTS){

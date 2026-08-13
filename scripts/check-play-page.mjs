@@ -117,19 +117,22 @@ if (missing.size) {
   console.log(`  MISSING ELEMENTS: ${[...missing].join(', ')}`);
 } else {
   console.log('  every element referenced exists');
-
-  // The two mocked players share a display name; only the handle distinguishes them.
-  // 'me' is h...01 with 2W 3L, so name-matching would have shown the other row's 9W 1L.
-  const meRec = writes.filter((w) => w.id === 'meRec').pop();
-  if (!meRec) {
-    console.log('  FAIL: nothing was written to meRec, so the standings path did not run');
-    failed = true;
-  } else if (!/2W\s*3L/.test(meRec.text)) {
-    console.log(`  FAIL: meRec says "${meRec.text}"; expected this user's own 2W 3L. `
-      + 'Matching by display name would pick the other player with the same name.');
-    failed = true;
-  } else {
-    console.log(`  the standings row for "me" is matched by handle (${meRec.text})`);
-  }
 }
+
+// NOT nested in the else above: a missing element used to skip this silently, so a
+// regression here could hide behind an unrelated failure.
+// The two mocked players share a display name; only the handle distinguishes them.
+// 'me' is h...01 with 2W 3L, so name-matching would have shown the other row's 9W 1L.
+const meRec = writes.filter((w) => w.id === 'meRec').pop();
+if (!meRec) {
+  console.log('  FAIL: nothing was written to meRec, so the standings path did not run');
+  failed = true;
+} else if (!/2W\s*3L/.test(meRec.text)) {
+  console.log(`  FAIL: meRec says "${meRec.text}"; expected this user's own 2W 3L. `
+    + 'Matching by display name would pick the other player with the same name.');
+  failed = true;
+} else {
+  console.log(`  the standings row for "me" is matched by handle (${meRec.text})`);
+}
+
 process.exit(failed ? 1 : 0);

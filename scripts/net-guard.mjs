@@ -105,7 +105,11 @@ export function createNetGuard(policyLen) {
         else narrowFlat += 1;
       } else informed += 1;
 
-      // Cross-leaf signature over the WHOLE response. Masking it would be wrong: the
+      // Cross-leaf signature over the WHOLE response, quantised to ~1e-6 -- so this
+      // detects "identical to within a millionth", NOT bit equality. That is deliberate
+      // (a network is not going to differ by 1e-7 between positions and mean it), but the
+      // error message says "identical" rather than "bit-identical" for that reason.
+      // Masking the signature would be wrong: the
       // legal SET differs per leaf, so a network returning one constant vector would
       // still produce a different signature each time and slip through. FNV-1a rather
       // than string building, since a 4096-sim move would build 4096 long strings.
@@ -147,13 +151,15 @@ export function createNetGuard(policyLen) {
         throw new NetGuardError('net_degenerate',
           `${blind} priorless leaf/leaves of ${leaves}`);
       }
-      // Flat leaves are tolerated singly and refused in bulk. Zero tolerance could not
+      // Flat leaves are tolerated in ones and twos, and refused in bulk. Zero tolerance could not
       // recover: both clients derive the seed from the move number, so a retry rebuilds
       // the identical tree, reaches the identical leaf and fails identically -- one
       // float32 collision (~1e-7 per leaf) killed the turn for good, and a reload
       // replayed it. A broken network is flat on essentially every leaf, so a
       // count-plus-all-decided test separates the two while leaving one or two
       // coincidences survivable. (It is a count, not a fraction.)
+      // `flat === decided` is kept for the message it produces, not for reach: with
+      // flat > 0 it is equivalent to informed === 0, which the next check refuses anyway.
       const decided = informed + flat;
       if (flat > 0 && (flat >= 3 || flat === decided)) {
         throw new NetGuardError('net_degenerate',
@@ -171,7 +177,7 @@ export function createNetGuard(policyLen) {
       // repeat, because transpositions make a genuine repeat possible.
       if (leaves >= 2 && allIdentical) {
         throw new NetGuardError('net_input_ignored',
-          `all ${leaves} leaves returned a bit-identical response`);
+          `all ${leaves} leaves returned an identical response (to ~1e-6)`);
       }
     }
   };
