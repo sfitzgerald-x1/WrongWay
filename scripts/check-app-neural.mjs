@@ -15,9 +15,9 @@
  * Driven over the DevTools Protocol using Node's built-in WebSocket (Node >= 22), so
  * there is no puppeteer/playwright dependency to install.
  *
- * The second phase deliberately BREAKS the network by pointing the app at a dead port,
- * rather than stopping the real inference server -- a check that takes the live server
- * down is a check nobody will run twice.
+ * The second phase deliberately BREAKS the network by replacing window.fetch with a stub
+ * that rejects /api/bestmove, rather than stopping the real inference server -- a check
+ * that takes the live server down is a check nobody will run twice.
  */
 
 import { spawn } from 'node:child_process';
@@ -34,6 +34,9 @@ const PORT = 9500 + Math.floor(Math.random() * 400);
 const APP = process.env.WW_APP_URL || 'http://127.0.0.1:8177/app';
 
 const profile = mkdtempSync(path.join(tmpdir(), 'ww-chrome-'));
+let chrome;                      // declared BEFORE cleanup() closes over it: it used to
+                                 // be a `const` below, so the handler's reference was in
+                                 // its temporal dead zone and only the try/catch hid it
 let cleanedUp = false;
 function cleanup() {
   // Ran only on the happy path before, so any throw from target() or evaluate() left a
@@ -47,7 +50,7 @@ function cleanup() {
 }
 process.on('exit', cleanup);
 process.on('SIGINT', () => { cleanup(); process.exit(130); });
-const chrome = spawn(CHROME, [
+chrome = spawn(CHROME, [
   '--headless=new', `--remote-debugging-port=${PORT}`, `--user-data-dir=${profile}`,
   '--no-first-run', '--no-default-browser-check', '--disable-gpu',
   'about:blank'
@@ -227,11 +230,18 @@ const before = await evaluate(`(() => {
 // a legal first step. Class-name sniffing was the wrong approach -- /move/ also matched
 // move-history containers, and a wrong hit would have blamed the app for the selector.
 // (7,4) is where phase 1 moved to, so step again toward the goal for this turn.
+//
+// And CHECK IT LANDED. `found` used to mean only "the cell element exists": if the
+// network's phase-1 reply ever occupied or walled off (6,4), the click would be a no-op,
+// no bot turn would follow, and the retry assertions would fail blaming the app. The
+// bestmove counter moving is the proof the turn actually passed to the bot.
 const moved = await evaluate(`(() => {
+  const before = performance.getEntriesByType('resource')
+    .filter(e => e.name.includes('/api/bestmove')).length;
   const cell = document.querySelector('[data-r="6"][data-c="4"]');
   if (!cell) return { found: false, why: 'no [data-r][data-c] cell on screen' };
   cell.click();
-  return { found: true };
+  return { found: true, callsBefore: before };
 })()`);
 
 // Wait out the WHOLE retry budget (12 attempts, 500ms*2^n capped at 8s, so ~65 s), not
@@ -257,8 +267,24 @@ if (!moved.found) {
     + 'not be forced, so the refusal path is UNVERIFIED in this run');
 } else {
   refusalVerified = true;
+  // >= ATTEMPTS, not "> before". A single call is precisely the ORIGINAL bug's
+  // signature -- catch the error once, then play a heuristic move -- and mutation
+  // testing showed `> before` waving that through at 0 -> 1. This check only says
+  // something if it demands the full retry budget.
+  // >= ATTEMPTS, not "> before": a single call is precisely the ORIGINAL bug's signature
+  // (catch once, play a heuristic move), and mutation testing showed `> before` waving
+  // that through at 0 -> 1.
+  //
+  // Note WHICH counter this is. Phase 2 replaces window.fetch with a rejecting stub, so
+  // these calls never reach the network and never appear in Resource Timing -- the stub's
+  // own tally is the only count that exists here. Reading the Resource Timing figure
+  // instead reports a stale 1 and looks like an app failure.
   check('the app retries /api/bestmove rather than giving up silently',
-    after.calls > before.calls, `${before.calls} -> ${after.calls} calls`);
+    after.calls >= 12,
+    after.calls === 0
+      ? '0 calls: the human move did not land, so the bot never got a turn -- this run '
+        + 'says nothing about the app'
+      : `${before.calls} -> ${after.calls} calls (need >= 12)`);
   check('the app SAYS the neural opponent is unreachable',
     after.sawRetry === true,
     after.sawRetry ? 'banner shown' : `no banner: ${after.text.replace(/\n/g, ' ').slice(0, 200)}`);
