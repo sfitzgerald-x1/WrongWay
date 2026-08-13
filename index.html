@@ -5144,7 +5144,12 @@ function App(){
     setDragging(null);setPreviewKey(null);setSnapPos(null);
     setRematchA(false);setRematchB(false);setRematchDeclined(null);setOppLeft(false);
     setChatMsgs([]);setChatInput('');
-    setGameNum(0);
+    // MONOTONIC, not reset to 0. The AI effect closes over gameNum to detect "this is
+    // a different game now", and resetting it to 0 every time made that check
+    // 0 === 0 for every local game -- dead code in exactly the mode it was written for.
+    // The dep array happens to cover today's exits, but an in-game "new game" that kept
+    // the same turn/screen/winner would have slipped a stale write through.
+    setGameNum((g) => (g || 0) + 1);
     if(mode!=='online')setPlayerNames({A:null,B:null});
     if(mode==='online'&&lid){
       const acc=accRef.current;
@@ -5598,7 +5603,7 @@ function App(){
     const v=Number(localStorage.getItem(NEURAL_SIMS_KEY)); return v>=16?v:128;});
   useEffect(()=>{localStorage.setItem(NEURAL_SIMS_KEY,String(neuralSims));},[neuralSims]);
   const[neuralInfo,setNeuralInfo]=useState(null);
-  const neuralMove=async(st,w,aiGoal)=>{
+  const neuralMove=async(st,w,aiGoal,stillOurs=()=>true)=>{
     const hist=(st.moveHist||[]).filter(m=>m&&(m.type==='move'||m.type==='wall'));
     const body={history:hist,sims:neuralSims,seed:hist.length+1,
       board:{map:st.selectedMap,duelSize:st.duelSize,initialStock:st.initialStock,
@@ -5609,7 +5614,9 @@ function App(){
       headers:{'content-type':'application/json'},body:JSON.stringify(body)});
     const data=await r.json();
     if(data.error)throw new Error(data.error);
-    setNeuralInfo({ms:data.ms,sims:data.sims,value:data.rootValue});
+    // Gated: this is a post-await state write, so a run whose game has already been
+    // abandoned would otherwise repaint the ms/sims/value panel of the new one.
+    if(stillOurs())setNeuralInfo({ms:data.ms,sims:data.sims,value:data.rootValue});
     if(data.action.kind==='pawn')return{type:'move',pos:{r:data.action.to.r,c:data.action.to.c}};
     // The app stores the COMPLETE wall set and diffs it to find the new key.
     return{type:'barricade',walls:new Set([...w,data.action.wall])};
@@ -5714,7 +5721,7 @@ function App(){
         };
         const ATTEMPTS=12;
         for(let i=1;i<=ATTEMPTS;i+=1){
-          try{ d=await neuralMove(st,w,aiGoal); break; }
+          try{ d=await neuralMove(st,w,aiGoal,stillOurs); break; }
           catch(err){
             if(!stillOurs()){setAiThinking(false);return;}   // the game moved on
             setNeuralInfo(null);
@@ -5727,6 +5734,9 @@ function App(){
             }
             warn('Neural opponent unreachable — retrying ('+i+'/'+(ATTEMPTS-1)+')…',false);
             await wait(Math.min(8000,500*2**(i-1)));
+            // Also after the backoff: without this a dead run kept hammering
+            // /api/bestmove for up to ~65 s after the player had left the game.
+            if(!stillOurs()){setAiThinking(false);return;}
           }
         }
         const done=document.getElementById('ww-neural-warn');

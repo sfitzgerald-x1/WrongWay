@@ -60,8 +60,20 @@ globalThis.localStorage = {
 };
 globalThis.getComputedStyle = () => ({ getPropertyValue: (n) => (n === '--cell' ? '46' : '9') });
 const routes = {
-  '/api/me': { user: { name: 'Test User', verified: true, provider: 'tailscale' }, source: 'tailscale' },
-  '/api/leaderboard': { recent: [], players: [], totals: { humanWins: 0, botWins: 0, draws: 0, games: 0 } },
+  // `id` and `userId` are present because the page matches YOUR row by the opaque
+  // handle, not by display name. A mock without them silently exercised the legacy
+  // name-matching fallback instead -- i.e. the bug the handle was added to fix.
+  // The two rows share a display name on purpose: that collision is the reason
+  // name-matching was wrong, so the checker asserts the right row is picked.
+  '/api/me': { user: { id: 'h0000000000000001', name: 'Test User',
+                       verified: true, provider: 'tailscale' }, source: 'tailscale' },
+  '/api/leaderboard': {
+    recent: [],
+    players: [
+      { userId: 'h0000000000000002', name: 'Test User', verified: true, w: 9, l: 1, d: 0, games: 10, last: null },
+      { userId: 'h0000000000000001', name: 'Test User', verified: true, w: 2, l: 3, d: 0, games: 5, last: null }
+    ],
+    totals: { humanWins: 11, botWins: 4, draws: 0, games: 15 } },
   '/api/health': { ok: true, wasm: 'x', network: { version: 'ckpt', device: 'cpu', msPerCall: 8 }, meta: { label: 'ckpt' } },
   '/api/bestmove': { action: { kind: 'pawn', to: { r: 1, c: 4 } }, ms: 100, sims: 512, rootValue: 0.1 },
   '/api/result': { ok: true }
@@ -105,5 +117,19 @@ if (missing.size) {
   console.log(`  MISSING ELEMENTS: ${[...missing].join(', ')}`);
 } else {
   console.log('  every element referenced exists');
+
+  // The two mocked players share a display name; only the handle distinguishes them.
+  // 'me' is h...01 with 2W 3L, so name-matching would have shown the other row's 9W 1L.
+  const meRec = writes.filter((w) => w.id === 'meRec').pop();
+  if (!meRec) {
+    console.log('  FAIL: nothing was written to meRec, so the standings path did not run');
+    failed = true;
+  } else if (!/2W\s*3L/.test(meRec.text)) {
+    console.log(`  FAIL: meRec says "${meRec.text}"; expected this user's own 2W 3L. `
+      + 'Matching by display name would pick the other player with the same name.');
+    failed = true;
+  } else {
+    console.log(`  the standings row for "me" is matched by handle (${meRec.text})`);
+  }
 }
 process.exit(failed ? 1 : 0);

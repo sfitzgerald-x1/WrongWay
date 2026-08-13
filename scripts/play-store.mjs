@@ -22,9 +22,12 @@
  *            in, and NOT sufficient when the port is reachable directly, because then
  *            the page's own requests are loopback too. WW_PLAY_PROXY_SECRET closes
  *            that gap; see `identify` and the caller.
- *   guest    a name you typed, bound to a signed token. Retained only for a
- *            deployment reached outside the tailnet; it proves you are the same
- *            VISITOR, not who you are.
+ *   guest    a name you typed, bound to a signed token. DORMANT, like Google below:
+ *            play.html has no sign-in UI, never stores a token and never sends an
+ *            Authorization header, so nothing reaches signInGuest today. It is kept
+ *            because a deployment outside the tailnet would need it -- but until that
+ *            UI exists, an off-tailnet visitor gets 401s from /api/result, which the
+ *            page now reports instead of swallowing.
  *   google   a Google account, verified server-side against Google's public keys.
  *            This one is a real identity claim.
  *

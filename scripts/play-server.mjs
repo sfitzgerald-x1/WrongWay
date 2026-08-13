@@ -294,7 +294,11 @@ function serveStatic(req, res) {
   const clean = decodeURIComponent(req.url.split('?')[0]);
   // Contain the path: a served file must resolve inside the repo.
   const full = path.resolve(ROOT, `.${clean}`);
-  if (!full.startsWith(ROOT)) { res.writeHead(403); return res.end('forbidden'); }
+  // ROOT + sep, not ROOT: a bare prefix test also matches a SIBLING directory whose
+  // name merely extends the repo's (".../ww-play-guard-notes/secret").
+  if (full !== ROOT && !full.startsWith(ROOT + path.sep)) {
+    res.writeHead(403); return res.end('forbidden');
+  }
   let body;
   try { body = readFileSync(full); } catch { return false; }
   res.writeHead(200, { 'content-type': MIME[path.extname(full)] || 'application/octet-stream',

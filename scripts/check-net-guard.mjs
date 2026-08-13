@@ -27,6 +27,7 @@
  */
 
 import { spawn } from 'node:child_process';
+import { createNetGuard, NetGuardError } from './net-guard.mjs';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -165,6 +166,100 @@ const CASES = [
 ];
 
 let failures = 0;
+
+// ---------------------------------------------------------------- unit cases
+//
+// Two refusals cannot be provoked from a stub NETWORK, because they are about the wasm
+// MASK rather than the response: an unfilled mask buffer, and a move where no leaf ends
+// up network-informed. Those were the two codes with no coverage -- including
+// net_mask_empty, which is the original production bug the whole module exists for -- so
+// they are driven against the guard directly.
+const POLICY = 209;
+const varying = () => {
+  const out = new Float32Array(POLICY + 1);
+  for (let i = 0; i < POLICY; i += 1) out[i] = Math.sin(i * 0.7 + Math.random()) * 2;
+  out[POLICY] = 0.25;
+  return out;
+};
+const maskOf = (n) => {
+  const m = new Float32Array(POLICY);
+  for (let i = 0; i < n; i += 1) m[i] = 1;
+  return m;
+};
+
+function unitCase(name, want, run) {
+  let got = 'no error';
+  try { run(); } catch (err) {
+    got = err instanceof NetGuardError ? err.code : `${err.constructor.name}: ${err.message}`;
+  }
+  const ok = got === want;
+  console.log(`${ok ? '  ok  ' : '  FAIL'} ${name.padEnd(22)} -> ${got}`);
+  if (!ok) { console.log(`         expected ${want}`); failures += 1; }
+}
+
+unitCase('mask never filled', 'net_mask_empty', () => {
+  // Exactly the pendingLeafMask() bug: the buffer stays all zeros.
+  const g = createNetGuard(POLICY);
+  const empty = new Float32Array(POLICY);
+  for (let i = 0; i < 4; i += 1) g.classify(varying(), empty);
+  g.finish();
+});
+
+unitCase('no informed leaf', 'net_never_consulted', () => {
+  // Every leaf flat with only 2 legal moves: tolerated individually (a float32
+  // coincidence in a corridor), but nothing is evidence, so the move must still refuse.
+  const g = createNetGuard(POLICY);
+  const two = maskOf(2);
+  for (let i = 0; i < 5; i += 1) {
+    const flat = new Float32Array(POLICY + 1);
+    flat[POLICY] = 0.25;                       // all logits identical at 0
+    g.classify(flat, two);
+  }
+  g.finish();
+});
+
+unitCase('two flat of many', 'no error', () => {
+  // The tolerance boundary: 2 flat leaves among plenty of informed ones is survivable.
+  const g = createNetGuard(POLICY);
+  const many = maskOf(60);
+  for (let i = 0; i < 20; i += 1) g.classify(varying(), many);
+  for (let i = 0; i < 2; i += 1) {
+    const flat = new Float32Array(POLICY + 1);
+    flat[POLICY] = 0.25;
+    g.classify(flat, many);
+  }
+  g.finish();
+});
+
+unitCase('three flat of many', 'net_degenerate', () => {
+  // ...and 3 is not. This is the other side of the same boundary.
+  const g = createNetGuard(POLICY);
+  const many = maskOf(60);
+  for (let i = 0; i < 20; i += 1) g.classify(varying(), many);
+  for (let i = 0; i < 3; i += 1) {
+    const flat = new Float32Array(POLICY + 1);
+    flat[POLICY] = 0.25;
+    g.classify(flat, many);
+  }
+  g.finish();
+});
+
+unitCase('narrow flat not evidence', 'no error', () => {
+  // A narrow flat leaf is tolerated AND excluded from netLeaves, so it cannot pass
+  // itself off as evidence-of-network.
+  const g = createNetGuard(POLICY);
+  const many = maskOf(60);
+  for (let i = 0; i < 5; i += 1) g.classify(varying(), many);
+  const flat = new Float32Array(POLICY + 1);
+  flat[POLICY] = 0.25;
+  g.classify(flat, maskOf(2));
+  g.finish();
+  if (g.netLeaves !== 5 || g.narrowFlat !== 1) {
+    throw new Error(`netLeaves=${g.netLeaves} narrowFlat=${g.narrowFlat}, want 5 and 1`);
+  }
+});
+
+// ------------------------------------------------------- server cases
 for (const c of CASES) {
   mode = c.mode;
   const { status, body } = await bestmove();
