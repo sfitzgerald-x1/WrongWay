@@ -21,15 +21,32 @@
  */
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 const CHROME = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
-const PORT = 9222;
+// A RANDOM port, not 9222. On the fixed port, if a browser is already listening the
+// spawned instance fails to bind, /json/list still answers -- from the USER'S browser --
+// and this script would navigate one of their real tabs and click in it. Two concurrent
+// runs collided the same way.
+const PORT = 9500 + Math.floor(Math.random() * 400);
 const APP = process.env.WW_APP_URL || 'http://127.0.0.1:8177/app';
 
 const profile = mkdtempSync(path.join(tmpdir(), 'ww-chrome-'));
+let cleanedUp = false;
+function cleanup() {
+  // Ran only on the happy path before, so any throw from target() or evaluate() left a
+  // headless Chrome running AND ~57 MB of profile behind -- $TMPDIR had accumulated
+  // several hundred MB of ww-chrome-* dirs. check-play-page.mjs already takes care to
+  // avoid exactly this litter.
+  if (cleanedUp) return;
+  cleanedUp = true;
+  try { chrome.kill('SIGKILL'); } catch { /* already gone */ }
+  try { rmSync(profile, { recursive: true, force: true }); } catch { /* best effort */ }
+}
+process.on('exit', cleanup);
+process.on('SIGINT', () => { cleanup(); process.exit(130); });
 const chrome = spawn(CHROME, [
   '--headless=new', `--remote-debugging-port=${PORT}`, `--user-data-dir=${profile}`,
   '--no-first-run', '--no-default-browser-check', '--disable-gpu',
@@ -122,32 +139,61 @@ const clicked = await evaluate(`(() => {
 check('the vs-computer menu is reachable', clicked.found === true, clicked.step);
 await sleep(900);
 
+// Select the difficulty ROW by its own class, not by "shortest element containing
+// /Neural/i". That heuristic picked the sims slider's `NEURAL SEARCH` label (13 chars,
+// versus `Neural (local)` at 14), which is an inert span with no .mi-btn ancestor -- so
+// the click did nothing, the game never started, and every later phase of this file
+// asserted against the difficulty menu while reporting success. The row is a MenuItem
+// button carrying .mi-btn; that is the thing with the handler.
 const picked = await evaluate(`(() => {
-  const hit = (re) => [...document.querySelectorAll('button,div,span,a')]
-    .filter(el => re.test(el.textContent || '') && el.offsetParent !== null)
-    .sort((a,b) => (a.textContent||'').length - (b.textContent||'').length)[0];
-  const n = hit(/Neural/i);
-  if (!n) return { found: false, text: (document.body.innerText||'').slice(0, 300) };
-  // Click the ROW, not the label inside it. The difficulty rows carry .mi-btn and the
-  // handler is on the row; clicking the shortest matching text node hit a child span and
-  // the game never started -- so the check passed while verifying nothing.
-  (n.closest('.mi-btn') || n).click();
+  const rows = [...document.querySelectorAll('.mi-btn')]
+    .filter(el => /Neural/i.test(el.textContent || '') && el.offsetParent !== null);
+  if (!rows.length) {
+    return { found: false, text: (document.body.innerText||'').slice(0, 300) };
+  }
+  rows[0].click();
+  return { found: true, label: (rows[0].textContent || '').slice(0, 40) };
+})()`);
+check('the Neural difficulty row is clickable', picked.found === true,
+  picked.found ? `clicked "${picked.label}"` : `not on screen: ${picked.text}`);
+
+// POSITIVE EVIDENCE, not the absence of a banner. The previous version looked for a
+// "neural panel" by matching /ms\b/ and /sims?/i in the page text -- which the
+// difficulty MENU itself satisfies ("128 sims - ~704 ms/move"), so it was true while no
+// game had started. And "no unreachable banner" passes trivially when no request was
+// ever attempted. The only thing that proves the network played is a request to
+// /api/bestmove, which the Resource Timing API records whether or not we instrumented it.
+await sleep(2000);
+const started = await evaluate(`(() => {
+  const t = document.body.innerText || '';
+  return { leftMenu: !/Choose difficulty/i.test(t), text: t.slice(0, 200) };
+})()`);
+check('selecting Neural starts a game', started.leftMenu === true,
+  started.leftMenu ? 'left the difficulty menu'
+    : `still on the menu: ${started.text.replace(/\n/g, ' ').slice(0, 120)}`);
+
+// PLAY A MOVE FIRST. initGame forces turn 'A', which is the human, so the bot has no
+// turn and correctly issues zero requests until we move. Asserting "requests > 0" before
+// moving measured my own ordering mistake and reported it as an app failure.
+const opened = await evaluate(`(() => {
+  const cell = document.querySelector('[data-r="7"][data-c="4"]');
+  if (!cell) return { found: false };
+  cell.click();
   return { found: true };
 })()`);
-check('the Neural difficulty is offered', picked.found === true,
-  picked.found ? 'clicked' : `not on screen: ${picked.text}`);
+check('a human opening move is playable', opened.found === true,
+  opened.found ? 'clicked (7,4)' : 'no board cell found');
 
-// The bot is B and may or may not move first; either way, wait out a network move and
-// look for the neural panel, which only the network path can populate.
-await sleep(12000);
+await sleep(14000);
 const played = await evaluate(`(() => {
+  const calls = performance.getEntriesByType('resource')
+    .filter(e => e.name.includes('/api/bestmove')).length;
   const t = document.body.innerText || '';
-  return {
-    text: t.slice(0, 400),
-    sawNeuralPanel: /ms\\b/.test(t) && /sims?/i.test(t),
-    sawUnavailable: /unreachable|unavailable/i.test(t)
-  };
+  return { calls, sawUnavailable: /unreachable|unavailable/i.test(t),
+           text: t.slice(0, 300) };
 })()`);
+check('the app actually requests moves from the network', played.calls > 0,
+  `${played.calls} /api/bestmove request(s)`);
 check('no "unreachable" banner while the network is up', played.sawUnavailable === false,
   played.sawUnavailable ? played.text.replace(/\n/g, ' ').slice(0, 160) : 'clean');
 
@@ -175,22 +221,32 @@ const before = await evaluate(`(() => {
   return { calls: window.__wwBestmoveCalls, text: t.slice(0, 200) };
 })()`);
 
+// Play a real opening move by addressing the CELL, not by guessing at highlight classes.
+// Board squares render with data-r/data-c and an onClick handler (index.html), so this is
+// unambiguous: the human is A, starts at row 8 col 4, and moves toward row 0, so (7,4) is
+// a legal first step. Class-name sniffing was the wrong approach -- /move/ also matched
+// move-history containers, and a wrong hit would have blamed the app for the selector.
+// (7,4) is where phase 1 moved to, so step again toward the goal for this turn.
 const moved = await evaluate(`(() => {
-  const tgt = [...document.querySelectorAll('*')]
-    .filter(el => el.className && typeof el.className === 'string'
-      && /tgt|target|move/i.test(el.className) && el.offsetParent !== null);
-  if (!tgt.length) return { found: false };
-  tgt[0].click();
-  return { found: true, n: tgt.length };
+  const cell = document.querySelector('[data-r="6"][data-c="4"]');
+  if (!cell) return { found: false, why: 'no [data-r][data-c] cell on screen' };
+  cell.click();
+  return { found: true };
 })()`);
 
-// Give the retry loop time to make several attempts and give up on none of them yet.
-await sleep(14000);
+// Wait out the WHOLE retry budget (12 attempts, 500ms*2^n capped at 8s, so ~65 s), not
+// just a few attempts. The decisive evidence is the FINAL state: the app's own words
+// saying it will not move, with no move played. Sampling mid-retry only shows it is
+// still trying, which the old substituting code would also have got past.
+await sleep(72000);
 const after = await evaluate(`(() => {
   const t = document.body.innerText || '';
   return {
     calls: window.__wwBestmoveCalls,
     sawRetry: /retrying|unreachable|unavailable/i.test(t),
+    // The app's refusal, in its own words. This is the exact no-substitution claim:
+    // the built-in bot would have moved instead of saying this.
+    sawRefusal: /will not move/i.test(t) && /built-in bot will not play/i.test(t),
     text: t.slice(0, 400)
   };
 })()`);
@@ -206,13 +262,17 @@ if (!moved.found) {
   check('the app SAYS the neural opponent is unreachable',
     after.sawRetry === true,
     after.sawRetry ? 'banner shown' : `no banner: ${after.text.replace(/\n/g, ' ').slice(0, 200)}`);
+  check('the app REFUSES to move rather than substituting the built-in bot',
+    after.sawRefusal === true,
+    after.sawRefusal ? 'states it will not move, and that the built-in bot will not play'
+      : `no refusal wording: ${after.text.replace(/\n/g, ' ').slice(0, 200)}`);
 }
 
 const fatal = consoleErrors.filter((t) => /is not defined|is not a function|SyntaxError/.test(t));
 check('no fatal console errors', fatal.length === 0, fatal.slice(0, 2).join(' | ') || 'none');
 
 ws.close();
-chrome.kill('SIGTERM');
+cleanup();
 // The summary must not claim the phase that did not run. An earlier version printed
 // "reports unreachability instead of substituting" whenever failures === 0, including
 // runs where the refusal phase was skipped entirely -- announcing a verification it had
