@@ -34,6 +34,7 @@ import {
   positionKey, validateState, normalizePosition
 } from '../js/normal-duel-engine.mjs';
 import { CONFIG_9X9 } from '../tests/support/nn-runtime-fixture.mjs';
+import { createNetGuard } from './net-guard.mjs';
 import { createStore } from './play-store.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -148,15 +149,24 @@ function inferOne(features) {
  * So the net's contribution is checked rather than assumed, and a violation throws
  * instead of returning a move:
  *
- *   shape       the response must be exactly policyLen + 1 floats
- *   informed    a leaf with legal moves must end up with non-zero prior mass
- *   varying     the legal logits must not be exactly flat -- a real network never
- *               emits bit-identical scores across ~60 legal moves, so flat means
- *               zeros or a stub, which a masked softmax would silently turn into a
- *               uniform prior (i.e. priorless search that looks healthy)
+ *   net_bad_shape      the response must be exactly policyLen + 1 floats
+ *   net_bad_value      the value must be finite and inside [-1, 1]; a NaN used to be
+ *                      clamped to 0 at every leaf, which degrades the search to
+ *                      priors-plus-visit-counts while every other signal looks fine
+ *   net_mask_empty     a leaf handed to us always has a legal move, so an empty mask
+ *                      means pendingLeafMask() is not filling the buffer
+ *   net_degenerate     a leaf with legal moves must gain prior mass, and the legal
+ *                      logits must not be flat (tolerated singly, refused in bulk)
+ *   net_never_consulted no leaf was network-informed
+ *   net_input_ignored  every leaf returned bit-identical logits, so the network is
+ *                      not reading the position it was given
  *
- * The counts ride along on the response so the caller can log them, and a caller
- * that wants to be certain can assert `netLeaves > 0`.
+ * WHAT THIS DOES NOT PROVE. These are all checks on the RESPONSE, so they establish
+ * that a live network answered plausibly and read its input -- not that it read the
+ * CORRECT input. Request-side corruption (the Buffer.from bug sent a body a quarter of
+ * the right size) yields a well-shaped varying policy for the wrong position, and only
+ * the inference server's own length check catches that. `netLeaves` is evidence, not a
+ * proof of correctness.
  */
 async function aiMove({ wasm, memory }, state, sims, seed) {
   const t0 = performance.now();
@@ -164,10 +174,7 @@ async function aiMove({ wasm, memory }, state, sims, seed) {
     JSON.stringify(CONFIG), JSON.stringify(state),
     JSON.stringify({ simulations: sims, maxConsidered: 12, cPuct: 1.25, seed })
   );
-  let leaves = 0;
-  let informed = 0;      // leaves where the net supplied real, varying priors
-  let blind = 0;         // leaves with legal moves but no prior mass at all
-  let flat = 0;          // leaves whose legal logits were bit-identical
+  const guard = createNetGuard(search.policyLen());
   try {
     while (!search.isDone()) {
       search.nextLeaf();
@@ -178,81 +185,42 @@ async function aiMove({ wasm, memory }, state, sims, seed) {
       const features = new Float32Array(memory.buffer, search.featuresPtr(), search.featuresLen());
       const out = await inferOne(features);
 
-      // submit() wants NON-NEGATIVE PROBABILITIES over the whole policy vector,
-      // not the network's raw logits, and it validates every entry -- including
-      // ones behind illegal codes. So the logits are turned into a masked softmax
-      // here: exp over legal entries only, normalised, zeros elsewhere.
-      // Pointers are re-read after the await because any wasm allocation can grow
-      // the heap and detach the buffer these views were built on.
-      const policyLen = search.policyLen();
-      // The contract is policyLen logits plus one value. A different length means we
-      // are reading someone else's bytes, and reject beats reinterpret.
-      if (out.length !== policyLen + 1) {
-        throw new Error(`net_bad_shape: got ${out.length} floats, want ${policyLen + 1}`);
-      }
+      // submit() wants NON-NEGATIVE PROBABILITIES over the whole policy vector, not
+      // the network's raw logits, and it validates every entry -- including ones behind
+      // illegal codes. The guard does that conversion and records what the network
+      // actually contributed at this leaf.
+      //
       // pendingLeafMask() FILLS the mask buffer; maskPtr() only says where it lives.
       // Without this call the buffer stays zero, the masked softmax finds no legal
       // entry, an ALL-ZERO policy gets submitted (which submit() accepts), and the
       // search runs with no priors at all -- picking near-arbitrary moves while every
       // latency number and the root value still look plausible.
+      //
+      // Pointers are re-read after the await because any wasm allocation can grow the
+      // heap and detach the buffers these views were built on.
+      const policyLen = search.policyLen();
       search.pendingLeafMask();
       const mask = new Float32Array(memory.buffer, search.maskPtr(), policyLen);
-      const probs = new Float32Array(policyLen);
-      let max = -Infinity;
-      let min = Infinity;
-      let legal = 0;
-      for (let i = 0; i < policyLen; i += 1) {
-        if (mask[i] > 0) {
-          legal += 1;
-          if (out[i] > max) max = out[i];
-          if (out[i] < min) min = out[i];
-        }
-      }
-      let sum = 0;
-      if (max !== -Infinity) {
-        for (let i = 0; i < policyLen; i += 1) {
-          if (mask[i] > 0) { const e = Math.exp(out[i] - max); probs[i] = e; sum += e; }
-        }
-      }
-      // A terminal or fully-masked leaf leaves the vector at zero, which submit()
-      // accepts; inventing a uniform prior there would put mass on illegal codes.
-      if (sum > 0) for (let i = 0; i < policyLen; i += 1) probs[i] /= sum;
+      const { probs, value } = guard.classify(out, mask);
       new Float32Array(memory.buffer, search.policyPtr(), policyLen).set(probs);
-      // legal === 0 is a terminal leaf and carries no network claim either way.
-      if (legal > 0) {
-        if (!(sum > 0)) blind += 1;
-        // Flat across >1 legal move means zeros or a stub, which the softmax above
-        // would have laundered into a clean-looking uniform prior.
-        else if (legal > 1 && max === min) flat += 1;
-        else informed += 1;
-      }
-
-      // Value must be finite and within [-1, 1]. The head is a tanh, so this
-      // clamp only guards against a numerical edge, never reshapes a real output.
-      const raw = out[out.length - 1];
-      const value = Math.max(-1, Math.min(1, Number.isFinite(raw) ? raw : 0));
       search.submit(value);
-      leaves += 1;
+
+      // Stop as soon as the network is known to be broken. Waiting for the loop to end
+      // meant a degenerate network at 4096 sims completed all 4096 round trips before
+      // refusing -- and the app retries 12 times, so ~50k pointless forwards per turn.
+      if (guard.doomed) break;
     }
-    // Refuse rather than return. A caller cannot tell a priorless move from a real
-    // one by looking at it, so this is the only place the distinction can be made.
-    if (blind > 0 || flat > 0) {
-      throw new Error(`net_degenerate: ${blind} priorless and ${flat} flat leaves `
-        + `of ${leaves} -- refusing to serve a move the network did not shape`);
-    }
-    // sims === 1 can decide at the root without ever reaching a non-terminal leaf;
-    // above that, zero informed leaves means the network was never consulted.
-    if (informed === 0 && sims > 1) {
-      throw new Error(`net_never_consulted: ${leaves} leaves, none network-informed`);
-    }
+    // Refuse rather than return. A caller cannot tell a priorless move from a real one
+    // by looking at it, so this is the only place the distinction can be made.
+    guard.finish();
     const code = search.actionCode();
     const used = search.simulationsUsed();
     const rootValue = search.rootValue();
     return {
       action: decodeAction(CONFIG, code),
       ms: Math.round(performance.now() - t0),
-      sims: used, leaves, rootValue,
-      netLeaves: informed        // proof-of-network, carried to the caller and the log
+      sims: used, leaves: guard.leaves, rootValue,
+      netLeaves: guard.netLeaves   // evidence-of-network, carried to the caller and log
     };
   } finally {
     search.free();
@@ -262,9 +230,14 @@ async function aiMove({ wasm, memory }, state, sims, seed) {
 // ------------------------------------------------------------------ the game
 const games = new Map();
 let nextId = 1;
+// Only /dev uses these, and nothing ever removed them: a long-lived server accumulated
+// one entry per game it had ever hosted. Bounded by dropping the oldest, which is safe
+// because a game is addressed by id and an evicted one simply reads as unknown.
+const MAX_GAMES = 200;
 function freshGame(humanSide, sims) {
   const id = String(nextId++);
   games.set(id, { id, state: createInitialState(CONFIG), humanSide, sims, history: [] });
+  while (games.size > MAX_GAMES) games.delete(games.keys().next().value);
   return games.get(id);
 }
 function view(g, extra = {}) {
@@ -387,7 +360,12 @@ function stateFromHistory(history, expect) {
       && p.pawns.A.r === expect.pawns.A.r && p.pawns.A.c === expect.pawns.A.c
       && p.pawns.B.r === expect.pawns.B.r && p.pawns.B.c === expect.pawns.B.c
       && p.stock.A === Number(expect.stock.A) && p.stock.B === Number(expect.stock.B)
-      && p.walls.length === Array.from(expect.walls || []).length;
+      // The wall SET, not just its size. Comparing counts let a same-count,
+      // different-keys divergence through, which is the one case where the server
+      // would search a board the player is not looking at -- the exact thing this
+      // check exists to prevent.
+      && [...p.walls].map(String).sort().join('|')
+         === Array.from(expect.walls || []).map(String).sort().join('|');
     if (!same) {
       const err = new Error('history_replay_mismatch');
       err.detail = { replayed: p, expected: expect };
@@ -422,17 +400,27 @@ http.createServer(async (req, res) => {
     /**
      * Who is calling, according to the transport.
      *
-     * The Tailscale-User-* headers are only trustworthy when the request actually
-     * came through tailscaled's proxy, which always originates on loopback. A
-     * request arriving from anywhere else could set those headers itself, so they
-     * are ignored unless the peer is local -- and the server binds to loopback in
-     * the deployed configuration precisely so that no other path exists.
+     * THE HONEST THREAT MODEL, because an earlier version of this comment claimed the
+     * opposite. `tailscale serve` injects Tailscale-User-* after WireGuard has
+     * authenticated the device, and its proxied requests arrive on loopback. But the
+     * loopback test does NOT establish that a request came from the proxy: when the
+     * site is browsed directly at 127.0.0.1:8177 -- the documented local setup -- the
+     * browser's own requests are also loopback, and Tailscale-User-* is not a
+     * forbidden header name, so same-origin page JS can set it. On a machine where
+     * someone can already reach this port, they can assert any identity.
+     *
+     * What is at stake is leaderboard integrity, not access: there is nothing else
+     * behind this. It is left as-is for the tailnet deployment, where the only route in
+     * is the proxy, and closed properly by setting WW_PLAY_PROXY_SECRET -- then a
+     * matching X-Play-Proxy-Secret is required as well, which page JS cannot obtain.
      */
+    const proxySecret = process.env.WW_PLAY_PROXY_SECRET || '';
     const tailnetUser = () => {
       const remote = String(req.socket.remoteAddress || '');
       const local = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
       const login = req.headers['tailscale-user-login'];
       if (!local || !login) return null;
+      if (proxySecret && req.headers['x-play-proxy-secret'] !== proxySecret) return null;
       return store.identify({ login, name: req.headers['tailscale-user-name'] });
     };
     const caller = () => tailnetUser() || store.verifyToken(bearer());
@@ -554,7 +542,12 @@ http.createServer(async (req, res) => {
       return res.end(board);
     }
     if (req.method === 'GET' && req.url.startsWith('/api/health')) {
-      const r = await fetch(`${INFER}/healthz`).then((x) => x.json()).catch(() => null);
+      // res.ok is checked: a 503 with a JSON body, or a {"ok":false} from the network's
+      // own healthz, both used to report this server as healthy.
+      const r = await fetch(`${INFER}/healthz`)
+        .then((x) => (x.ok ? x.json() : null))
+        .then((j) => (j && j.ok === false ? null : j))
+        .catch(() => null);
       // Checkpoint metadata, if the deployer left a meta.json beside the weights.
       // Read per request so swapping checkpoints does not need a restart, and kept
       // OUT of the page: hardcoding an Elo in the HTML goes stale the moment a

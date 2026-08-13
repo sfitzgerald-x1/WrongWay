@@ -1,19 +1,26 @@
 #!/usr/bin/env node
 /**
- * Prove the play server refuses to serve a move the network did not shape.
+ * Prove the play server refuses to serve a move a broken network produced.
  *
  *     node scripts/check-net-guard.mjs
  *
- * The guarantee under test is "every served move comes from the neural net, or no
- * move is served". The hard part is that a broken network still yields a LEGAL move:
- * the search happily runs on uniform or absent priors, returns a plausible action and
- * a plausible root value, and plays like a weak bot. That has shipped twice here. A
- * test that only checks for a 200 and a legal action cannot see it.
+ * The hard part is that a broken network still yields a LEGAL move: the search happily
+ * runs on uniform or absent priors, returns a plausible action and a plausible root
+ * value, and plays like a weak bot. That has shipped twice here. A test that only
+ * checks for a 200 and a legal action cannot see it.
  *
- * So this stands up a stub inference server that is broken in a specific way, and
- * asserts the play server REFUSES. A test that never observes the refusal is not
- * evidence, so the healthy case is included as the control -- if it fails, the
- * refusals below prove nothing except that everything is broken.
+ * So this stands up a stub inference server broken in one specific way per case and
+ * asserts the server REFUSES. Two cases are controls rather than refusals -- `healthy`,
+ * and `oneflat` for the tolerance -- because a suite that never serves a move would
+ * pass just as well with everything broken.
+ *
+ * SCOPE, stated so the summary line is not read as more than it is: every case here is
+ * about the RESPONSE. None of them establish that the network read the correct input.
+ * Request-side corruption (the Buffer.from bug sent a quarter-length body) yields a
+ * well-shaped varying policy for the wrong position, and only the inference server's own
+ * length check refuses that. The `healthy` stub deliberately derives its output from the
+ * request bytes, because a fixed-vector stub would itself be a network ignoring the
+ * board -- which is what an earlier version of this file used as its control.
  *
  * Runs against its own port and its own data dir: pointing it at the live store
  * would write test games onto the real leaderboard.
@@ -41,16 +48,52 @@ const stub = http.createServer((req, res) => {
   const chunks = [];
   req.on('data', (c) => chunks.push(c));
   req.on('end', () => {
+    // The healthy stub READS ITS INPUT. An earlier version returned one fixed vector
+    // for every leaf, which is precisely a network ignoring the board -- so the
+    // control case was itself a broken network, and a file asserting "served only
+    // when the network shaped it" demonstrated the opposite for its own control.
+    const features = Buffer.concat(chunks);
+    let h = 2166136261;
+    for (let i = 0; i < features.length; i += 4) h = ((h ^ features[i]) * 16777619) >>> 0;
+    const salt = (h % 1000) / 1000;
+
     let out;
     if (mode === 'zeros') {
       // The classic silent failure: every legal logit identical, so the masked
       // softmax turns it into a tidy uniform prior and the search flies blind.
       out = new Float32Array(POLICY_LEN + 1);
     } else if (mode === 'short') {
-      out = new Float32Array(POLICY_LEN);          // value float missing
-    } else {
+      // Short AND varying, so this isolates the length check. A short vector of zeros
+      // would also be degenerate, and would still 500 with the shape check deleted.
+      out = new Float32Array(POLICY_LEN);
+      for (let i = 0; i < POLICY_LEN; i += 1) out[i] = Math.sin(i * 0.7 + salt) * 2;
+    } else if (mode === 'nanlogits') {
+      // Reaches the `blind` branch: exp(NaN) is NaN, so no legal entry gains mass.
+      out = new Float32Array(POLICY_LEN + 1).fill(Number.NaN);
+      out[POLICY_LEN] = 0.25;
+    } else if (mode === 'nanvalue' || mode === 'hugevalue') {
+      out = new Float32Array(POLICY_LEN + 1);
+      for (let i = 0; i < POLICY_LEN; i += 1) out[i] = Math.sin(i * 0.7 + salt) * 2;
+      out[POLICY_LEN] = mode === 'nanvalue' ? Number.NaN : 42;
+    } else if (mode === 'constvec') {
+      // Varying across entries, identical across leaves: a network that never reads
+      // the position. Every per-leaf check passes; only the cross-leaf test sees it.
       out = new Float32Array(POLICY_LEN + 1);
       for (let i = 0; i < POLICY_LEN; i += 1) out[i] = Math.sin(i * 0.7) * 2;
+      out[POLICY_LEN] = 0.25;
+    } else if (mode === 'oneflat') {
+      // A single coincidental flat leaf, which must NOT kill the move: retries are
+      // seed-deterministic, so refusing here made one float collision permanent.
+      oneflatCount += 1;
+      out = new Float32Array(POLICY_LEN + 1);
+      if (oneflatCount === 5) out[POLICY_LEN] = 0.25;        // all logits 0.0 -> flat
+      else {
+        for (let i = 0; i < POLICY_LEN; i += 1) out[i] = Math.sin(i * 0.7 + salt) * 2;
+        out[POLICY_LEN] = 0.25;
+      }
+    } else {
+      out = new Float32Array(POLICY_LEN + 1);
+      for (let i = 0; i < POLICY_LEN; i += 1) out[i] = Math.sin(i * 0.7 + salt) * 2;
       out[POLICY_LEN] = 0.25;
     }
     const body = Buffer.copyBytesFrom(out);
@@ -59,6 +102,7 @@ const stub = http.createServer((req, res) => {
     res.end(body);
   });
 });
+let oneflatCount = 0;
 await new Promise((r) => stub.listen(INFER_PORT, '127.0.0.1', r));
 
 const server = spawn(process.execPath, [
@@ -103,11 +147,21 @@ for (let i = 0; ; i += 1) {
 
 const CASES = [
   { mode: 'healthy', want: 'move',
-    why: 'control: a varying policy must produce a served move, else the refusals below mean nothing' },
+    why: 'control: an input-dependent varying policy must produce a served move, else the refusals below mean nothing' },
   { mode: 'zeros', want: 'net_degenerate',
     why: 'flat logits are a broken net laundered into a uniform prior' },
+  { mode: 'nanlogits', want: 'net_degenerate',
+    why: 'NaN logits leave no legal entry with prior mass -- the priorless branch' },
   { mode: 'short', want: 'net_bad_shape',
-    why: 'a wrong-length response is someone else\'s bytes' }
+    why: 'a wrong-length response is someone else\'s bytes (varying, so only the length can refuse it)' },
+  { mode: 'nanvalue', want: 'net_bad_value',
+    why: 'a NaN value was clamped to 0 at every leaf, degrading the search while every other signal looked healthy' },
+  { mode: 'hugevalue', want: 'net_bad_value',
+    why: 'the head is a tanh, so a value of 42 is a broken graph, not a numerical edge' },
+  { mode: 'constvec', want: 'net_input_ignored',
+    why: 'a network returning one fixed vector for every position passes every per-leaf check' },
+  { mode: 'oneflat', want: 'move',
+    why: 'a single coincidental flat leaf must survive: retries are seed-deterministic, so refusing makes one float32 collision permanent' }
 ];
 
 let failures = 0;
@@ -135,4 +189,4 @@ if (failures) {
   console.log(`\n${failures} case(s) failed. Server log:\n${serverLog}`);
   process.exit(1);
 }
-console.log('\nall cases pass: a move is served only when the network shaped it');
+console.log('\nall cases pass: a live, input-reading network is required for a move to be\nserved -- see the docstring for what these checks do NOT establish');

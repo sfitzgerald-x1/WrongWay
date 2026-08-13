@@ -25,16 +25,33 @@ import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 
 import { createInitialState, applyAction, decodeAction } from '../js/normal-duel-engine.mjs';
+import { createNetGuard } from './net-guard.mjs';
 import { CONFIG_9X9 as CONFIG } from '../tests/support/nn-runtime-fixture.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
 const argv = process.argv.slice(2);
 const arg = (n, d) => { const i = argv.indexOf(`--${n}`); return i === -1 ? d : argv[i + 1]; };
-const SIMS_A = Number(arg('a', 2048));
-const SIMS_B = Number(arg('b', 128));
-const GAMES = Number(arg('games', 10));
-const CONC = Number(arg('concurrency', 4));
+/** A bad number here silently produced 0 games and a NaN% result. */
+function positiveInt(name, fallback) {
+  const raw = arg(name, String(fallback));
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) {
+    console.error(`--${name} must be a positive integer, got ${JSON.stringify(raw)}`);
+    process.exit(2);
+  }
+  return n;
+}
+const SIMS_A = positiveInt('a', 2048);
+const SIMS_B = positiveInt('b', 128);
+const GAMES = positiveInt('games', 10);
+const CONC = positiveInt('concurrency', 4);
+if (GAMES % 2 !== 0) {
+  // Colours alternate every game, and side A moves first with a ~13-point edge, so an
+  // odd count folds part of that advantage straight into the result.
+  console.error(`--games must be even so the colours balance, got ${GAMES}`);
+  process.exit(2);
+}
 // Per-side candidate breadth. Sequential halving spends the budget on
 // `considered` root actions only, so at 12 considered a large budget refines twelve
 // options and never examines the other ~56 legal moves. Making this asymmetric is
@@ -96,10 +113,21 @@ const instance = await wasmMod.default({ module_or_path: wasmBytes });
 const memory = instance.memory ?? wasmMod.__wasm?.memory ?? wasmMod.memory;
 const build = createHash('sha256').update(wasmBytes).digest('hex').slice(0, 16);
 
+/**
+ * One move, guarded.
+ *
+ * This harness is where BOTH historical silent-degradation bugs were found -- the
+ * unfilled mask and the coerced-float body -- and until now it was the one driver with
+ * no check for them, while its output is the evidence for the search-depth findings. A
+ * measurement tool that cannot tell a priorless search from a real one produces numbers
+ * about the wrong thing, so it now shares the play server's guard rather than
+ * reimplementing a weaker version of it.
+ */
 async function chooseMove(state, sims, seed, considered) {
   const search = new wasmMod.NormalDuelSearch(
     JSON.stringify(CONFIG), JSON.stringify(state),
     JSON.stringify({ simulations: sims, maxConsidered: considered, cPuct: 1.25, seed }));
+  const guard = createNetGuard(search.policyLen());
   try {
     while (!search.isDone()) {
       search.nextLeaf();
@@ -114,20 +142,14 @@ async function chooseMove(state, sims, seed, considered) {
       // latency number and the root value still look plausible.
       search.pendingLeafMask();
       const mask = new Float32Array(memory.buffer, search.maskPtr(), len);
-      const probs = new Float32Array(len);
-      let max = -Infinity;
-      for (let i = 0; i < len; i += 1) if (mask[i] > 0 && out[i] > max) max = out[i];
-      let sum = 0;
-      if (max !== -Infinity) {
-        for (let i = 0; i < len; i += 1) {
-          if (mask[i] > 0) { const e = Math.exp(out[i] - max); probs[i] = e; sum += e; }
-        }
-      }
-      if (sum > 0) for (let i = 0; i < len; i += 1) probs[i] /= sum;
+      const { probs, value } = guard.classify(out, mask);
       new Float32Array(memory.buffer, search.policyPtr(), len).set(probs);
-      const raw = out[out.length - 1];
-      search.submit(Math.max(-1, Math.min(1, Number.isFinite(raw) ? raw : 0)));
+      search.submit(value);
+      if (guard.doomed) break;
     }
+    // A match is a measurement, so a degenerate network must abort it rather than
+    // quietly contribute games. The caller lets this propagate.
+    guard.finish();
     return decodeAction(CONFIG, search.actionCode());
   } finally { search.free(); }
 }

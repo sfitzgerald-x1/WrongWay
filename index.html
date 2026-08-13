@@ -5619,6 +5619,17 @@ function App(){
     if(gameMode!=='pvc'||turn!=='B'||winner||screen!=='game')return;
     setAiThinking(true);
     const delay=aiDifficulty==='neural'?0:aiDifficulty==='hard'?1100:aiDifficulty==='easy'?500:700;
+    // CANCELLATION. The neural path awaits, so clearTimeout alone stopped being
+    // sufficient the moment this callback became async: a move can be in flight for
+    // seconds (and up to ~65s across retries), and when it resolves it unconditionally
+    // writes pawn, walls and move history built from the snapshot it captured. If the
+    // player left the game meanwhile -- back to the menu, new match -- those writes
+    // landed in the NEW game. `alive` is closed over by this run only and cleared by
+    // the cleanup, so every post-await write is gated on it.
+    let alive=true;
+    const gameAtStart=S.current.gameNum;
+    const stillOurs=()=>alive&&S.current.gameNum===gameAtStart
+      &&S.current.screen==='game'&&!S.current.winner;
     const t=setTimeout(async()=>{
       const st=S.current;
       let a=st.pA,b=st.pB,w=new Set(st.walls),bl=st.barrLeft,moves=[...st.moveHist];
@@ -5638,9 +5649,15 @@ function App(){
         const m=moves[i];
         if(m.type==='move'&&m.p==='B')recentAi.push({r:m.r,c:m.c});
       }
+      // The hammer heuristics below are the BUILT-IN bot, and under 'neural' they must
+      // not run at all. They sit before the neural call and assign `d`, so with hammer
+      // mode on they played a hand-written move while the difficulty said 'neural' --
+      // recorded as the network's game. The network's rules contain no hammer actions
+      // anyway, so there is nothing here for it to do.
+      const neural=aiDifficulty==='neural';
       // Hammer gratis nutzen, falls die AI sich selbst befreien kann
       let heldB=!!hh.B;
-      if(st.hammerMode&&heldB){
+      if(!neural&&st.hammerMode&&heldB){
         const bk=aiHammerBreak(b,w,aiGoal);
         if(bk){
           w.delete(bk);
@@ -5652,7 +5669,7 @@ function App(){
       }
       // Zug bestimmen: smarte Hammer-Logik
       let d=null;
-      if(st.hammerMode&&!heldB&&hms&&hms.length){
+      if(!neural&&st.hammerMode&&!heldB&&hms&&hms.length){
         const nh=nearestHammer(b,w,hms);
         const ownPath=bfsPath(b,w,aiGoal);
         const humPath=bfsPath(a,w,humGoal);
@@ -5699,6 +5716,7 @@ function App(){
         for(let i=1;i<=ATTEMPTS;i+=1){
           try{ d=await neuralMove(st,w,aiGoal); break; }
           catch(err){
+            if(!stillOurs()){setAiThinking(false);return;}   // the game moved on
             setNeuralInfo(null);
             console.warn('neural opponent unavailable (attempt '+i+'):',err.message);
             if(i===ATTEMPTS){
@@ -5713,7 +5731,14 @@ function App(){
         }
         const done=document.getElementById('ww-neural-warn');
         if(done)done.remove();
+        // The awaits above are the only ones in this callback, so this is the single
+        // point where a stale run must stop before it writes anything.
+        if(!stillOurs()){setAiThinking(false);return;}
       }
+      // A neural game NEVER falls through to the built-in bot. Without this, any path
+      // that leaves `d` null -- including a bug in the block above -- silently hands
+      // the turn to the heuristic, which is the whole failure being fixed.
+      if(!d&&neural){setAiThinking(false);return;}
       if(!d){
         _hamCtx=st.hammerMode?buildHamCtx(hms,hh,a,b):null;
         // Duell-Modus: dedizierte aggressive/strategische KI (A*-Distanz, Blocken/Vordrang)
@@ -5793,7 +5818,7 @@ function App(){
       }else{setWalls(w);setMoveHist(moves);setHammerHeld(nextHeld);}
       setTurn('A');setAiThinking(false);
     },delay);
-    return()=>clearTimeout(t);
+    return()=>{alive=false;clearTimeout(t);};
   },[turn,gameMode,winner,screen,aiDifficulty]);
 
   // ── Online realtime listener ──
@@ -8879,6 +8904,12 @@ function App(){
               title={t(d.k)} desc={t(d.k+'Desc')}
               onClick={()=>{setAiDifficulty(d.k);
                 if(d.k==='neural'){setSelectedMap('duel');setDuelSize('standard');
+                  // Also force OFF the variants the trained rules do not contain. The
+                  // server refuses them with a deterministic 400, so leaving one on
+                  // started a game whose every bot turn retried twelve times and then
+                  // died -- and the network cannot play them anyway.
+                  setHammerMode(false);setChaosMode(false);setDropMode(false);
+                  setGameBarr(10);   // the network was trained at 10 walls a side
                   initGame('pvc',undefined,null,false,undefined,false,'duel','standard','A');}
                 else initGame('pvc',undefined,null,false,undefined,false,selectedMap);}}/>
           ))}

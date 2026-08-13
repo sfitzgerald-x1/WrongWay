@@ -385,7 +385,10 @@ async function refreshBoard() {
         : g.result === 'forfeit' ? 'forfeited' : 'lost'}</td></tr>`).join('')
       : '<tr><td colspan="3" style="color:var(--subtle)">no games yet</td></tr>';
     if (me) {
-      const mine = d.players.find(p => p.name === me.name);
+      // Matched by userId, not display name. Two players can share a name -- a tailnet
+      // display name is not unique and can collide with a guest's -- and matching on it
+      // showed someone else's record as yours.
+      const mine = d.players.find(p => (me.id ? p.userId === me.id : p.name === me.name));
       $('meRec').textContent = mine
         ? `${mine.w}W ${mine.l}L over ${mine.games} game${mine.games === 1 ? '' : 's'}`
         : 'no games yet';
@@ -424,7 +427,14 @@ async function reportResult(result) {
       body: JSON.stringify({ result, side: human, plies: state.ply,
                              checkpoint: ckptLabel, sims: SIMS }) });
     refreshBoard();      // the standings are on screen now, so keep them current
-  } catch { /* the game still stands locally; the record is not worth a crash */ }
+  } catch (e) {
+    // The game still stands locally, so this must not throw -- but it must not be
+    // invisible either. Swallowing it made a deployment where /api/result 401s look
+    // like it was recording results when nothing was being written.
+    recorded = false;                      // so a later attempt can still land
+    $('status').textContent += ' (result not recorded)';
+    console.warn('recording the result failed:', e && e.message);
+  }
 }
 // Resigning is a real outcome, not a reset: the game is over and lost. Tracked
 // separately from state.outcome because the rules engine only produces outcomes

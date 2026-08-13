@@ -12,6 +12,7 @@
  */
 import { readFileSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -71,7 +72,9 @@ globalThis.fetch = async (url) => {
   return { ok: true, status: 200, json: async () => routes[key] };
 };
 
-const tmp = path.join(ROOT, `.check-play-${process.pid}.mjs`);
+// tmpdir, not the repo root: a SIGKILL skips the finally that removes this, and an
+// orphaned .check-play-*.mjs in a source tree that does not gitignore it is litter.
+const tmp = path.join(tmpdir(), `check-play-${process.pid}.mjs`);
 writeFileSync(tmp, src.replace("'/js/normal-duel-engine.mjs'", `'${ROOT}/js/normal-duel-engine.mjs'`));
 let failed = false;
 try {
