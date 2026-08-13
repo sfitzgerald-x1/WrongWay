@@ -884,8 +884,8 @@ impl PuctTreeSearch {
                 return None;
             }
             let start = n.edges_start as usize;
-            let edge = (start..start + n.edges_len as usize)
-                .find(|i| self.edges[*i].code == *code)?;
+            let edge =
+                (start..start + n.edges_len as usize).find(|i| self.edges[*i].code == *code)?;
             let child = self.edges[edge].child;
             if child == NO_CHILD {
                 // The move is legal and was scored, but never actually visited, so
