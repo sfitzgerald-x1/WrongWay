@@ -259,6 +259,59 @@ unitCase('narrow flat not evidence', 'no error', () => {
   }
 });
 
+// A PROPERTY, not an example: `doomed` must never trip without `finish()` throwing.
+//
+// `doomed` exists to cut a search short as soon as the network is known to be broken. If
+// any state could set it while finish() stayed silent, the caller would break out of the
+// leaf loop early and then SERVE the move -- a search truncated to a handful of
+// simulations, presented as a full one. That is a worse failure than the ones this module
+// was written to catch, and it is not something an example-based case would find, so it
+// is checked exhaustively over every short sequence of leaf kinds plus long runs of each.
+{
+  const kinds = ['informed', 'flatWide', 'flatNarrow', 'blind', 'maskEmpty', 'const'];
+  const apply = (g, kind, i) => {
+    if (kind === 'informed') return g.classify(varying(), maskOf(60));
+    if (kind === 'flatWide') { const f = new Float32Array(POLICY + 1); f[POLICY] = 0.25;
+                               return g.classify(f, maskOf(60)); }
+    if (kind === 'flatNarrow') { const f = new Float32Array(POLICY + 1); f[POLICY] = 0.25;
+                                 return g.classify(f, maskOf(2)); }
+    if (kind === 'blind') { const n = new Float32Array(POLICY + 1).fill(Number.NaN);
+                            n[POLICY] = 0.25; return g.classify(n, maskOf(60)); }
+    if (kind === 'maskEmpty') return g.classify(varying(), maskOf(0));
+    const c = new Float32Array(POLICY + 1);           // 'const': same vector every leaf
+    for (let k = 0; k < POLICY; k += 1) c[k] = Math.sin(k * 0.7) * 2;
+    c[POLICY] = 0.25;
+    return g.classify(c, maskOf(60));
+  };
+  const seqs = [];
+  const build = (pre) => {
+    if (pre.length) seqs.push([...pre]);
+    if (pre.length === 4) return;
+    for (const k of kinds) build([...pre, k]);
+  };
+  build([]);
+  for (const k of kinds) for (const n of [8, 12, 20]) seqs.push(Array(n).fill(k));
+
+  let violations = 0;
+  for (const seq of seqs) {
+    const g = createNetGuard(POLICY);
+    let threwAtLeaf = false;
+    for (let i = 0; i < seq.length; i += 1) {
+      try { apply(g, seq[i], i); } catch { threwAtLeaf = true; break; }
+      if (g.doomed) break;
+    }
+    if (threwAtLeaf) continue;
+    const wasDoomed = g.doomed;
+    let finishThrew = false;
+    try { g.finish(); } catch { finishThrew = true; }
+    if (wasDoomed && !finishThrew) violations += 1;
+  }
+  const ok = violations === 0;
+  console.log(`${ok ? '  ok  ' : '  FAIL'} ${'doomed => refuses'.padEnd(22)} -> `
+    + `${seqs.length} sequences, ${violations} violation(s)`);
+  if (!ok) { console.log('         a truncated search could be served as a full one'); failures += 1; }
+}
+
 // ------------------------------------------------------- server cases
 for (const c of CASES) {
   mode = c.mode;
