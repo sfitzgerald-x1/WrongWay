@@ -183,6 +183,12 @@ test('NormalDuelSearch hands improvedPolicy across as ascending (code, probabili
       typeof mod.NormalDuelSearch.prototype.improvedPolicy, 'function',
       'the accessor must be on the prototype: a consumer checks for it there before it runs'
     );
+    // The Rust side returns `Result<Vec<f64>, JsValue>`, which wasm-bindgen
+    // surfaces as a throw and NOT as a second return value or an out-parameter.
+    // Pinned because the guard was added after the accessor shipped: a consumer
+    // that probes for the method and then calls it with no arguments must see
+    // exactly what it saw before.
+    assert.equal(mod.NormalDuelSearch.prototype.improvedPolicy.length, 0, 'still nullary');
 
     const state = createInitialState(CONFIG);
     const legal = legalActionCodes(CONFIG, state);
@@ -192,9 +198,15 @@ test('NormalDuelSearch hands improvedPolicy across as ascending (code, probabili
       JSON.stringify(state),
       JSON.stringify({ simulations: 48, maxConsidered, seed: 20260818 })
     );
+    // Before a single leaf: the tree has nothing to say and says so, rather
+    // than handing back the empty array that would scatter to an all-zero row.
+    assert.throws(() => search.improvedPolicy(), /search_not_done/,
+      'an unstarted search must refuse');
+
     // Views rebuilt every iteration, as everywhere else: `nextLeaf` grows the
     // arenas and a growth detaches them.
     const f32 = (ptr, len) => new Float32Array(memory.buffer, ptr, len);
+    let leaves = 0;
     while (search.nextLeaf()) {
       search.pendingLeafMask();
       const policyLen = search.policyLen();
@@ -203,9 +215,18 @@ test('NormalDuelSearch hands improvedPolicy across as ascending (code, probabili
         f32(search.maskPtr(), policyLen),
         f32(search.policyPtr(), policyLen)
       ));
+      leaves += 1;
+      // Mid-search, where the unguarded read is a full, plausible, WRONG
+      // distribution. The refusal has to cross the boundary as a throw, or the
+      // guard only exists in Rust.
+      if (leaves === 10) {
+        assert.throws(() => search.improvedPolicy(), /search_not_done/,
+          'a partial tree must refuse across the boundary too');
+      }
     }
 
     const flat = search.improvedPolicy();
+    assert.ok(flat instanceof Float64Array, 'the happy path is still one Float64Array');
     assert.equal(flat.length % 2, 0, 'flattened pairs have an even length');
     const codes = [];
     let total = 0;
