@@ -212,23 +212,59 @@ function requireAnchors(ledger, a, b, base) {
   // A positive assertion fixes both. `--declare-parent` is a one-time operator act
   // recorded in the ledger; after that the id is usable as a base and its own
   // studenthood is irrelevant.
-  const parents = ledger[PARENTS_KEY] || {};
-  if (args['declare-parent'] && !parents[base]) {
+  const rawParents = ledger[PARENTS_KEY];
+  const parents = (rawParents !== null && typeof rawParents === 'object'
+    && !Array.isArray(rawParents)) ? rawParents : {};
+
+  // DECLARE AND EXIT, rather than declare-then-play.
+  //
+  // The first cut declared and continued in the same command, which meant the refusal
+  // message below had to recommend `--a s1 --b s2 --base s2 --declare-parent` -- a
+  // command structurally identical to the abuse it exists to stop. Teaching an operator
+  // the bypass shape at the moment they are blocked is how a flag becomes part of the
+  // copy-paste incantation. Declaring is now its own deliberate act that plays no games
+  // and appears in the ledger as its own event.
+  if (args['declare-parent']) {
+    if (Object.hasOwn(parents, base)) {
+      console.log(`'${base}' is already declared as a parent (${parents[base]?.ts || 'no date'}).`);
+      process.exit(0);
+    }
     parents[base] = { ts: new Date().toISOString() };
     ledger[PARENTS_KEY] = parents;
-    mkdirSync(path.dirname(args.ledger), { recursive: true });
-    writeFileSync(args.ledger, `${JSON.stringify(ledger, null, 2)}\n`);
+    try {
+      mkdirSync(path.dirname(args.ledger), { recursive: true });
+      writeFileSync(args.ledger, `${JSON.stringify(ledger, null, 2)}\n`);
+    } catch (err) {
+      console.error(`REFUSED: could not write the ledger ${args.ledger}: ${err.message}`);
+      process.exit(2);
+    }
     console.log(`declared '${base}' as a parent checkpoint -> ${args.ledger}`);
+    console.log('This is an ASSERTION, not a verification: nothing here can tell a real');
+    console.log('parent from a sibling. Re-run without --declare-parent to screen.');
+    process.exit(0);
   }
-  if (!parents[base]) {
+
+  // `Object.hasOwn`, NOT truthiness. `parents[base]` walks the prototype chain, so on a
+  // completely empty ledger `--base constructor`, `--base toString`, `--base valueOf`
+  // and `--base __proto__` all read as declared and passed the gate -- defeating the
+  // newest guard in exactly the empty-ledger state it was added for.
+  //
+  // The value is checked too, not just the key: swapping truthiness for `hasOwn` would
+  // otherwise start ACCEPTING a hand-edited `"P": null`, which the truthiness version
+  // refused. A declaration is a record, not a key.
+  const declaration = Object.hasOwn(parents, base) ? parents[base] : undefined;
+  if (declaration === null || typeof declaration !== 'object' || Array.isArray(declaration)) {
     console.error(`REFUSED: '${base}' has not been declared as a parent checkpoint.`);
     console.error(`  Naming a sibling as '--base' is how an unanchored screen gets recorded`);
     console.error(`  as an anchored one, so the base has to be asserted rather than assumed.`);
-    console.error(`  If '${base}' really is the parent these arms were trained from:`);
-    console.error(`    node scripts/distill-compare.mjs --a ${a} --b ${base} --base ${base} --declare-parent ...`);
+    console.error(`  If '${base}' really is the parent these arms were trained from, declare`);
+    console.error(`  it once, as its own act:`);
+    console.error(`    node scripts/distill-compare.mjs --base ${base} --declare-parent --ledger ${args.ledger}`);
     console.error(`  Ledger: ${args.ledger}`);
     process.exit(3);
   }
+  console.log(`base '${base}' declared ${parents[base]?.ts || 'at an unrecorded time'}`
+    + ' (asserted, not verified)');
   if (a === base || b === base) return { anchorRun: true, other: a === base ? b : a };
 
   // The anchor must EXIST, be a real record, and be against THIS base. The gate used to

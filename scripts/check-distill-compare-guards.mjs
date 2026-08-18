@@ -108,9 +108,66 @@ passesGate('declared parent that is itself a recorded student (lineage)', {
   args: ['--base', 'g2-030'],
 });
 
+// ANCHOR-RUN shape deliberately. In a student-vs-student shape this refuses for a
+// different reason (no anchor) even with the collision check deleted, so it would pass
+// for the wrong reason and pin nothing. The anchor-run shape is where the check is
+// load-bearing: without it the run records `ledger.__parents__.vsBase`, merging a
+// student record into the declarations map.
 refuses('an id colliding with the reserved ledger key', {
-  ledger: declared(), args: ['--a', '__parents__'],
+  ledger: declared(), args: ['--a', '__parents__', '--b', 'P'],
 });
+
+// --- prototype chain is not a declaration -------------------------------------
+//
+// `parents[base]` walks the prototype chain, so on an EMPTY ledger every
+// Object.prototype member read as declared and passed the gate.
+
+// ANCHOR-RUN shape (`--b X --base X`) for every one of these. In a student-vs-student
+// shape the missing anchor refuses first, so the case passes whether or not the
+// declaration gate works -- it would pin nothing. Here the declaration gate is the only
+// thing that can refuse, so reverting it to truthiness makes these fail.
+for (const proto of ['constructor', 'toString', 'valueOf', '__proto__', 'hasOwnProperty']) {
+  refuses(`--base ${proto} (Object.prototype member) on an empty ledger`, {
+    ledger: {}, args: ['--b', proto, '--base', proto],
+  });
+}
+
+refuses('__parents__ is a string, and an index into it looks declared', {
+  raw: JSON.stringify({ __parents__: 'P' }), args: ['--b', '0', '--base', '0'],
+});
+refuses('__parents__ is an array', {
+  raw: JSON.stringify({ __parents__: [] }), args: ['--b', 'P'],
+});
+refuses('__parents__ is null', {
+  raw: JSON.stringify({ __parents__: null }), args: ['--b', 'P'],
+});
+refuses('a declared value of null is not a declaration', {
+  raw: JSON.stringify({ __parents__: { P: null } }), args: ['--b', 'P'],
+});
+
+// The `__parents__` type check earns its place HERE rather than on the read path, where
+// the value check already covers every reachable shape. Modules are strict mode, so
+// assigning a property to a string primitive throws -- without the type check,
+// --declare-parent against a corrupt ledger dies with a raw TypeError instead of
+// recovering or refusing.
+{
+  const { code, out, file } = run({
+    raw: JSON.stringify({ __parents__: 'P' }), args: ['--declare-parent'],
+  });
+  if (code !== 0 && code !== 2) {
+    FAILURES.push(`--declare-parent over a string __parents__: exit ${code}, want 0 or a`
+      + ` clean refusal (2)\n      ${out.trim().split('\n').pop() || ''}`);
+  }
+  if (/TypeError|Cannot create property/.test(out)) {
+    FAILURES.push('--declare-parent over a string __parents__ threw a raw TypeError');
+  }
+  if (code === 0) {
+    const after = JSON.parse(readFileSync(file, 'utf8'));
+    if (!after.__parents__?.P?.ts) {
+      FAILURES.push('--declare-parent over a string __parents__ did not record a declaration');
+    }
+  }
+}
 
 // --- the anchor must be against THIS base, and be a real record ----------------
 
@@ -207,11 +264,27 @@ refuses('ledger entry is null', { raw: JSON.stringify({ __parents__: { P: {} }, 
 // --- --declare-parent actually records ----------------------------------------
 
 {
-  const { file } = run({ ledger: {}, args: ['--b', 'P', '--declare-parent'] });
+  // Declares, records, and EXITS 0 without playing anything. Declare-then-play forced
+  // the refusal message to recommend `--a s1 --b s2 --base s2 --declare-parent`, which
+  // is the abuse shape; an operator should not be handed it at the moment they are
+  // blocked.
+  const { code, out, file } = run({ ledger: {}, args: ['--declare-parent'] });
   const after = JSON.parse(readFileSync(file, 'utf8'));
   if (!after.__parents__?.P) {
     FAILURES.push('--declare-parent did not record the parent in the ledger');
   }
+  if (code !== 0) FAILURES.push(`--declare-parent exited ${code}, want 0`);
+  if (/ERR_MODULE_NOT_FOUND|Cannot find module/.test(out)) {
+    FAILURES.push('--declare-parent proceeded to play instead of exiting after declaring');
+  }
+  // And a declared base then screens normally.
+  const re = run({
+    raw: JSON.stringify({
+      __parents__: { P: { ts: '2026-01-01' } },
+      s1: { vsBase: HEALTHY }, s2: { vsBase: HEALTHY },
+    }),
+  });
+  if (re.code !== 1) FAILURES.push(`after declaring, a normal screen exited ${re.code}, want the gate to pass`);
 }
 
 // -------------------------------------------------------------------------------
