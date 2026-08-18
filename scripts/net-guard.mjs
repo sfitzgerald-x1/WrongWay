@@ -168,9 +168,24 @@ export function createNetGuard(policyLen) {
       // Applies at every budget: from_state rejects terminal roots and the root is
       // always evaluated, so there is always at least one non-terminal leaf. An earlier
       // `sims > 1` exemption could only ever take effect once something was broken.
+      // Fires even when every leaf was `narrowFlat`. That is deliberate and pinned by
+      // `check-net-guard.mjs` ("narrow flat not evidence"): tolerated means "not proof
+      // the network is broken", NOT "proof it answered".
+      //
+      // It does refuse some legitimate positions. Observed live 2026-08-16 at ply 51,
+      // both players out of wall stock, a single candidate holding all 512 visits,
+      // rootValue 0.9995: features and mask went out, the network answered, and flat
+      // logits over a 1-2 move legal set left `informed` at 0. Refusing is still right
+      // HERE -- a play server that cannot distinguish "answered" from "dead" must not
+      // move -- so callers that meet such positions in bulk (corpus generation) absorb
+      // the refusal on their side instead of loosening this.
+      //
+      // Relaxing the condition to `leaves > narrowFlat` was tried on 2026-08-16 and
+      // reverted: it does not stop the refusal, it just downgrades it to the less
+      // accurate `net_input_ignored` from the check below, and it broke that test.
       if (informed === 0) {
         throw new NetGuardError('net_never_consulted',
-          `${leaves} leaves, none network-informed`);
+          `${leaves} leaves (${narrowFlat} narrow-flat), none network-informed`);
       }
       // A network ignoring its input returns one fixed vector for every position; each
       // response passes every per-leaf check. Tests ALL identical rather than ANY
