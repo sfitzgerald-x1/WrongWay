@@ -145,6 +145,21 @@ refuses('a declared value of null is not a declaration', {
   raw: JSON.stringify({ __parents__: { P: null } }), args: ['--b', 'P'],
 });
 
+// A declaration must actually land. `parents['__proto__'] = {...}` triggers the
+// inherited setter, reassigns the prototype instead of creating an own property, and
+// JSON.stringify drops it -- so the run reported success over a ledger that recorded
+// nothing. Fail-closed, but a success message for something that did not happen.
+{
+  const { code, file } = run({ ledger: {}, args: ['--base', '__proto__', '--declare-parent'] });
+  const raw = readFileSync(file, 'utf8');
+  const after = JSON.parse(raw);
+  if (code !== 0) {
+    FAILURES.push(`--declare-parent __proto__: exit ${code}, want 0`);
+  } else if (!Object.hasOwn(after.__parents__ ?? {}, '__proto__')) {
+    FAILURES.push(`--declare-parent __proto__ reported success but recorded nothing: ${raw.trim()}`);
+  }
+}
+
 // The `__parents__` type check earns its place HERE rather than on the read path, where
 // the value check already covers every reachable shape. Modules are strict mode, so
 // assigning a property to a string primitive throws -- without the type check,

@@ -229,7 +229,19 @@ function requireAnchors(ledger, a, b, base) {
       console.log(`'${base}' is already declared as a parent (${parents[base]?.ts || 'no date'}).`);
       process.exit(0);
     }
-    parents[base] = { ts: new Date().toISOString() };
+    // `defineProperty`, not assignment. `parents[base] = ...` with base `__proto__`
+    // triggers the INHERITED SETTER: it reassigns the prototype of `parents` instead of
+    // creating an own property, `JSON.stringify` does not serialize a prototype, and the
+    // run then printed "declared '__proto__' as a parent checkpoint" over a ledger that
+    // recorded nothing. Fail-closed -- the later screen still refused -- but a success
+    // message for something that did not happen is the exact class this file exists to
+    // remove. The read path already handles an own `__proto__` from JSON correctly,
+    // since own properties shadow the inherited accessor, so this makes write match read
+    // rather than banning the name.
+    Object.defineProperty(parents, base, {
+      value: { ts: new Date().toISOString() },
+      enumerable: true, writable: true, configurable: true,
+    });
     ledger[PARENTS_KEY] = parents;
     try {
       mkdirSync(path.dirname(args.ledger), { recursive: true });
