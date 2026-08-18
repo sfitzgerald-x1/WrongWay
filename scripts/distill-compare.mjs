@@ -53,8 +53,23 @@ const args = parseArgs(process.argv.slice(2), {
   // (or `a`) IS this id is an ANCHOR run and is recorded; any other pairing is a
   // student-vs-student screen and is gated on both sides having an anchor.
   base: 'base',
+  // One-time assertion that `--base` really is a parent checkpoint. Parenthood cannot
+  // be inferred: in a lineage every net is both a student of the previous one and the
+  // parent of the next, so ledger membership answers the wrong question.
+  'declare-parent': false,
   ledger: path.join(process.env.HOME || '/tmp', 'wwplay/distill/anchors.json')
 });
+
+// Reserved top-level ledger key holding declared parents. Student entries live at the
+// top level beside it, so an id colliding with this key is refused rather than silently
+// merged into the declarations.
+const PARENTS_KEY = '__parents__';
+for (const [flag, id] of [['--a', args.a], ['--b', args.b], ['--base', args.base]]) {
+  if (id === PARENTS_KEY) {
+    console.error(`REFUSED: ${flag}=${PARENTS_KEY} collides with the ledger's reserved key.`);
+    process.exit(2);
+  }
+}
 
 // ------------------------------------------------------- R0 guards
 /**
@@ -109,6 +124,12 @@ const POOL_SPREAD_HEALTHY = envNumber('WW_POOL_SPREAD_HEALTHY', 145);
  * outside anything the loop has ever done honestly.
  */
 const BREAKAGE_ELO = envNumber('WW_BREAKAGE_ELO', 2 * POOL_SPREAD_HEALTHY);
+// The EFFECTIVE thresholds, once, in the run's own output. A valid override is
+// otherwise invisible: a screen reported months later cannot be checked against the
+// threshold it actually ran under, which is the same "reads on while configured
+// differently" gap the env validation above exists to close.
+console.log(`tripwire: breakage ${BREAKAGE_ELO}, healthy ${POOL_SPREAD_HEALTHY},`
+  + ` full ${POOL_SPREAD_FULL}`);
 
 /**
  * A missing ledger is an empty ledger; a MALFORMED one is not.
@@ -163,16 +184,48 @@ function anchorProblem(rec, wantBase) {
  * because the whole failure was believing a difference without knowing the level.
  */
 function requireAnchors(ledger, a, b, base) {
-  // A STUDENT CANNOT BE A PARENT. `--a s1 --b s2 --base s2` is structurally identical
-  // to a legitimate anchor run, so naming one of the two arms as the base ran the
-  // unanchored screen anyway AND wrote `s1.vsBase = {base: 's2'}`, which every later
-  // screen then accepted. Anything the ledger already knows as a student is not a
-  // parent, and saying so costs nothing.
-  if (ledger[base]?.vsBase) {
-    console.error(`REFUSED: '${base}' is itself recorded as a student, measured against`
-      + ` '${ledger[base].vsBase.base}'. A student cannot serve as the parent of another`
-      + ` screen -- naming a sibling as '--base' is how an unanchored comparison gets`
-      + ` recorded as an anchored one.`);
+  // Comparing a checkpoint with itself is never a screen. It also passes every gate
+  // below, and reports "significant: X is stronger" than itself whenever noise pushes
+  // the interval off 50%.
+  if (a === b) {
+    console.error(`REFUSED: --a and --b are both '${a}'. That is not a comparison.`);
+    process.exit(3);
+  }
+
+  // PARENTHOOD IS DECLARED, NOT INFERRED.
+  //
+  // The first cut inferred it from absence -- anything not already recorded as a
+  // student was allowed to be a base. That is simultaneously too strict and too weak.
+  //
+  // Too strict: in a lineage every checkpoint is a student of the previous one AND the
+  // parent of the next, so screening a second generation against `g2-030` was refused
+  // for the crime of `g2-030` having its own anchor against `g2-020`. With no override,
+  // the only escape was deleting a real anchor record -- pushing operators to corrupt
+  // the file the whole gate depends on.
+  //
+  // Too weak: on an EMPTY ledger nothing is a student, so `--a s1 --b s2 --base s2`
+  // sailed through -- and because the anchor-run branch returns before every check
+  // below, it skipped the collapse gate too, repeatably and forever. The guard was
+  // weakest exactly when it matters most: a fresh experiment with an empty ledger,
+  // which is when the incident happened.
+  //
+  // A positive assertion fixes both. `--declare-parent` is a one-time operator act
+  // recorded in the ledger; after that the id is usable as a base and its own
+  // studenthood is irrelevant.
+  const parents = ledger[PARENTS_KEY] || {};
+  if (args['declare-parent'] && !parents[base]) {
+    parents[base] = { ts: new Date().toISOString() };
+    ledger[PARENTS_KEY] = parents;
+    mkdirSync(path.dirname(args.ledger), { recursive: true });
+    writeFileSync(args.ledger, `${JSON.stringify(ledger, null, 2)}\n`);
+    console.log(`declared '${base}' as a parent checkpoint -> ${args.ledger}`);
+  }
+  if (!parents[base]) {
+    console.error(`REFUSED: '${base}' has not been declared as a parent checkpoint.`);
+    console.error(`  Naming a sibling as '--base' is how an unanchored screen gets recorded`);
+    console.error(`  as an anchored one, so the base has to be asserted rather than assumed.`);
+    console.error(`  If '${base}' really is the parent these arms were trained from:`);
+    console.error(`    node scripts/distill-compare.mjs --a ${a} --b ${base} --base ${base} --declare-parent ...`);
     console.error(`  Ledger: ${args.ledger}`);
     process.exit(3);
   }
@@ -214,12 +267,22 @@ function requireAnchors(ledger, a, b, base) {
     if (saturated) {
       unfit.push([id, `scored ${rec.scorePct}% vs '${base}' (saturated: one side won every`
         + ` decided game)`]);
-    } else if (rec.elo < -POOL_SPREAD_HEALTHY) {
-      unfit.push([id, `is ${rec.elo} Elo BELOW '${base}', past the ~${POOL_SPREAD_HEALTHY}`
-        + ` spread of healthy nets`]);
     } else if (Math.abs(rec.elo) > BREAKAGE_ELO) {
-      unfit.push([id, `is ${rec.elo > 0 ? '+' : ''}${rec.elo} Elo against '${base}', beyond the`
-        + ` ${BREAKAGE_ELO} breakage threshold`]);
+      // ONE threshold, both directions.
+      //
+      // This was two branches, a floor at -POOL_SPREAD_HEALTHY and a magnitude check at
+      // BREAKAGE_ELO. The floor was wrong twice over. At -145 it refused a legitimately
+      // weak early-generation arm (30.3% against its parent) with no override, and it
+      // was stricter than the tripwire's own definition of "beyond anything this loop
+      // has produced honestly". Raising it to -BREAKAGE_ELO fixed that but made the
+      // branch DEAD: anything below -290 already fails `abs > 290`. A guard clause that
+      // cannot fire is the bug this file exists to prevent, so the two are one check.
+      //
+      // Both incident students are still refused: 0.0% is saturated above, 4.5% is -530.
+      unfit.push([id, rec.elo < 0
+        ? `is ${rec.elo} Elo BELOW '${base}', past the ${BREAKAGE_ELO} breakage threshold`
+        : `is +${rec.elo} Elo against '${base}', beyond the ${BREAKAGE_ELO} breakage`
+          + ` threshold -- a student does not beat its own parent by that much honestly`]);
     }
   }
   if (unfit.length) {

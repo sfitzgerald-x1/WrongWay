@@ -9,18 +9,22 @@
  * outcome unambiguous without playing a single game:
  *
  *   exit 3  -- the anchor gate refused
- *   exit 2  -- an input was rejected (bad env, unreadable ledger)
- *   exit 1  -- THE GATE LET IT THROUGH and the script then failed to load the engine
+ *   exit 2  -- an input was rejected (bad env, unreadable ledger, reserved id)
+ *   exit 1 AND a module-not-found marker -- the gate LET IT THROUGH and the script
+ *           then failed to load the engine
+ *
+ * The marker is checked, not just the exit code: injecting a `throw` into
+ * `requireAnchors` also exits 1, and without the marker a crashing script would count
+ * as "the gate passed".
  *
  * Testing the script rather than an exported helper is deliberate: the defect these
  * cases exist for was a gate that was present and passable, and only the real argv ->
  * ledger -> gate path can show that.
  *
- * Every case below is a bug that a review found in the first cut. Verified against the
- * pre-fix file: it fails 7 of them.
+ * Verified against the pre-fix file: it fails 18 of these.
  */
 
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -32,8 +36,9 @@ const dir = mkdtempSync(path.join(tmpdir(), 'ww-anchor-'));
 const FAILURES = [];
 
 const HEALTHY = { base: 'P', scorePct: 51.2, elo: 8, games: 200, decided: 180, ts: '2026-01-01' };
+/** A ledger with 'P' already declared as a parent, which is the normal steady state. */
+const declared = (entries = {}) => ({ __parents__: { P: { ts: '2026-01-01' } }, ...entries });
 
-/** Run the script with `ledger` on disk. `raw` writes the file verbatim. */
 function run({ ledger, raw, args = [], env = {} }) {
   const file = path.join(dir, `ledger-${Math.random().toString(36).slice(2)}.json`);
   writeFileSync(file, raw !== undefined ? raw : JSON.stringify(ledger ?? {}, null, 2));
@@ -43,108 +48,171 @@ function run({ ledger, raw, args = [], env = {} }) {
     encoding: 'utf8',
     env: { ...process.env, WW_DISTILL_WASM_DIR: path.join(dir, 'no-such-wasm-dir'), ...env },
   });
-  return { code: r.status, out: `${r.stdout || ''}${r.stderr || ''}` };
+  return { code: r.status, out: `${r.stdout || ''}${r.stderr || ''}`, file };
 }
 
 function refuses(label, opts) {
   const { code, out } = run(opts);
   if (code === 2 || code === 3) return;
   FAILURES.push(`${label}: exit ${code}, want a refusal (2 or 3)`
-    + `${code === 1 ? ' -- THE GATE PASSED IT' : ''}\n      ${out.trim().split('\n')[0] || ''}`);
+    + `${code === 1 ? ' -- THE GATE PASSED IT' : ''}\n      ${out.trim().split('\n').pop() || ''}`);
 }
 
+/** Reached loadWasm, which is as far as this harness goes -- and reached it by passing
+ *  the gate rather than by crashing inside it. */
 function passesGate(label, opts) {
   const { code, out } = run(opts);
-  if (code === 1) return;   // reached loadWasm, which is as far as this harness goes
-  FAILURES.push(`${label}: exit ${code}, want the gate to pass (1)\n      ${out.trim().split('\n')[0] || ''}`);
+  const reachedWasm = /ERR_MODULE_NOT_FOUND|Cannot find module|no-such-wasm-dir/.test(out);
+  if (code === 1 && reachedWasm) return;
+  FAILURES.push(`${label}: exit ${code}, reachedWasm=${reachedWasm}, want the gate to pass`
+    + `\n      ${out.trim().split('\n').pop() || ''}`);
 }
 
 // --- the gate does its job ----------------------------------------------------
 
-refuses('empty ledger: student-vs-student with no anchor', { ledger: {} });
+refuses('empty ledger: student-vs-student with no anchor', { ledger: declared() });
 
-passesGate('both arms properly anchored against the base', {
-  ledger: { s1: { vsBase: HEALTHY }, s2: { vsBase: { ...HEALTHY, scorePct: 48.9, elo: -8 } } },
+passesGate('both arms properly anchored against a declared base', {
+  ledger: declared({ s1: { vsBase: HEALTHY }, s2: { vsBase: { ...HEALTHY, scorePct: 48.9, elo: -8 } } }),
 });
 
 passesGate('legitimate anchor run (one arm IS the base)', {
-  ledger: {}, args: ['--b', 'P'],
+  ledger: declared(), args: ['--b', 'P'],
 });
 
-// --- HIGH-1: the anchor must be against THIS base -----------------------------
+refuses('--a and --b are the same checkpoint', {
+  ledger: declared({ s1: { vsBase: HEALTHY } }), args: ['--b', 's1'],
+});
+
+// --- parenthood is declared, not inferred -------------------------------------
+
+refuses('base has not been declared as a parent', {
+  ledger: { s1: { vsBase: HEALTHY }, s2: { vsBase: HEALTHY } },
+});
+
+refuses('--base names a sibling on an EMPTY ledger (the residual hole)', {
+  ledger: {}, args: ['--base', 's2'],
+});
+
+// A declared parent that is ITSELF a student is the normal lineage case: every net is
+// a student of the previous one and the parent of the next. Inferring parenthood from
+// ledger membership refused this, which would have broken the second generation of
+// every experiment.
+passesGate('declared parent that is itself a recorded student (lineage)', {
+  ledger: {
+    __parents__: { 'g2-030': { ts: '2026-01-01' } },
+    'g2-030': { vsBase: { ...HEALTHY, base: 'g2-020' } },
+    s1: { vsBase: { ...HEALTHY, base: 'g2-030', elo: 21 } },
+    s2: { vsBase: { ...HEALTHY, base: 'g2-030', elo: 10 } },
+  },
+  args: ['--base', 'g2-030'],
+});
+
+refuses('an id colliding with the reserved ledger key', {
+  ledger: declared(), args: ['--a', '__parents__'],
+});
+
+// --- the anchor must be against THIS base, and be a real record ----------------
 
 refuses('anchors recorded against a DIFFERENT parent', {
-  ledger: {
+  ledger: declared({
     s1: { vsBase: { ...HEALTHY, base: 'OLD-PARENT' } },
     s2: { vsBase: { ...HEALTHY, base: 'OLD-PARENT' } },
-  },
+  }),
 });
 
-// --- HIGH-2: a key is not a measurement ---------------------------------------
-
-refuses('vsBase is `true`', { ledger: { s1: { vsBase: true }, s2: { vsBase: true } } });
-refuses('vsBase is `{}`', { ledger: { s1: { vsBase: {} }, s2: { vsBase: {} } } });
+refuses('vsBase is `true`', { ledger: declared({ s1: { vsBase: true }, s2: { vsBase: true } }) });
+refuses('vsBase is `{}`', { ledger: declared({ s1: { vsBase: {} }, s2: { vsBase: {} } }) });
+refuses('vsBase is an array', { ledger: declared({ s1: { vsBase: [] }, s2: { vsBase: HEALTHY } }) });
+// `null` specifically, because it is the one shape that makes the object check
+// load-bearing rather than redundant: `true` and `[]` are both caught downstream by the
+// base mismatch, but `null.base` throws, and a crash is not a refusal.
+refuses('vsBase is null', { ledger: declared({ s1: { vsBase: null }, s2: { vsBase: HEALTHY } }) });
 refuses('vsBase has no game count', {
-  ledger: { s1: { vsBase: { ...HEALTHY, games: undefined } }, s2: { vsBase: HEALTHY } },
+  ledger: declared({ s1: { vsBase: { ...HEALTHY, games: undefined } }, s2: { vsBase: HEALTHY } }),
+});
+refuses('vsBase has a string game count', {
+  ledger: declared({ s1: { vsBase: { ...HEALTHY, games: '200' } }, s2: { vsBase: HEALTHY } }),
+});
+refuses('vsBase has no score', {
+  ledger: declared({ s1: { vsBase: { ...HEALTHY, scorePct: undefined } }, s2: { vsBase: HEALTHY } }),
+});
+refuses('vsBase has a string Elo', {
+  ledger: declared({ s1: { vsBase: { ...HEALTHY, elo: '8' } }, s2: { vsBase: HEALTHY } }),
 });
 
-// --- HIGH-3: a student cannot be a parent -------------------------------------
-
-refuses('--base names an arm that is itself a recorded student', {
-  ledger: { s2: { vsBase: { ...HEALTHY, base: 'P' } } },
-  args: ['--base', 's2'],
-});
-
-// --- MEDIUM-1/2: an anchor showing collapse is not permission ------------------
+// --- an anchor showing collapse is not permission ------------------------------
+//
+// Two branches: saturated, and magnitude in either direction. Both directions are
+// exercised because they share one condition and a sign error would break exactly one
+// of them -- the incident's own delta was favourable-looking.
 
 refuses('one arm is 530 Elo below its parent', {
-  ledger: {
+  ledger: declared({
     s1: { vsBase: { ...HEALTHY, scorePct: 4.5, elo: -530 } },
     s2: { vsBase: HEALTHY },
-  },
+  }),
 });
 
 refuses('one arm was annihilated 0-0-200 (saturated, elo null)', {
-  ledger: {
+  ledger: declared({
     s1: { vsBase: { ...HEALTHY, scorePct: 0, elo: null } },
     s2: { vsBase: HEALTHY },
-  },
+  }),
 });
 
 refuses('one arm is beyond the breakage threshold in the FAVOURABLE direction', {
-  ledger: {
+  ledger: declared({
     s1: { vsBase: { ...HEALTHY, scorePct: 96.0, elo: 552 } },
     s2: { vsBase: HEALTHY },
-  },
+  }),
 });
 
-// --- MEDIUM-3: the threshold itself must be a number ---------------------------
+// The floor is -BREAKAGE_ELO, not -POOL_SPREAD_HEALTHY: a legitimately weak early
+// generation must still be screenable.
+passesGate('an arm 120 Elo below its parent is weak, not broken', {
+  ledger: declared({
+    s1: { vsBase: { ...HEALTHY, scorePct: 33.4, elo: -120 } },
+    s2: { vsBase: HEALTHY },
+  }),
+});
+
+// --- the threshold itself must be a number ------------------------------------
 
 refuses('WW_BREAKAGE_ELO is a plausible typo ("2x145" -> NaN)', {
-  ledger: { s1: { vsBase: HEALTHY }, s2: { vsBase: HEALTHY } },
+  ledger: declared({ s1: { vsBase: HEALTHY }, s2: { vsBase: HEALTHY } }),
   env: { WW_BREAKAGE_ELO: '2x145' },
+});
+
+refuses('WW_POOL_SPREAD_HEALTHY is negative', {
+  ledger: declared({ s1: { vsBase: HEALTHY }, s2: { vsBase: HEALTHY } }),
+  env: { WW_POOL_SPREAD_HEALTHY: '-1' },
 });
 
 // Empty is UNSET, not zero. `export WW_BREAKAGE_ELO=` and an unset variable expand
 // identically in shell, and the pre-fix `Number('' ?? d)` read that as 0 -- a threshold
-// of zero fires SUSPECTED BREAKAGE on every run including a dead-even 50%, which is the
-// same as having no tripwire, just noisier. Falling back to the default is the safe
-// reading, and it is what the corpus-scale gate does with an empty env too.
+// of zero fires SUSPECTED BREAKAGE on every run including a dead-even 50%, which is as
+// useless as never firing. Falling back to the default is the safe reading.
 passesGate('WW_BREAKAGE_ELO is empty -> falls back to the default, not 0', {
-  ledger: { s1: { vsBase: HEALTHY }, s2: { vsBase: HEALTHY } },
+  ledger: declared({ s1: { vsBase: HEALTHY }, s2: { vsBase: HEALTHY } }),
   env: { WW_BREAKAGE_ELO: '' },
-});
-
-refuses('WW_POOL_SPREAD_HEALTHY is negative', {
-  ledger: { s1: { vsBase: HEALTHY }, s2: { vsBase: HEALTHY } },
-  env: { WW_POOL_SPREAD_HEALTHY: '-1' },
 });
 
 // --- a malformed ledger refuses rather than crashing ---------------------------
 
 refuses('ledger file is literal null', { raw: 'null' });
 refuses('ledger file is not JSON', { raw: '{ not json' });
-refuses('ledger entry is null', { raw: JSON.stringify({ s1: null, s2: null }) });
+refuses('ledger entry is null', { raw: JSON.stringify({ __parents__: { P: {} }, s1: null, s2: null }) });
+
+// --- --declare-parent actually records ----------------------------------------
+
+{
+  const { file } = run({ ledger: {}, args: ['--b', 'P', '--declare-parent'] });
+  const after = JSON.parse(readFileSync(file, 'utf8'));
+  if (!after.__parents__?.P) {
+    FAILURES.push('--declare-parent did not record the parent in the ledger');
+  }
+}
 
 // -------------------------------------------------------------------------------
 
@@ -154,6 +222,6 @@ if (FAILURES.length) {
   for (const f of FAILURES) console.error(`  ${f}`);
   process.exit(1);
 }
-console.log('all distill-compare guard checks passed: an unanchored, stale-anchored,'
-  + ' self-anchored or collapsed-arm screen is refused, and the tripwire threshold'
-  + ' cannot be turned into NaN');
+console.log('all distill-compare guard checks passed: an undeclared base, an unanchored,'
+  + ' stale-anchored, self-anchored or collapsed-arm screen is refused, lineage still'
+  + ' works, and the tripwire threshold cannot be turned into NaN');
