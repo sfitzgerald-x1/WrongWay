@@ -16,16 +16,39 @@
  * a bit, and the wall planes are an exact domino tiling per line (see
  * `wallAnchorsFromPlaneLine`). Nothing is guessed and nothing is fitted.
  *
- * WHAT IS NOT: `ply`, the repetition window, and therefore the two outcomes that
- * depend on them -- draw by ply cap and draw by threefold repetition. The
- * features do not carry them and this module does not pretend to: it synthesises
- * the EARLIEST ply consistent with the position, which reads a drawn board as
- * ongoing. That is safe for shard data (a self-play writer stores positions it
- * searched, so no terminal record exists -- the audited production shard had
- * `minLegal` 1 and zero empty masks) and it is caught rather than hidden for
- * everything else: `verifyRecord` compares the STORED legal mask, and a drawn
- * position's stored mask is empty while a rebuilt-as-ongoing one is not, so the
- * record is refused instead of being silently relabelled.
+ * WHAT IS NOT: `ply` and the repetition window. The features do not carry them,
+ * so `synthesizeState` INVENTS both -- the earliest ply consistent with the
+ * position, and a window padded with positions picked to satisfy `validateState`
+ * rather than because they ever occurred. Measured over 2503 engine-generated
+ * ongoing states: the rebuilt ply differs from the true one in 93.0% of them
+ * (mean gap 24.3 plies, max 82), the current position's repetition count is wrong
+ * in 7.9%, and 160 states carried a window entry for a position the game never
+ * reached.
+ *
+ * WHAT THAT COSTS THE RE-SEARCH, which is this module's whole purpose. A search
+ * launched from a rebuilt state adjudicates against that synthetic history, so it
+ * MISSES draws that are really there -- a genuine threefold sits one identical
+ * legal move from a root whose true ply was 69 and whose rebuilt ply was 21 -- and
+ * it can COUNT repetitions that never happened: of the fabricated window entries,
+ * 30 are reachable from the rebuilt position within 6 plies and 10 after a single
+ * pawn move. Ply-cap draws go the same way, the rebuilt ply being almost always
+ * short. How far that moves a reanalysed target has NOT been measured. It is a
+ * hazard of unknown size, and nothing downstream reports it.
+ *
+ * `verifyRecord` CANNOT SEE ANY OF THAT, and is not evidence against it. It pins
+ * the POSITION, not the state: `encodeState` reads only `state.position`, so two
+ * states that share a position and differ in ply or repetition window encode to
+ * identical bytes and both pass. What the audit does protect is the record's own
+ * stored LABEL -- a stored terminal record has an empty legal mask and a
+ * rebuilt-as-ongoing one does not, so the mask comparison refuses it instead of
+ * relabelling it. Production shards hold no such record (the audited one had
+ * `minLegal` 1 and no empty mask), which is why that refusal is free in practice.
+ *
+ * AND IT IS NOT A RECOVERY PROBLEM FOR FUTURE DATA. `distill-collect.mjs` already
+ * pushes `ply` and the full move `history` for every ply it records; the binary
+ * shard schema is what drops them on the way to disk. Carrying them through is a
+ * schema change, and it would retire the synthesis here for everything collected
+ * afterwards. The positions already on disk have no such recourse.
  *
  * WHAT THIS DOES NOT REIMPLEMENT: any rule. Geometry, legality, wall conflicts,
  * path checks, the encoding and the plane order all come from
@@ -445,12 +468,20 @@ function stateAtPly(config, position, ply, historyStartPly) {
  * synthesises one and lets `validateState` be the judge of it; nothing here
  * decides that a state is legal.
  *
- * EARLIEST ply, deliberately. The scan stops one short of `plyCap` so synthesis
- * can never manufacture a ply-cap draw for a position whose real ply it does not
- * know, and the repetition window is filled with distinct positions so it can
- * never manufacture a threefold draw either. The outcome that comes out is
- * therefore `win` (a pawn is standing on its goal row, which the features DO
- * carry) or `ongoing`, and never a draw invented from a fabricated history.
+ * EARLIEST ply, deliberately. The scan stops one short of `plyCap` and the window
+ * is filled with distinct positions, so the state handed back is labelled `win`
+ * (a pawn is standing on its goal row, which the features DO carry) or `ongoing`,
+ * and never a draw this function invented. `ply < plyCap` is load-bearing, not
+ * cosmetic: at `<=`, a position whose earliest feasible ply IS the cap comes back
+ * labelled a ply-cap draw on no evidence at all, where refusing is the honest
+ * answer.
+ *
+ * That is a claim about THE LABEL ON THIS STATE and nothing wider. The ply is
+ * synthetic and the window is padded with positions that did not occur, and a
+ * search descending from here adjudicates against both -- missing real threefold
+ * and ply-cap draws, and able to count repetitions that never happened. The
+ * module header carries the measurements. `verifyRecord` cannot detect any of it,
+ * because the features do not depend on either field.
  *
  * The ply scan is cheap because the two conditions that eliminate most plies --
  * turn parity, and `validateState`'s bound of two squares of pawn travel per
@@ -525,8 +556,11 @@ export function stateFromFeatures(config, features) {
  *
  * Bits rather than `!==` because the claim being made is bit equality: `===`
  * calls +0 and -0 equal and calls a NaN pair unequal, so it answers a slightly
- * different question than the one the audit is for. A Float32Array's byteOffset
- * is always a multiple of 4, so the uint32 view is always constructible.
+ * different question than the one the audit is for. Not hypothetical -- a stored
+ * `-0` in a cleared wall cell reads as clear, reconstructs the right board and
+ * re-encodes to `+0`, so the float comparison passes a record whose bytes on disk
+ * are not the bytes the engine produces. A Float32Array's byteOffset is always a
+ * multiple of 4, so the uint32 view is always constructible.
  */
 function firstDifferingElement(actual, expected) {
   const a = new Uint32Array(actual.buffer, actual.byteOffset, actual.length);
@@ -538,13 +572,24 @@ function firstDifferingElement(actual, expected) {
 /**
  * Audit one stored record: reconstruct it, then re-assert its own bytes.
  *
- * This is what makes Reanalyse trustworthy per record rather than in aggregate.
- * The features are re-encoded from the reconstruction and compared bit for bit,
- * and the engine's legal mask for the rebuilt state is compared against the mask
- * the shard stored. Both, not either: the features pin the board and the mask
+ * SCOPE, because the summary line reads as more than it is: this establishes that
+ * the reconstructed POSITION is the one the record encodes. It says nothing about
+ * ply or the repetition window -- `encodeState` never reads them -- so it is not
+ * evidence that a search from the returned state will adjudicate the way the real
+ * game did. The module header has the measurements and what they cost.
+ *
+ * Within that scope it is strong, and stronger than the tiling argument it rests
+ * on. The features are re-encoded from the reconstruction and compared bit for
+ * bit, and as far as a whole shard corpus and the perturbation controls can show,
+ * `encodeState` sends distinct positions to distinct vectors -- so a vector this
+ * accepts is the encoding of exactly one position, and a wrong tiling would be
+ * caught by the re-encode even if the uniqueness proof in
+ * `wallAnchorsFromPlaneLine` were wrong.
+ *
+ * The mask is compared too, not instead: the features pin the board and the mask
  * pins what the board can DO, and they fail in different places. The mask is the
  * only check that sees an outcome the features cannot carry -- a stored terminal
- * position has an empty mask, and a rebuild that reads it as ongoing does not.
+ * record has an empty mask, and a rebuild that reads it as ongoing does not.
  *
  * Returns the validated state, which is what a caller wants next anyway (it is
  * ready for `encodeState`, `legalMaskFloat` and search). THROWS on any mismatch

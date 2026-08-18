@@ -231,6 +231,17 @@ refusalCase('stock plane not constant', 'stock_plane_not_constant',
   corrupt((f) => { f[at(PLANE.moverStock, 2, 2)] = 0.5; }));
 refusalCase('stock plane not integral', 'stock_not_integral',
   corrupt((f) => { f.fill(0.55, PLANE.moverStock * CELLS, (PLANE.moverStock + 1) * CELLS); }));
+// The case above sits at 0.5, the FURTHEST a scaled stock can be from an integer,
+// so it refuses under any tolerance short of 0.5 and pins nothing about the one
+// actually chosen. This one is 0.02 off and rounds back to the true stock, so no
+// later check can catch it either -- only the tolerance can, and only if it stays
+// near the float32 slack it was sized for.
+refusalCase('stock a hair off an integer', 'stock_not_integral',
+  corrupt((f) => {
+    const stock = SAMPLE_STATE.position.stock[SAMPLE_STATE.position.turn];
+    f.fill((stock + 0.02) / CONFIG.initialStock[SAMPLE_STATE.position.turn],
+      PLANE.moverStock * CELLS, (PLANE.moverStock + 1) * CELLS);
+  }));
 refusalCase('stock above capacity', 'stock_out_of_range',
   corrupt((f) => { f.fill(1.1, PLANE.moverStock * CELLS, (PLANE.moverStock + 1) * CELLS); }));
 refusalCase('wall plane fractional', 'wall_plane_not_binary',
@@ -319,6 +330,12 @@ auditCase('stored mask legalises an illegal move', 'legal_mask_mismatch', SAMPLE
 auditCase('stored mask drops a legal move', 'legal_mask_mismatch', SAMPLE_FEATURES,
   (() => { const copy = SAMPLE_MASK.slice(); copy[copy.indexOf(1)] = 0; return copy; })());
 auditCase('mask of the wrong length', 'legal_mask_length', SAMPLE_FEATURES, SAMPLE_MASK.slice(1));
+// The record's bytes are not the bytes the engine produces, and every value-level
+// test in this file calls them equal: a stored `-0` in a cleared wall cell reads
+// as clear, rebuilds the right board and re-encodes to `+0`. Only a comparison of
+// BITS refuses it, which is the whole reason the audit compares uint32 views.
+auditCase('stored wall cell holds negative zero', 'feature_mismatch',
+  corrupt((f) => { f[at(PLANE.wallHorizontal, 0, 0)] = -0; }), SAMPLE_MASK);
 
 // Surviving `validateState` once is not the bar. Reanalyse SEARCHES the rebuilt
 // state, and a search descends by applying actions -- each of which revalidates
@@ -584,6 +601,40 @@ CORPUS.push(...GOAL_SEEKING, ...REPETITION);
     refusal = error instanceof FeatureInversionError ? error.reason : error.constructor.name;
   }
   report(refusal === 'legal_mask_mismatch', 'a ply-cap draw is refused', refusal);
+}
+
+// The scan bound is `ply < plyCap`, and `<=` is NOT the same function. They differ
+// on exactly one shape: a position whose EARLIEST feasible ply is the cap itself.
+// Shipped refuses it; `<=` hands back a state labelled a ply-cap draw for a board
+// it has no ply evidence about whatsoever, which is the fabrication the earliest-ply
+// rule exists to avoid. The block above cannot reach that boundary -- its position
+// synthesises at ply 6 under a cap of 12 -- so it gets its own case.
+
+{
+  const capAtEarliest = validateConfig({ ...CONFIG, plyCap: 2 });
+  // One pawn move each. Turn A forces an even ply, and B's single step needs
+  // floor(ply / 2) >= 1, so ply 2 is the first that fits -- and it is the cap.
+  const position = {
+    pawns: { A: { r: 7, c: 4 }, B: { r: 1, c: 4 } },
+    walls: [], stock: { ...CONFIG.initialStock }, turn: 'A'
+  };
+  let atCap;
+  try {
+    const built = synthesizeState(capAtEarliest, position);
+    atCap = `RETURNED ply ${built.ply} labelled ${JSON.stringify(built.outcome)}`;
+  } catch (error) {
+    atCap = error instanceof FeatureInversionError ? error.reason : error.constructor.name;
+  }
+  report(atCap === 'state_synthesis_failed', 'earliest ply AT the cap refuses', atCap);
+  // ...and the identical position is ordinary under the production cap, so the
+  // refusal above is about the boundary rather than about the board.
+  let belowCap;
+  try {
+    belowCap = `ply ${synthesizeState(CONFIG, position).ply}`;
+  } catch (error) {
+    belowCap = error instanceof FeatureInversionError ? error.reason : error.constructor.name;
+  }
+  report(belowCap === 'ply 2', 'the same position is fine below the cap', belowCap);
 }
 
 // ---------------------------------------------------------- negative controls
