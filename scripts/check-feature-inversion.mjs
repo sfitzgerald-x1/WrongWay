@@ -233,9 +233,16 @@ refusalCase('stock plane not integral', 'stock_not_integral',
   corrupt((f) => { f.fill(0.55, PLANE.moverStock * CELLS, (PLANE.moverStock + 1) * CELLS); }));
 // The case above sits at 0.5, the FURTHEST a scaled stock can be from an integer,
 // so it refuses under any tolerance short of 0.5 and pins nothing about the one
-// actually chosen. This one is 0.02 off and rounds back to the true stock, so no
-// later check can catch it either -- only the tolerance can, and only if it stays
-// near the float32 slack it was sized for.
+// actually chosen. This one is 0.02 off and rounds back to the TRUE stock, so
+// nothing else INSIDE `positionFromFeatures` can see it -- `stock_wall_count_disagree`
+// agrees, and the position it returns is correct. That matters because
+// `positionFromFeatures` and `stateFromFeatures` are both exported and usable
+// without the audit; on that path the tolerance is the only guard.
+//
+// `verifyRecord` DOES catch it, via the re-encode (mover_stock 0.902 vs 0.900), so
+// this is not an unguarded hole -- it is a guard that only the full audit backs up.
+// Said precisely because an earlier draft of this comment claimed no later check
+// could catch it at all, which is false.
 refusalCase('stock a hair off an integer', 'stock_not_integral',
   corrupt((f) => {
     const stock = SAMPLE_STATE.position.stock[SAMPLE_STATE.position.turn];
