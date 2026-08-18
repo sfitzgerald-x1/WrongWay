@@ -680,6 +680,40 @@ struct SearchOptionsDto {
     seed: u32,
 }
 
+/// The improved policy over a FINISHED search, or the refusal that keeps a
+/// partial tree from being recorded as a training target.
+///
+/// **Guarded where its four siblings are not, and that asymmetry is the point.**
+/// `actionCode`, `rootValue`, `simulationsUsed` and `visitCounts` are read in
+/// flows where doneness is structural — the driver reads them after its own
+/// `while (nextLeaf())` has already exited — and what they feed is move
+/// selection and telemetry, where a partial read shows up as a bad move or an
+/// odd number. This one labels TRAINING CORPORA, and a partial read of it shows
+/// up as nothing at all: at 10 of 48 simulations it is still a strictly
+/// ascending, all-positive distribution over every legal action summing to 1.0,
+/// structurally indistinguishable from the finished answer while differing from
+/// it by a large fraction of some action's mass. A consumer that broke its leaf
+/// loop early — a deadline, a swallowed exception, a resumed shard — would
+/// mislabel every position it touched and pass every downstream audit. So the
+/// guard sits on the accessor whose wrong answer nobody can see, and the other
+/// four are left alone rather than uniformly wrapped for symmetry's sake.
+///
+/// Split out of the `#[wasm_bindgen]` method for the reason every other error
+/// path in this file is: `JsValue::from_str` aborts the process off the wasm
+/// target, so a refusal is only reachable by a native test as a
+/// [`BoundaryResult`].
+fn improved_policy_impl(search: &PuctTreeSearch) -> BoundaryResult<Vec<f64>> {
+    if !search.is_done() {
+        return Err("search_not_done".to_owned());
+    }
+    Ok(search
+        .result()
+        .improved_policy
+        .into_iter()
+        .flat_map(|(code, probability)| [f64::from(code), probability])
+        .collect())
+}
+
 #[wasm_bindgen(js_class = NormalDuelSearch)]
 impl NormalDuelSearch {
     #[wasm_bindgen(constructor)]
@@ -779,6 +813,56 @@ impl NormalDuelSearch {
             .collect()
     }
 
+    /// `(code, pi')` pairs flattened, ascending by code — the policy target.
+    ///
+    /// Read only once `nextLeaf()` has returned false; before that the tree is
+    /// partial and the distribution is plausible but wrong. Unlike its
+    /// siblings this one does not take the caller's word for that — it throws
+    /// `search_not_done` instead. [`improved_policy_impl`] carries the argument
+    /// for why this accessor and not the other four.
+    ///
+    /// This is `PuctResult::improved_policy` handed across unchanged: the
+    /// value the core already produced and the one `SelfPlayBatch`'s record
+    /// writer narrows to `f32` and stores as `policyTarget`. Deliberately not
+    /// recomputed here from visits, priors or the root value. A second
+    /// derivation would be a second definition of the training target, and the
+    /// two could drift while every test of each one separately stayed green.
+    /// `improved_policy_is_exactly_what_self_play_records_as_the_policy_target`
+    /// pins this against what a real self-play game writes for the same root.
+    ///
+    /// **Identical to the record only after the recorder's own narrowing.**
+    /// These are `f64`; `SelfPlayBatch` stores `probability as f32`. A consumer
+    /// that keeps the `f64` and expects it to match a re-derived self-play label
+    /// is out by about `1e-8` relative, and by a whole order of magnitude in the
+    /// deep tail, where an `f64` `1e-60` narrows to a hard `0.0`. Store these
+    /// into the `f32` record format and the two are bit-identical — which is
+    /// what the parity test asserts, and what a consumer holding wider labels
+    /// does not get.
+    ///
+    /// **Not `visitCounts` normalised**, which is the mistake this accessor
+    /// exists to prevent. Under sequential halving the counts are the search
+    /// *schedule*: both finalists take the same visits whichever one won, and
+    /// every legal action outside the considered set takes zero. The improved
+    /// policy reads each action's completed Q instead, so it separates the
+    /// finalists and it covers the actions the Gumbel draw never considered —
+    /// which is also why this list is longer than `visitCounts`'s whenever
+    /// `maxConsidered` is below the legal count.
+    ///
+    /// Beware the name in the frozen JavaScript reference: `puctSearch` returns
+    /// an `improvedPolicy` field too, and it is `encodePolicyTarget` over the
+    /// visit counts — the pre-`puct-az-tree-v2` target, and so exactly the
+    /// distribution this one is not. They agree on neither support nor values.
+    ///
+    /// Pairs rather than a dense `policyLen` vector, matching `visitCounts`:
+    /// the support is exactly the root's legal actions, so a consumer that
+    /// scatters these into its own zeroed buffer cannot confuse "illegal here"
+    /// with "targeted at zero". Codes are `u16` and so exact in `f64`, which
+    /// lets one array carry both halves of the pair.
+    #[wasm_bindgen(js_name = improvedPolicy)]
+    pub fn improved_policy(&self) -> std::result::Result<Vec<f64>, JsValue> {
+        improved_policy_impl(&self.inner).map_err(js_error)
+    }
+
     /// Visits under the node reached by playing `codes` from the root; `-1` when that
     /// path was never expanded.
     ///
@@ -842,6 +926,7 @@ pub fn normal_duel_self_play_layout() -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use wrongway_normal_duel::mock_evaluator;
 
     const PERFT: &str = include_str!("../../../tests/fixtures/normal-duel-perft-v1.json");
     const SEARCH_PARITY: &str =
@@ -1186,6 +1271,396 @@ mod tests {
         assert_eq!(
             search_for_impl(&invalid_deadline.to_string()),
             Err("invalid_search_budget".into())
+        );
+    }
+
+    /* -------------------------------------------------------------- *
+     * `improvedPolicy`: the recorded policy target, across the boundary
+     * -------------------------------------------------------------- */
+
+    /// Budget for the parity searches below: small enough to keep the suite
+    /// quick, large enough that sequential halving runs several rounds and the
+    /// improved policy stops being the renormalised prior.
+    const PARITY_SIMS: u32 = 48;
+    /// The production shape — far fewer candidates than the 131 legal actions
+    /// at a fresh 9x9 root, so the considered set is a strict subset of the
+    /// legal set and the two accessors cannot have the same support.
+    const PARITY_CONSIDERED: u32 = 8;
+    const PARITY_SEED: u32 = 20_260_818;
+    /// Legal actions at a fresh 9x9 root, pinned so that a config change cannot
+    /// quietly turn the subset case below into the equality case.
+    const PARITY_LEGAL: usize = 131;
+
+    /// The shared mock evaluator, with the value already round-tripped through
+    /// `f32`.
+    ///
+    /// `SelfPlayBatch` carries leaf values in an `f32` slot and widens them
+    /// again at `submit`, while `NormalDuelSearch::submit` takes the `f64`
+    /// straight from JS. Narrowing here is what makes the two searches receive
+    /// the same number rather than two a ULP apart, and a ULP is enough to flip
+    /// one halving comparison and with it the whole tree.
+    fn parity_leaf(features: &[f32], policy_out: &mut [f32]) -> f64 {
+        f64::from(mock_evaluator::evaluate(features, policy_out) as f32)
+    }
+
+    /// Play one self-play game through the real record writer and return the
+    /// `policyTarget` slice of its first recorded ply — the bytes that go to
+    /// disk, read out of the record buffer rather than recomputed.
+    fn recorded_policy_target(config: &Config, options: SelfPlayOptions) -> Vec<f32> {
+        let mut batch = SelfPlayBatch::new(config, options).expect("self-play batch");
+        let mut policy = vec![0.0_f32; RECORD_POLICY];
+        loop {
+            let leaves = batch.collect().expect("collect");
+            if leaves == 0 {
+                break;
+            }
+            for slot in 0..leaves {
+                let features =
+                    batch.features()[slot * RECORD_FEATURES..(slot + 1) * RECORD_FEATURES].to_vec();
+                let value = parity_leaf(&features, &mut policy);
+                batch.policy_mut()[slot * RECORD_POLICY..(slot + 1) * RECORD_POLICY]
+                    .copy_from_slice(&policy);
+                batch.value_mut()[slot] = value as f32;
+            }
+            batch.submit(leaves).expect("submit");
+        }
+        assert_eq!(batch.take_records(), 1, "ply_cap 1 records exactly one ply");
+        batch.records()[RECORD_FEATURES..RECORD_FEATURES + RECORD_POLICY].to_vec()
+    }
+
+    /// Drive a `NormalDuelSearch` to completion over the same mock, through the
+    /// same three calls the JS protocol makes. The fields stand in for the
+    /// pointers: a native test cannot take a `u32` offset into wasm memory, and
+    /// `submit` reads the same buffer either way.
+    ///
+    /// Returns the ROOT's features, which `next_leaf` hands out first, before
+    /// any descent.
+    fn drive_search(search: &mut NormalDuelSearch) -> Vec<f32> {
+        let mut policy = vec![0.0_f32; RECORD_POLICY];
+        let mut root_features: Vec<f32> = Vec::new();
+        while search.next_leaf().expect("next_leaf") {
+            search.pending_leaf_mask().expect("pending_leaf_mask");
+            if root_features.is_empty() {
+                root_features = search.features.clone();
+            }
+            let value = parity_leaf(&search.features, &mut policy);
+            search.policy.copy_from_slice(&policy);
+            search.submit(value).expect("submit");
+        }
+        root_features
+    }
+
+    /// The boundary search at the root of a fresh 9x9 game, built from the JSON
+    /// the JS driver sends.
+    fn parity_search(considered: u32, c_puct: f64) -> (String, String, NormalDuelSearch) {
+        let config_json = config().to_string();
+        let state_json = initial_state_impl(&config_json).expect("initial state");
+        let options_json = json!({
+            "simulations": PARITY_SIMS,
+            "maxConsidered": considered,
+            "cPuct": c_puct,
+            "seed": PARITY_SEED,
+        })
+        .to_string();
+        let search =
+            NormalDuelSearch::new(&config_json, &state_json, &options_json).expect("search");
+        (config_json, state_json, search)
+    }
+
+    /// Legal action codes at a root, as the boundary reports them.
+    fn legal_codes(config_json: &str, state_json: &str) -> Vec<u16> {
+        serde_json::from_str(&legal_action_codes_impl(config_json, state_json).expect("legal"))
+            .expect("legal codes")
+    }
+
+    /// Unflatten the accessor's output, checking the pairing convention itself:
+    /// an even length, and codes that survive `u16 -> f64 -> u16` exactly.
+    fn improved_pairs(flat: &[f64]) -> Vec<(u16, f64)> {
+        assert_eq!(flat.len() % 2, 0, "flattened pairs have an even length");
+        flat.chunks_exact(2)
+            .map(|pair| {
+                let code = pair[0] as u16;
+                assert_eq!(
+                    f64::from(code),
+                    pair[0],
+                    "code {} is not an exact u16",
+                    pair[0]
+                );
+                (code, pair[1])
+            })
+            .collect()
+    }
+
+    /// Codes only, out of a flattened `visitCounts`.
+    fn visit_codes(flat: &[u32]) -> Vec<u16> {
+        flat.chunks_exact(2)
+            .map(|pair| u16::try_from(pair[0]).expect("visit code fits a u16"))
+            .collect()
+    }
+
+    /// `improvedPolicy()` is the record writer's `policyTarget`, not a lookalike.
+    ///
+    /// The accessor's whole claim is that it hands back the value production
+    /// self-play records, so the right-hand side here is not a second
+    /// derivation of the improved policy: it is a real `SelfPlayBatch` game,
+    /// pumped through `collect`/`submit` the way the shard driver pumps it,
+    /// whose first ply's `policyTarget` is read straight out of the record
+    /// buffer. An accessor that returned anything the recorder does not write
+    /// fails here.
+    ///
+    /// The two searches are *made* the same search rather than assumed to be:
+    ///
+    /// * same root — game 0's ply 0 is the initial position, which is where
+    ///   `NormalDuelSearch` is constructed;
+    /// * same params — `simulations`, `maxConsidered` and `cPuct` are handed to
+    ///   both from one struct, so a changed default cannot leave them two
+    ///   plausible-looking different searches;
+    /// * same stream — self-play runs game `i` off `Lcg32::new(seed_base + i)`
+    ///   and has drawn nothing from it before the first search, which is
+    ///   exactly the state `seed` builds at the boundary;
+    /// * same evaluations — the shared mock is a pure function of the feature
+    ///   vector, and `parity_leaf` narrows the value identically for both.
+    ///
+    /// `ply_cap: 1` stops the game after that ply, and not for speed: from ply
+    /// 1 on, self-play folds the finished search's RNG back into the game
+    /// stream, so no `seed` reaches those roots and ply 0 is the only one this
+    /// entry point can reproduce.
+    ///
+    /// WHAT THIS CANNOT CATCH is reordering. The comparison scatters the pairs
+    /// into a dense vector by code, so it is order-blind by construction, and a
+    /// mutant that reversed them passes here. The ascending contract is carried
+    /// by `improved_policy_spans_the_legal_set_and_visit_counts_the_considered_set`
+    /// and by the JS boundary test, not by this one.
+    #[test]
+    fn improved_policy_is_exactly_what_self_play_records_as_the_policy_target() {
+        let options = SelfPlayOptions {
+            games: 1,
+            simulations: PARITY_SIMS,
+            max_considered: PARITY_CONSIDERED,
+            ply_cap: 1,
+            seed_base: PARITY_SEED,
+            ..SelfPlayOptions::default()
+        };
+        let core_config = config_from_value(&config()).expect("config");
+        let recorded = recorded_policy_target(&core_config, options.clone());
+
+        let (config_json, state_json, mut search) =
+            parity_search(PARITY_CONSIDERED, options.c_puct);
+        let root_features = drive_search(&mut search);
+        let improved = improved_pairs(&search.improved_policy().expect("a finished search"));
+
+        // The recorder's own narrowing: scatter the pairs into a zeroed
+        // `RECORD_POLICY` vector as `f32`. Compared bit for bit rather than
+        // within a tolerance — these are the same `f64`s through the same cast,
+        // so anything short of equality means they are not the same numbers.
+        let mut scattered = vec![0.0_f32; RECORD_POLICY];
+        for (code, probability) in &improved {
+            scattered[usize::from(*code)] = *probability as f32;
+        }
+        for (code, (accessor, record)) in scattered.iter().zip(&recorded).enumerate() {
+            assert_eq!(
+                accessor.to_bits(),
+                record.to_bits(),
+                "policyTarget[{code}]: accessor {accessor} vs recorded {record}"
+            );
+        }
+
+        // What follows keeps that equality from passing for an uninteresting
+        // reason. A target that were empty, one-hot, the visit distribution or
+        // the network's own policy would match a recorder producing the same
+        // wrong thing; these say it is none of those.
+        let legal = legal_codes(&config_json, &state_json);
+        assert_eq!(legal.len(), PARITY_LEGAL);
+        assert_eq!(
+            recorded.iter().filter(|mass| **mass > 0.0).count(),
+            legal.len(),
+            "every legal action carries mass; the prior floor is what puts it there"
+        );
+
+        // The substitution this accessor exists to prevent, run as an
+        // assertion: normalised visit counts are a different distribution at
+        // this root, so an accessor returning them could not have passed above.
+        let visits = search.visit_counts();
+        let total: f64 = visits.chunks_exact(2).map(|pair| f64::from(pair[1])).sum();
+        assert!(total > 0.0, "the search spent its budget");
+        let mut visit_normalised = vec![0.0_f32; RECORD_POLICY];
+        for pair in visits.chunks_exact(2) {
+            visit_normalised[pair[0] as usize] = (f64::from(pair[1]) / total) as f32;
+        }
+        assert_ne!(
+            visit_normalised, recorded,
+            "the visit distribution must differ from the improved policy here, or this \
+             comparison could not tell the two apart"
+        );
+
+        // Nor is it merely the renormalised prior, which is what the improved
+        // policy collapses to when the search has separated nothing. So the
+        // recorded numbers carry search information, and a boundary that handed
+        // back the network's own policy would fail too.
+        let mut prior = vec![0.0_f32; RECORD_POLICY];
+        mock_evaluator::evaluate(&root_features, &mut prior);
+        let prior_mass: f64 = legal
+            .iter()
+            .map(|code| f64::from(prior[usize::from(*code)]))
+            .sum();
+        let moved = improved
+            .iter()
+            .map(|(code, probability)| {
+                (probability - f64::from(prior[usize::from(*code)]) / prior_mass).abs()
+            })
+            .fold(0.0_f64, f64::max);
+        assert!(
+            moved > 1e-3,
+            "pi' is within {moved} of the renormalised prior"
+        );
+    }
+
+    /// The accessor's shape contract, and where it parts company with
+    /// `visitCounts`.
+    ///
+    /// `improvedPolicy` spans every LEGAL root action; `visitCounts` spans the
+    /// CONSIDERED ones, which under Gumbel is `min(maxConsidered, legal)` of
+    /// them. At the production shape those are 131 and 8, so the code lists
+    /// agree only in the sense that one contains the other — a consumer that
+    /// treated them as interchangeable supports would be reading a 131-action
+    /// target off an 8-action schedule. They coincide exactly when the
+    /// considered set is the whole legal set, which is the second half here.
+    #[test]
+    fn improved_policy_spans_the_legal_set_and_visit_counts_the_considered_set() {
+        let c_puct = SelfPlayOptions::default().c_puct;
+        let (config_json, state_json, mut narrow) = parity_search(PARITY_CONSIDERED, c_puct);
+        drive_search(&mut narrow);
+        let legal = legal_codes(&config_json, &state_json);
+        assert_eq!(legal.len(), PARITY_LEGAL);
+
+        let improved = improved_pairs(&narrow.improved_policy().expect("a finished search"));
+        let codes: Vec<u16> = improved.iter().map(|(code, _)| *code).collect();
+        assert!(
+            codes.windows(2).all(|pair| pair[0] < pair[1]),
+            "codes ascend, strictly: no repeats and no reordering"
+        );
+        assert_eq!(codes, legal, "support is exactly the legal root actions");
+        let total: f64 = improved.iter().map(|(_, mass)| *mass).sum();
+        assert!((total - 1.0).abs() < 1e-12, "pi' sums to {total}");
+        assert!(
+            improved.iter().all(|(_, mass)| *mass > 0.0 && *mass < 1.0),
+            "every legal action gets positive mass, and none takes all of it"
+        );
+
+        let considered = visit_codes(&narrow.visit_counts());
+        assert!(
+            considered.windows(2).all(|pair| pair[0] < pair[1]),
+            "visitCounts ascends by code too"
+        );
+        assert_eq!(considered.len(), PARITY_CONSIDERED as usize);
+        assert!(
+            considered.iter().all(|code| codes.contains(code)),
+            "the considered set is drawn from the legal set"
+        );
+        assert_ne!(
+            considered, codes,
+            "at maxConsidered {PARITY_CONSIDERED} over {PARITY_LEGAL} legal actions it is a \
+             STRICT subset"
+        );
+
+        // Considered set at least as large as the legal set: now, and only now,
+        // the two code lists are the same list.
+        let wide = u32::try_from(legal.len()).expect("legal count fits a u32");
+        let (_, _, mut all_considered) = parity_search(wide, c_puct);
+        drive_search(&mut all_considered);
+        let wide_codes: Vec<u16> =
+            improved_pairs(&all_considered.improved_policy().expect("a finished search"))
+                .iter()
+                .map(|(code, _)| *code)
+                .collect();
+        assert_eq!(wide_codes, legal);
+        assert_eq!(visit_codes(&all_considered.visit_counts()), legal);
+    }
+
+    /// The accessor refuses a search that has not finished.
+    ///
+    /// A doc sentence would not have been enough, and the middle of this test
+    /// is the evidence: reaching past the guard at 10 of 48 simulations yields
+    /// something nothing structural can fault — 131 codes, strictly ascending,
+    /// every mass positive, the total 1.0 to the last bit — that is simply a
+    /// different distribution from the one the same search finishes with. There
+    /// is no shape check, no sum check and no support check that separates the
+    /// two. The only thing that can is the tree's own doneness, which is why it
+    /// is asked here rather than assumed.
+    ///
+    /// Asserted against [`improved_policy_impl`] rather than the boundary
+    /// method: the refusal crosses as a `JsValue`, and constructing one off the
+    /// wasm target aborts the process instead of returning an error a test
+    /// could read. The happy path is taken through the boundary method, which
+    /// is the same code either way.
+    #[test]
+    fn improved_policy_refuses_a_search_that_is_not_finished() {
+        let c_puct = SelfPlayOptions::default().c_puct;
+        let (_, _, mut search) = parity_search(PARITY_CONSIDERED, c_puct);
+        assert_eq!(
+            improved_policy_impl(&search.inner),
+            Err("search_not_done".to_owned()),
+            "a search that has not started has no target to hand out"
+        );
+
+        let mut policy = vec![0.0_f32; RECORD_POLICY];
+        let mut submit_one = |search: &mut NormalDuelSearch| -> bool {
+            if !search.next_leaf().expect("next_leaf") {
+                return false;
+            }
+            search.pending_leaf_mask().expect("pending_leaf_mask");
+            let value = parity_leaf(&search.features, &mut policy);
+            search.policy.copy_from_slice(&policy);
+            search.submit(value).expect("submit");
+            true
+        };
+
+        for leaf in 0..10 {
+            assert!(
+                submit_one(&mut search),
+                "leaf {leaf} of a 48-simulation search"
+            );
+            assert_eq!(
+                improved_policy_impl(&search.inner),
+                Err("search_not_done".to_owned()),
+                "still refused after {} leaves",
+                leaf + 1
+            );
+        }
+        assert!(!search.inner.is_done());
+
+        // What the guard is standing in front of, read directly off the core.
+        let partial = search.inner.result().improved_policy;
+        assert_eq!(partial.len(), PARITY_LEGAL, "full support already");
+        assert!(partial.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        assert!(partial.iter().all(|(_, mass)| *mass > 0.0));
+        let partial_total: f64 = partial.iter().map(|(_, mass)| *mass).sum();
+        assert!(
+            (partial_total - 1.0).abs() < 1e-12,
+            "a partial read even sums to 1: {partial_total}"
+        );
+
+        while submit_one(&mut search) {}
+        let finished = improved_pairs(&search.improved_policy().expect("a finished search"));
+        assert_eq!(finished.len(), PARITY_LEGAL);
+
+        // ... and yet it is a different answer, and not subtly: at this seed
+        // the largest per-action difference measures 0.99999998, i.e. virtually
+        // the whole of one action's probability moves between the partial read
+        // and the finished one. The threshold below sits two orders under that,
+        // so what is asserted is the premise and not a knife edge.
+        let drift = finished
+            .iter()
+            .zip(&partial)
+            .map(|((done_code, done), (partial_code, part))| {
+                assert_eq!(done_code, partial_code);
+                (done - part).abs()
+            })
+            .fold(0.0_f64, f64::max);
+        assert!(
+            drift > 0.01,
+            "the partial and finished targets differ by only {drift}, which would make \
+             this test's premise false rather than its guard unnecessary"
         );
     }
 }

@@ -152,3 +152,99 @@ test('the NormalDuelSearch wrapper plays puctSearch\'s move', { skip: SKIP }, as
   }
   assert.equal(compared, 48, 'every state x budget pair must have been compared');
 });
+
+/**
+ * `improvedPolicy()` crosses the boundary, under that name, in that shape.
+ *
+ * What it IS is proved natively, in `rust/normal-duel-wasm/src/lib.rs`: the
+ * accessor hands back exactly the numbers a real self-play game writes as
+ * `policyTarget`. What a native test cannot see is the crossing — the
+ * `js_name`, and a `Vec<f64>` arriving as one array whose even slots are codes
+ * and odd slots are probabilities. That flat pairing is the whole read
+ * protocol: a consumer walks it `i += 2` and scatters `flat[i + 1]` into its
+ * own zeroed policy vector at `flat[i]`. So this asserts the three things that
+ * loop rests on, against the built wasm.
+ *
+ * The search is driven here rather than through `wasmPuctSearch` on purpose,
+ * and the reason is a name collision worth stating. That driver's return shape
+ * is the parity surface compared against the frozen JavaScript reference, and
+ * `puctSearch` already returns a field called `improvedPolicy` — but it is
+ * `encodePolicyTarget(config, visitCounts)`, normalised visits over the
+ * considered set, which is the pre-`puct-az-tree-v2` target and a different
+ * distribution from this one on a different support. Putting the Rust accessor
+ * into the parity surface next to it would set up a comparison that must fail,
+ * and the tempting repair for that failure is to make one of the two agree with
+ * the other.
+ */
+test('NormalDuelSearch hands improvedPolicy across as ascending (code, probability) pairs',
+  { skip: SKIP }, async () => {
+    const { mod, memory } = await loadWasmPuct(RELEASE);
+    assert.equal(
+      typeof mod.NormalDuelSearch.prototype.improvedPolicy, 'function',
+      'the accessor must be on the prototype: a consumer checks for it there before it runs'
+    );
+    // The Rust side returns `Result<Vec<f64>, JsValue>`, which wasm-bindgen
+    // surfaces as a throw and NOT as a second return value or an out-parameter.
+    // Pinned because the guard was added after the accessor shipped: a consumer
+    // that probes for the method and then calls it with no arguments must see
+    // exactly what it saw before.
+    assert.equal(mod.NormalDuelSearch.prototype.improvedPolicy.length, 0, 'still nullary');
+
+    const state = createInitialState(CONFIG);
+    const legal = legalActionCodes(CONFIG, state);
+    const maxConsidered = 8;
+    const search = new mod.NormalDuelSearch(
+      JSON.stringify(CONFIG),
+      JSON.stringify(state),
+      JSON.stringify({ simulations: 48, maxConsidered, seed: 20260818 })
+    );
+    // Before a single leaf: the tree has nothing to say and says so, rather
+    // than handing back the empty array that would scatter to an all-zero row.
+    assert.throws(() => search.improvedPolicy(), /search_not_done/,
+      'an unstarted search must refuse');
+
+    // Views rebuilt every iteration, as everywhere else: `nextLeaf` grows the
+    // arenas and a growth detaches them.
+    const f32 = (ptr, len) => new Float32Array(memory.buffer, ptr, len);
+    let leaves = 0;
+    while (search.nextLeaf()) {
+      search.pendingLeafMask();
+      const policyLen = search.policyLen();
+      search.submit(mockEvaluateFeatures(
+        f32(search.featuresPtr(), search.featuresLen()),
+        f32(search.maskPtr(), policyLen),
+        f32(search.policyPtr(), policyLen)
+      ));
+      leaves += 1;
+      // Mid-search, where the unguarded read is a full, plausible, WRONG
+      // distribution. The refusal has to cross the boundary as a throw, or the
+      // guard only exists in Rust.
+      if (leaves === 10) {
+        assert.throws(() => search.improvedPolicy(), /search_not_done/,
+          'a partial tree must refuse across the boundary too');
+      }
+    }
+
+    const flat = search.improvedPolicy();
+    assert.ok(flat instanceof Float64Array, 'the happy path is still one Float64Array');
+    assert.equal(flat.length % 2, 0, 'flattened pairs have an even length');
+    const codes = [];
+    let total = 0;
+    for (let index = 0; index < flat.length; index += 2) {
+      codes.push(flat[index]);
+      total += flat[index + 1];
+      assert.ok(flat[index + 1] > 0, `code ${flat[index]} came across with no mass`);
+    }
+    assert.deepEqual(codes, legal, 'support is exactly the legal root actions, ascending by code');
+    assert.ok(Math.abs(total - 1) < 1e-12, `pi' must sum to 1, got ${total}`);
+
+    // And the reason the accessor exists rather than a normalisation of the
+    // other one: `visitCounts` spans the CONSIDERED set, 8 of the root's 131
+    // legal actions, and its codes are a strict subset of these.
+    const visits = search.visitCounts();
+    assert.equal(visits.length / 2, maxConsidered);
+    for (let index = 0; index < visits.length; index += 2) {
+      assert.ok(codes.includes(visits[index]), `considered code ${visits[index]} is not legal`);
+    }
+    assert.ok(codes.length > visits.length / 2, 'pi\' covers more than the considered set');
+  });
