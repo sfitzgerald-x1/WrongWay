@@ -70,8 +70,30 @@ const args = parseArgs(process.argv.slice(2), {
  * number was in the same session's Elo table and did not register, so the check is
  * automatic here rather than left to judgement.
  */
-const POOL_SPREAD_FULL = Number(process.env.WW_POOL_SPREAD_FULL ?? 600);
-const POOL_SPREAD_HEALTHY = Number(process.env.WW_POOL_SPREAD_HEALTHY ?? 145);
+/**
+ * Read a positive finite number from the environment, or refuse.
+ *
+ * `Number(process.env.X ?? d)` was the first cut and it is a hole in the tripwire: the
+ * docstring below says "2x the healthy spread", so `WW_BREAKAGE_ELO=2x145` is a
+ * plausible typo, and it yields NaN. Every `mag > NaN` is false, so the SUSPECTED
+ * BREAKAGE branch becomes unreachable and the 552-Elo incident falls through to the
+ * mild "verify the loser" note -- the exact outcome this threshold was chosen to
+ * avoid. An empty value yields 0 and fires on every run, including a dead-even 50%.
+ * A guard whose threshold can be silently turned into NaN is not a guard.
+ */
+function envNumber(name, fallback) {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) {
+    console.error(`REFUSED: ${name}=${JSON.stringify(raw)} is not a positive finite number.`);
+    process.exit(2);
+  }
+  return value;
+}
+
+const POOL_SPREAD_FULL = envNumber('WW_POOL_SPREAD_FULL', 600);
+const POOL_SPREAD_HEALTHY = envNumber('WW_POOL_SPREAD_HEALTHY', 145);
 /**
  * The breakage threshold, and why it is NOT `POOL_SPREAD_FULL`.
  *
@@ -86,10 +108,45 @@ const POOL_SPREAD_HEALTHY = Number(process.env.WW_POOL_SPREAD_HEALTHY ?? 145);
  * healthy nets span ~145 end to end. A single label or target change producing 290+ is
  * outside anything the loop has ever done honestly.
  */
-const BREAKAGE_ELO = Number(process.env.WW_BREAKAGE_ELO ?? 2 * POOL_SPREAD_HEALTHY);
+const BREAKAGE_ELO = envNumber('WW_BREAKAGE_ELO', 2 * POOL_SPREAD_HEALTHY);
 
+/**
+ * A missing ledger is an empty ledger; a MALFORMED one is not.
+ *
+ * `JSON.parse` of `null` succeeds and returns null, and `{"id": null}` parses fine too,
+ * so the first cut turned a corrupt ledger into a TypeError deep inside the anchor gate
+ * -- fail-closed by accident, with no REFUSED line saying why.
+ */
 function readLedger(file) {
-  try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return {}; }
+  let text;
+  try { text = readFileSync(file, 'utf8'); } catch { return {}; }
+  let parsed;
+  try { parsed = JSON.parse(text); } catch {
+    console.error(`REFUSED: ledger ${file} is not valid JSON. Fix or delete it.`);
+    process.exit(2);
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    console.error(`REFUSED: ledger ${file} is not a JSON object.`);
+    process.exit(2);
+  }
+  return parsed;
+}
+
+/**
+ * Is this a usable anchor record, or merely a key that exists?
+ *
+ * The gate used to test `!ledger[id]?.vsBase`, which any truthy value satisfies:
+ * `{"s1":{"vsBase":true}}` passed, and the run then printed "scored undefined% vs P
+ * (undefined Elo), undefined games". The ledger is a plain JSON file an operator can
+ * hand-edit, so the record has to be checked, not merely present.
+ */
+function anchorProblem(rec, wantBase) {
+  if (rec === null || typeof rec !== 'object' || Array.isArray(rec)) return 'is not an object';
+  if (rec.base !== wantBase) return `was measured against '${rec.base}', not '${wantBase}'`;
+  if (!Number.isFinite(rec.games) || rec.games <= 0) return `has no game count (${rec.games})`;
+  if (!Number.isFinite(rec.scorePct)) return `has no score (${rec.scorePct})`;
+  if (rec.elo !== null && !Number.isFinite(rec.elo)) return `has a non-numeric Elo (${rec.elo})`;
+  return null;
 }
 
 /**
@@ -106,25 +163,84 @@ function readLedger(file) {
  * because the whole failure was believing a difference without knowing the level.
  */
 function requireAnchors(ledger, a, b, base) {
+  // A STUDENT CANNOT BE A PARENT. `--a s1 --b s2 --base s2` is structurally identical
+  // to a legitimate anchor run, so naming one of the two arms as the base ran the
+  // unanchored screen anyway AND wrote `s1.vsBase = {base: 's2'}`, which every later
+  // screen then accepted. Anything the ledger already knows as a student is not a
+  // parent, and saying so costs nothing.
+  if (ledger[base]?.vsBase) {
+    console.error(`REFUSED: '${base}' is itself recorded as a student, measured against`
+      + ` '${ledger[base].vsBase.base}'. A student cannot serve as the parent of another`
+      + ` screen -- naming a sibling as '--base' is how an unanchored comparison gets`
+      + ` recorded as an anchored one.`);
+    console.error(`  Ledger: ${args.ledger}`);
+    process.exit(3);
+  }
   if (a === base || b === base) return { anchorRun: true, other: a === base ? b : a };
-  const missing = [a, b].filter((id) => !ledger[id]?.vsBase);
-  if (missing.length) {
-    console.error(`REFUSED: student-vs-student screen with no anchor for ${missing.join(', ')}.`);
+
+  // The anchor must EXIST, be a real record, and be against THIS base. The gate used to
+  // test only that some truthy `vsBase` key was present and then print the base this run
+  // asked for -- so a ledger anchored against an older parent passed, and the run's own
+  // output asserted a measurement that had never been made.
+  const problems = [];
+  for (const id of [a, b]) {
+    const rec = ledger[id]?.vsBase;
+    if (rec === undefined) { problems.push([id, `has no anchor against '${base}'`]); continue; }
+    const why = anchorProblem(rec, base);
+    if (why) problems.push([id, why]);
+  }
+  if (problems.length) {
+    console.error(`REFUSED: student-vs-student screen without a usable anchor.`);
+    for (const [id, why] of problems) console.error(`    ${id} ${why}`);
     console.error(`  A two-arm screen measures the difference and says nothing about the level.`);
     console.error(`  Both arms can be far below '${base}' and still produce a clean, significant`);
     console.error(`  result -- that is exactly what happened on 2026-08-16 (860 games wasted).`);
     console.error(`  Run each student against the parent first:`);
-    for (const id of missing) {
+    for (const [id] of problems) {
       console.error(`    node scripts/distill-compare.mjs --a ${id} --b ${base} --games 200 ...`);
     }
     console.error(`  Ledger: ${args.ledger}`);
     process.exit(3);
   }
+
+  // AN ANCHOR THAT SHOWS COLLAPSE IS NOT PERMISSION TO PROCEED. Requiring the anchor to
+  // exist, but not to be acceptable, would have passed the incident verbatim: the ledger
+  // would have held 0-0-200 and 9-1-190 against the parent and the screen would still
+  // have run its 300 games. Comparing two damaged nets measures degrees of damage.
+  const unfit = [];
   for (const id of [a, b]) {
     const rec = ledger[id].vsBase;
-    console.log(`anchor on record: ${id} scored ${rec.scorePct}% vs ${base}`
+    const saturated = rec.elo === null;
+    if (saturated) {
+      unfit.push([id, `scored ${rec.scorePct}% vs '${base}' (saturated: one side won every`
+        + ` decided game)`]);
+    } else if (rec.elo < -POOL_SPREAD_HEALTHY) {
+      unfit.push([id, `is ${rec.elo} Elo BELOW '${base}', past the ~${POOL_SPREAD_HEALTHY}`
+        + ` spread of healthy nets`]);
+    } else if (Math.abs(rec.elo) > BREAKAGE_ELO) {
+      unfit.push([id, `is ${rec.elo > 0 ? '+' : ''}${rec.elo} Elo against '${base}', beyond the`
+        + ` ${BREAKAGE_ELO} breakage threshold`]);
+    }
+  }
+  if (unfit.length) {
+    console.error(`REFUSED: an arm's own anchor says it is not a healthy net.`);
+    for (const [id, why] of unfit) console.error(`    ${id} ${why}`);
+    console.error(`  A screen between these arms measures degrees of damage, not teaching`);
+    console.error(`  quality. On 2026-08-16 both arms were in exactly this state (0-0-200 and`);
+    console.error(`  9-1-190 against their own parent) and the screen still returned a clean`);
+    console.error(`  96.0% with a "significant" verdict.`);
+    console.error(`  Fix the recipe and retrain; do not screen damaged nets against each other.`);
+    console.error(`  Ledger: ${args.ledger}`);
+    process.exit(3);
+  }
+
+  for (const id of [a, b]) {
+    const rec = ledger[id].vsBase;
+    // `rec.base`, never `base`: printing the requested base would restate the argument
+    // as if it were a measurement.
+    console.log(`anchor on record: ${id} scored ${rec.scorePct}% vs ${rec.base}`
       + ` (${rec.elo === null ? 'saturated' : `${rec.elo > 0 ? '+' : ''}${rec.elo} Elo`})`
-      + `, ${rec.games} games, ${rec.ts}`);
+      + `, ${rec.games} games (${rec.decided ?? '?'} decided), ${rec.ts}`);
   }
   return { anchorRun: false, other: null };
 }
@@ -351,7 +467,11 @@ if (decided > 0) {
         base: args.base,
         scorePct: +(100 * subjectRate).toFixed(1),
         elo: subjectElo === null ? null : +subjectElo.toFixed(0),
+        // BOTH counts. `scorePct` is a rate over DECIDED games, while `games` is every
+        // finished game, so a draw-heavy anchor recorded "300 games" for a rate resting
+        // on ten of them -- and the gate later printed that 300 as its justification.
         games: finished.length,
+        decided,
         sims: SIMS,
         considered: CONS,
         seed: Number(args.seed),
@@ -362,8 +482,17 @@ if (decided > 0) {
     mkdirSync(path.dirname(args.ledger), { recursive: true });
     writeFileSync(args.ledger, `${JSON.stringify(ledger, null, 2)}\n`);
     console.log(`  anchor recorded for '${anchoredSubject}' -> ${args.ledger}`);
-    if (subjectElo !== null && subjectElo < -POOL_SPREAD_HEALTHY) {
-      console.log(`  !! '${anchoredSubject}' is ${subjectElo.toFixed(0)} Elo BELOW its parent.`
+    // `=== null` FIRST. `elo()` returns null at a 0% or 100% score, so the original
+    // `subjectElo !== null && ...` skipped this warning at total annihilation: the
+    // incident's 0-0-200 student printed nothing while its 9-1-190 sibling printed the
+    // warning. The worse result was the silent one. Line 325 already uses the right
+    // idiom (`null -> Infinity`); this is the same rule spelled the same way.
+    if (subjectElo === null || subjectElo < -POOL_SPREAD_HEALTHY) {
+      const how = subjectElo === null
+        ? `scored ${(100 * subjectRate).toFixed(1)}% against its parent (saturated: one side`
+          + ` won every decided game, so the gap has no finite estimate)`
+        : `is ${subjectElo.toFixed(0)} Elo BELOW its parent`;
+      console.log(`  !! '${anchoredSubject}' ${how}.`
         + ' Any screen involving it measures degrees of damage, not teaching quality.');
     }
   }
