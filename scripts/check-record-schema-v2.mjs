@@ -150,8 +150,25 @@ const options = {
 };
 
 if (!existsSync(path.join(RELEASE, 'normal-duel-wasm_bg.wasm'))) {
-  console.log('SKIP: wasm candidate not built '
-    + '(node scripts/build-normal-duel-wasm-candidate.mjs)');
+  // Locally this is a skip: `rust/target` is gitignored and a contributor who
+  // has not built the candidate should not get a red suite for it.
+  //
+  // In CI it is a FAILURE, and the difference matters more than it looks. This
+  // is the ONLY check anywhere that drives the Rust writer and the JS reader
+  // against each other; every other suite tests one side. If the build step
+  // ahead of it is renamed, moved to another job, or reordered, the skip makes
+  // the one end-to-end fidelity check go silently green -- and a green suite
+  // saying nothing is worse than a red one saying something.
+  const required = process.env.WW_REQUIRE_WASM === '1' || process.env.CI === 'true';
+  const message = 'wasm candidate not built at ' + RELEASE
+    + ' (node scripts/build-normal-duel-wasm-candidate.mjs)';
+  if (required) {
+    console.error('FAIL ' + message
+      + '\n     This check needs it: it is the only place the writer and the reader'
+      + '\n     are compared. Skipping it in CI would leave that comparison unrun.');
+    process.exit(1);
+  }
+  console.log('SKIP: ' + message);
   process.exit(0);
 }
 
