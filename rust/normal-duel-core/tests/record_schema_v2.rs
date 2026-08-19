@@ -171,6 +171,12 @@ impl Run {
 }
 
 fn run(config: &Config, options: SelfPlayOptions) -> Run {
+    run_taking(config, options, 1)
+}
+
+/// As [`run`], but calling `take_records` `takes` times and reading the buffers
+/// after the last one.
+fn run_taking(config: &Config, options: SelfPlayOptions, takes: usize) -> Run {
     let mut batch = SelfPlayBatch::new(config, options).expect("valid options");
     let mut scratch = vec![0.0_f32; RECORD_POLICY];
     loop {
@@ -188,7 +194,10 @@ fn run(config: &Config, options: SelfPlayOptions) -> Run {
         }
         batch.submit(n).expect("submit");
     }
-    let count = batch.take_records();
+    let mut count = 0;
+    for _ in 0..takes {
+        count = batch.take_records();
+    }
     Run {
         records: batch.records().to_vec(),
         meta: batch.record_meta().to_vec(),
@@ -251,6 +260,33 @@ fn the_v1_prefix_of_a_v2_record_is_the_v1_record() {
         .collect();
     assert_eq!(outcomes, vec![0, 0, 0, 0], "the golden's games all drew");
     assert_eq!(run.plies, vec![48, 35, 29, 56]);
+}
+
+/// `take_records` DRAINS the games into the batch's sinks, so a second call
+/// finds nothing left and empties all of them. The window is a third sink added
+/// beside the two that already behaved this way, and it has to behave the same.
+///
+/// This is not idempotence and the test does not ask for it. What it asks is
+/// that the three sinks agree about being empty: a missing `clear` on the window
+/// alone leaves a second call reporting zero records while the window buffer
+/// still holds the first call's entries, which is the shape a consumer cannot
+/// detect — the record count is right, the record buffer is right, and every
+/// record's window slice comes from a buffer that should not be there.
+#[test]
+fn a_second_take_records_empties_every_sink_together() {
+    let once = run_taking(&config(), golden_options(), 1);
+    assert!(once.count > 0 && !once.window.is_empty());
+
+    let twice = run_taking(&config(), golden_options(), 2);
+    assert_eq!(twice.count, 0, "the games were already drained");
+    assert!(twice.records.is_empty());
+    assert!(twice.meta.is_empty());
+    assert!(
+        twice.window.is_empty(),
+        "records and meta emptied but the window kept {} values from the \
+         previous take",
+        twice.window.len()
+    );
 }
 
 /// `ply` has a second source: the meta buffer has carried it all along, and
