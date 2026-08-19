@@ -47,7 +47,26 @@
 //! -------------
 //! One record per position actually played, laid out as a flat `f32` run of
 //! [`RECORD_FLOATS`]: `features` (810), `policyTarget` (209), `legalMask`
-//! (209), `z` (1).
+//! (209), `z` (1), `ply` (1), `historyStartPly` (1), `windowLen` (1).
+//!
+//! The first four are v1 and the record still begins with exactly those bytes;
+//! the last three are v2 and they exist because a shard was a set of POSITIONS
+//! and a search needs a STATE. Reanalyse — re-running search over stored
+//! positions — has to reconstruct one, and the features carry neither the ply
+//! nor the repetition history: `encode_board_into` never reads either, so two
+//! states that differ only in how many times the position has already occurred
+//! are the same 810 floats and the same legal mask. Synthesising the missing
+//! half was measured on a production shard and it does not work — the re-search
+//! re-entered its own root inside its horizon on 7.573% of records against a
+//! pre-registered 2% ceiling, and both failure directions were demonstrated: a
+//! real threefold draw missed after one move, and repetitions counted for
+//! positions that never occurred.
+//!
+//! So the writer carries what it already knows. [`Game`] holds the true ply and
+//! the true [`RepetitionWindow`] while it plays; those go into the record and
+//! into [`SelfPlayBatch::record_window`] beside it, and the reader rebuilds the
+//! exact state rather than a plausible one. Nothing here is recovered or
+//! inferred — this is a schema change, not a recovery problem.
 //!
 //! `policyTarget` is the **Gumbel improved policy** over every legal root
 //! action — `PuctResult::improved_policy`, `pi'(a) ∝ exp(logit(a) +
@@ -85,8 +104,37 @@ type Result<T> = std::result::Result<T, PuctError>;
 pub const RECORD_FEATURES: usize = NN_INPUT_PLANES * 81;
 /// Policy-target and legal-mask floats per position.
 pub const RECORD_POLICY: usize = MAX_POLICY_CODES;
-/// `features | policyTarget | legalMask | z`.
-pub const RECORD_FLOATS: usize = RECORD_FEATURES + 2 * RECORD_POLICY + 1;
+/// `features | policyTarget | legalMask | z` — the v1 record, and the prefix
+/// every later version keeps byte for byte.
+///
+/// Consumers that only want the four original columns slice `[..RECORD_PREFIX]`
+/// and are correct against every record version; `tests/record_schema_v2.rs`
+/// plays one game twice and pins that prefix bit for bit across the two shapes.
+pub const RECORD_PREFIX: usize = RECORD_FEATURES + 2 * RECORD_POLICY + 1;
+/// `ply | historyStartPly | windowLen`, appended after `z`.
+///
+/// The features pin the POSITION exactly and carry none of this: `encode_board_into`
+/// never reads a ply or a repetition count, so two states differing in either are
+/// the same 810 floats. A search re-run from a record therefore has to be TOLD
+/// where in the game it is and what has already been repeated, or it invents both
+/// — measured at 7.573% of roots re-entering their own root in-horizon against a
+/// 2% gate, which is why these columns exist.
+///
+/// All three are integers below 2049 (`MAX_PLY_CAP` bounds the first two, and a
+/// window holds at most one entry per ply in it), so f32 holds them exactly and
+/// the record stays one homogeneous float run that `np.fromfile` can reshape.
+///
+/// `windowLen` is a LENGTH, not the window: the window itself is variable and
+/// travels beside the shard, keyed by these counts. See [`SelfPlayBatch::record_window`].
+pub const RECORD_STATE_FIELDS: usize = 3;
+/// `features | policyTarget | legalMask | z | ply | historyStartPly | windowLen`.
+pub const RECORD_FLOATS: usize = RECORD_PREFIX + RECORD_STATE_FIELDS;
+/// `(compactKey, count)` per repetition-window entry in [`SelfPlayBatch::record_window`].
+pub const RECORD_WINDOW_FIELDS: usize = 2;
+/// Which record shape this build emits. Bumped with [`RECORD_FLOATS`]; reported
+/// through the wasm layout so a driver dispatches on the engine's own answer
+/// rather than on a build it was told about.
+pub const RECORD_VERSION: u32 = 2;
 /// `game | ply | turn (0 = A, 1 = B) | actionCode` per record.
 pub const RECORD_META_FIELDS: usize = 4;
 
@@ -262,6 +310,16 @@ struct PendingPly {
     legal_mask: Vec<f32>,
     turn: Player,
     ply: u64,
+    /// Ply of the wall placement that opened this position's repetition window,
+    /// or `0` while no wall has been placed. Snapshotted rather than derived so
+    /// the reader can check it against `ply + 1 - sum(counts)` and catch a writer
+    /// that has drifted.
+    history_start_ply: u64,
+    /// The repetition window AS THE SEARCH SAW IT — the state before the played
+    /// move, which is the state the recorded target answers about. Sorted
+    /// ascending by key so the bytes on disk are a function of the game and not
+    /// of [`RepetitionWindow`]'s insertion order.
+    window: Vec<(u32, u32)>,
     action_code: u16,
 }
 
@@ -271,6 +329,11 @@ struct Game {
     position: SearchPosition,
     ply: u64,
     window: RepetitionWindow,
+    /// Ply of the last wall placement. Maintained in exactly the two places
+    /// `window` is: a wall restarts the window and moves this to the resulting
+    /// ply, a pawn move extends the window and leaves it alone. Tracked from
+    /// ply 0 so the forced opening is counted like any other move.
+    history_start_ply: u64,
     rng: Lcg32,
     search: Option<PuctTreeSearch>,
     plies: Vec<PendingPly>,
@@ -278,6 +341,9 @@ struct Game {
     finished: bool,
     records: Vec<f32>,
     meta: Vec<i32>,
+    /// Flat `(key, count)` pairs for this game's records, in record order.
+    /// Sliced by the `windowLen` column of the matching record.
+    window_entries: Vec<u32>,
     codes: [u16; MAX_POLICY_CODES],
 }
 
@@ -295,6 +361,7 @@ impl Game {
                 position.pawns.b,
                 position.turn,
             )),
+            history_start_ply: 0,
             rng: Lcg32::new(options.seed_base.wrapping_add(index as u32)),
             search: None,
             plies: Vec::new(),
@@ -302,6 +369,7 @@ impl Game {
             finished: false,
             records: Vec::new(),
             meta: Vec::new(),
+            window_entries: Vec::new(),
             codes: [0; MAX_POLICY_CODES],
         };
         if !options.openings.is_empty() {
@@ -343,6 +411,11 @@ impl Game {
         );
         let repetitions = if applied.placed_wall {
             self.window.reset(key);
+            // The window now starts HERE. `validateState` reads the same
+            // relationship from the other side -- it requires the counts to sum
+            // to `ply - historyStartPly + 1` -- so these two lines are what make
+            // a carried window reconstructible rather than merely plausible.
+            self.history_start_ply = self.ply;
             1
         } else {
             self.window.push(key)
@@ -510,12 +583,21 @@ impl Game {
             return Err(PuctError::InvalidActionCode);
         }
 
+        // The search state, captured BEFORE `play` below advances it. `ply`,
+        // `history_start_ply` and `window` here are the ones `PuctTreeSearch::new`
+        // was handed as its `RootContext` a few hundred simulations ago, so the
+        // record describes the search that produced the target rather than the
+        // position that followed it.
+        let mut window = self.window.entries().to_vec();
+        window.sort_unstable_by_key(|(key, _)| *key);
         self.plies.push(PendingPly {
             features,
             policy_target,
             legal_mask,
             turn,
             ply: self.ply,
+            history_start_ply: self.history_start_ply,
+            window,
             action_code: played,
         });
         self.play(config, played)
@@ -527,6 +609,8 @@ impl Game {
         self.finished = true;
         self.records.reserve(self.plies.len() * RECORD_FLOATS);
         self.meta.reserve(self.plies.len() * RECORD_META_FIELDS);
+        self.window_entries
+            .reserve(self.plies.len() * RECORD_WINDOW_FIELDS);
         for ply in &self.plies {
             let z = match self.outcome {
                 GameOutcome::Win(winner) => {
@@ -542,6 +626,22 @@ impl Game {
             self.records.extend_from_slice(&ply.policy_target);
             self.records.extend_from_slice(&ply.legal_mask);
             self.records.push(z);
+            // The v1 record ends at `z`. Everything after this line is v2, and
+            // it is appended rather than interleaved so the prefix a v1 consumer
+            // slices is the identical run of bytes it always was.
+            //
+            // `as f32` is exact here and only here: every one of these is a small
+            // integer (ply and its window start are bounded by `MAX_PLY_CAP`, and
+            // a window holds at most one entry per ply it spans), and f32 is exact
+            // on integers to 2^24. A cast that could round would be silently
+            // fabricating the very state this schema exists to stop fabricating.
+            self.records.push(ply.ply as f32);
+            self.records.push(ply.history_start_ply as f32);
+            self.records.push(ply.window.len() as f32);
+            for (key, count) in &ply.window {
+                self.window_entries.push(*key);
+                self.window_entries.push(*count);
+            }
             self.meta.push(self.index as i32);
             self.meta.push(ply.ply as i32);
             self.meta.push(i32::from(ply.turn == Player::B));
@@ -580,6 +680,7 @@ pub struct SelfPlayBatch {
     slots: Vec<usize>,
     records: Vec<f32>,
     meta: Vec<i32>,
+    window: Vec<u32>,
 }
 
 /// Bounds on the options that drive the up-front record reservation.
@@ -596,8 +697,21 @@ const MAX_PLY_CAP: u64 = 2048;
 /// buffer and the JS heap. The cluster's shard shape -- 32 games at `ply_cap`
 /// 200 -- reserves about 31 MiB, so this is roughly 8x real use.
 const MAX_RECORD_BYTES: usize = 256 * 1024 * 1024;
+/// Ceiling on the repetition-window sink, in bytes, on the same budget.
+///
+/// The window is the one part of a record that is not fixed width, so unlike
+/// `records` it cannot be reserved to its worst case and left there: a wall-free
+/// game repeats no position and grows its window by one entry per ply, which is
+/// `cap * (cap + 1) / 2` entries over a whole game. At the production cap of 200
+/// that is 20,100 entries, so 512 games worst-case is 82 MB and this bound never
+/// comes near firing; it only bites above `ply_cap` ~1231, where the window would
+/// finally outgrow the records themselves. It exists so that case is a readable
+/// refusal instead of a wasm allocator abort.
+const MAX_WINDOW_BYTES: usize = 256 * 1024 * 1024;
 /// Width of a record float, for the byte bound above.
 const BYTES_PER_F32: usize = 4;
+/// Width of a window field, for the byte bound above.
+const BYTES_PER_U32: usize = 4;
 
 impl SelfPlayBatch {
     pub fn new(config: &Config, options: SelfPlayOptions) -> Result<Self> {
@@ -685,6 +799,25 @@ impl SelfPlayBatch {
             return Err(PuctError::InvalidBufferLength);
         }
         let meta_capacity = positions.saturating_mul(RECORD_META_FIELDS);
+        // Worst case for the window is one NEW entry per ply -- a game in which
+        // no wall is ever placed and no position ever repeats -- which sums to
+        // `cap * (cap + 1) / 2` entries over a game. Bounded rather than reserved
+        // to it: at the production cap that is 20,100 entries per game where the
+        // reservation below asks for `cap`, and reserving 100x the real use to
+        // avoid a reallocation the JS side is already immune to would be paying
+        // memory for nothing. See [`Self::record_window`] for why growth here is
+        // harmless where growth in `records` is not.
+        let worst_window_entries = options.games.saturating_mul(
+            usize::try_from(effective_ply_cap.saturating_mul(effective_ply_cap + 1) / 2)
+                .unwrap_or(usize::MAX),
+        );
+        if worst_window_entries
+            .saturating_mul(RECORD_WINDOW_FIELDS)
+            .saturating_mul(BYTES_PER_U32)
+            > MAX_WINDOW_BYTES
+        {
+            return Err(PuctError::InvalidBufferLength);
+        }
         Ok(Self {
             config: config.clone(),
             features: vec![0.0; options.games * RECORD_FEATURES],
@@ -698,6 +831,9 @@ impl SelfPlayBatch {
             // the wasm heap and detach a live JS view. See the type docs.
             records: Vec::with_capacity(record_capacity),
             meta: Vec::with_capacity(meta_capacity),
+            // The measured case, not the worst one: 97.0% of records on a
+            // production shard carry a single-entry window.
+            window: Vec::with_capacity(positions.saturating_mul(RECORD_WINDOW_FIELDS)),
             options,
             games,
         })
@@ -768,9 +904,11 @@ impl SelfPlayBatch {
     pub fn take_records(&mut self) -> usize {
         self.records.clear();
         self.meta.clear();
+        self.window.clear();
         for game in &mut self.games {
             self.records.append(&mut game.records);
             self.meta.append(&mut game.meta);
+            self.window.append(&mut game.window_entries);
         }
         self.records.len() / RECORD_FLOATS
     }
@@ -785,6 +923,36 @@ impl SelfPlayBatch {
     #[must_use]
     pub fn record_meta(&self) -> &[i32] {
         &self.meta
+    }
+
+    /// The repetition windows, flat: `RECORD_WINDOW_FIELDS` values per entry,
+    /// `(compactKey, count)`, entries ascending by key within a record and
+    /// records in the order [`Self::records`] gives them.
+    ///
+    /// Sliced by the `windowLen` column of the matching record — a running
+    /// offset, not an index, which is why that column is in the fixed record at
+    /// all. A consumer that wants random access builds the prefix sums once.
+    ///
+    /// `compactKey` is [`crate::puct::compact_key`]: the two pawn squares and
+    /// the side to move, packed into a `u32`. That is the whole of what varies
+    /// inside a window — the window is delimited by wall placements and neither
+    /// the walls nor the stock can change without one — so the reader recovers
+    /// each full position by substituting the pair into the root position it
+    /// already has from the features.
+    ///
+    /// # Why this one may grow the heap and the others may not
+    ///
+    /// Unlike [`Self::records`] this buffer is NOT reserved to its worst case
+    /// (see `MAX_WINDOW_BYTES`), so `take_records` can reallocate it and detach a
+    /// JS view over wasm memory. That is safe for exactly one reason and it is a
+    /// reason a caller has to honour: there is no window view to detach before
+    /// `take_records` runs, because the window is only readable after it. Build
+    /// the view AFTER the call, copy out of it before the next call into wasm,
+    /// and never hoist it — the same rule as everything else here, with the
+    /// pre-allocation safety net deliberately absent.
+    #[must_use]
+    pub fn record_window(&self) -> &[u32] {
+        &self.window
     }
 
     #[must_use]

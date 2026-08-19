@@ -44,11 +44,14 @@
  * relabelling it. Production shards hold no such record (the audited one had
  * `minLegal` 1 and no empty mask), which is why that refusal is free in practice.
  *
- * AND IT IS NOT A RECOVERY PROBLEM FOR FUTURE DATA. `distill-collect.mjs` already
- * pushes `ply` and the full move `history` for every ply it records; the binary
- * shard schema is what drops them on the way to disk. Carrying them through is a
- * schema change, and it would retire the synthesis here for everything collected
- * afterwards. The positions already on disk have no such recourse.
+ * AND IT IS NOT A RECOVERY PROBLEM FOR FUTURE DATA. That schema change has now
+ * been made: the self-play record carries `ply`, `historyStartPly` and its
+ * repetition window (`selfplay.rs`), so anything written by a build from
+ * `RECORD_VERSION` 2 onward goes through `stateFromCarried` below and the
+ * synthesis is not involved at all. `synthesizeState` remains for the positions
+ * already on disk, which have no such recourse, and for the counterfactual a v2
+ * consumer can now run: rebuild the state the old way beside the true one and
+ * report how far apart they are.
  *
  * WHAT THIS DOES NOT REIMPLEMENT: any rule. Geometry, legality, wall conflicts,
  * path checks, the encoding and the plane order all come from
@@ -404,6 +407,25 @@ function* wallFreeWindowCandidates(config, position, bounds) {
   }
 }
 
+/**
+ * A `Map` of position key to count, in the order `validateState` demands.
+ *
+ * Shared by the two state builders rather than written out twice, and the reason
+ * is a mutation that survived: with the sort spelled out at both call sites,
+ * breaking one of them left the other correct and the suite green, so the check
+ * was pinning one path and reporting on both. One implementation means one thing
+ * to test.
+ *
+ * The order is by the position key's UTF-8 BYTES, which is not the numeric order
+ * of the squares inside it -- `"9"` sorts after `"10"` -- so this cannot be
+ * approximated by sorting the packed keys instead.
+ */
+function canonicalRepetitionCounts(counts) {
+  return [...counts.entries()]
+    .sort(([left], [right]) => comparePositionKeys(left, right))
+    .map(([positionKeyText, count]) => ({ positionKey: positionKeyText, count }));
+}
+
 /** Build and VALIDATE one candidate state; the engine decides whether it stands. */
 function stateAtPly(config, position, ply, historyStartPly) {
   const key = positionKey(config, position);
@@ -452,9 +474,7 @@ function stateAtPly(config, position, ply, historyStartPly) {
     positionKey: key,
     ply,
     historyStartPly,
-    repetitionCounts: [...counts.entries()]
-      .sort(([left], [right]) => comparePositionKeys(left, right))
-      .map(([positionKeyText, count]) => ({ positionKey: positionKeyText, count })),
+    repetitionCounts: canonicalRepetitionCounts(counts),
     outcome
   });
 }
@@ -552,6 +572,123 @@ export function stateFromFeatures(config, features) {
 }
 
 /**
+ * Decode one packed window key into the pawns and turn it names.
+ *
+ * The writer's `compact_key` is `squareA | squareB << 8 | turnBit << 16`, and
+ * that is the whole of a window entry because a window is delimited by wall
+ * placements: `validateState` requires every entry to share the current walls
+ * and stock, so nothing else inside one can differ. Bits above the turn flag
+ * would mean the reader and the writer disagree about the packing, which is a
+ * refusal and not something to mask off.
+ */
+function pawnsFromWindowKey(config, key) {
+  if (!Number.isInteger(key) || key < 0 || key > 0x1ffff) {
+    fail('window_key_out_of_range', { key });
+  }
+  const cells = config.rows * config.columns;
+  const squareA = key & 0xff;
+  const squareB = (key >>> 8) & 0xff;
+  if (squareA >= cells || squareB >= cells) fail('window_key_square_out_of_board', { key, squareA, squareB });
+  return {
+    pawns: {
+      A: { r: Math.floor(squareA / config.columns), c: squareA % config.columns },
+      B: { r: Math.floor(squareB / config.columns), c: squareB % config.columns }
+    },
+    turn: (key >>> 16) & 1 ? 'B' : 'A'
+  };
+}
+
+/**
+ * Build the state the game was ACTUALLY in, from the record that carries it.
+ *
+ * This is `synthesizeState`'s replacement and its opposite. Nothing here is
+ * chosen: the position comes from the planes, `ply` and `historyStartPly` come
+ * off the record, and the repetition window comes out of the sidecar the writer
+ * filled from the window it was playing with. The only work is turning packed
+ * keys back into the position keys the engine speaks, which is substitution
+ * rather than search -- every window entry shares this position's walls and
+ * stock by construction.
+ *
+ * `validateState` is still the judge, and it is a real one here: it re-derives
+ * the outcome, re-checks the turn parity of the whole window, bounds each
+ * historical pawn's distance from the current one by the moves available inside
+ * the window, and requires the counts to sum to `ply - historyStartPly + 1`. A
+ * true state passes all of that because the engine's own transition function
+ * produced it. A state assembled from a corrupted or mismatched sidecar does
+ * not.
+ *
+ * The two cheap identities are checked HERE rather than left to the engine so
+ * the failure names the field: `validateState` would reject a wrong window sum
+ * as `invalid_state`, which is true and tells a reader nothing about which of
+ * the six fields was wrong.
+ *
+ * `window` is `[[key, count], ...]` in any order; the canonical ordering the
+ * engine demands is applied below, so a caller need not know what it is.
+ */
+export function stateFromCarried(config, features, carried) {
+  const checked = validateConfig(config);
+  const position = positionFromFeatures(checked, features);
+  const { ply, historyStartPly, window } = carried ?? {};
+  if (!Number.isInteger(ply) || ply < 0) fail('carried_ply_invalid', { ply });
+  if (!Number.isInteger(historyStartPly) || historyStartPly < 0 || historyStartPly > ply) {
+    fail('carried_history_start_ply_invalid', { ply, historyStartPly });
+  }
+  if (!Array.isArray(window) || window.length === 0) {
+    fail('carried_window_empty', { entries: Array.isArray(window) ? window.length : null });
+  }
+
+  const counts = new Map();
+  let total = 0;
+  for (const entry of window) {
+    if (!Array.isArray(entry) || entry.length !== 2) fail('carried_window_entry_shape', { entry });
+    const [key, count] = entry;
+    if (!Number.isInteger(count) || count < 1) fail('carried_window_count_invalid', { key, count });
+    const { pawns, turn } = pawnsFromWindowKey(checked, key);
+    // Same walls, same stock -- that is what a window MEANS -- so the whole of
+    // the historical position is this one with its pawns and turn swapped.
+    let historicalKey;
+    try {
+      historicalKey = positionKey(checked, {
+        pawns, walls: position.walls, stock: position.stock, turn
+      });
+    } catch (error) {
+      fail('carried_window_entry_not_a_position', { key, reason: error.code ?? error.message });
+    }
+    if (counts.has(historicalKey)) fail('carried_window_duplicate_key', { key });
+    counts.set(historicalKey, count);
+    total += count;
+  }
+  if (total !== ply - historyStartPly + 1) {
+    fail('carried_window_sum_mismatch', { total, ply, historyStartPly, want: ply - historyStartPly + 1 });
+  }
+
+  const key = positionKey(checked, position);
+  if (!counts.has(key)) fail('carried_window_missing_root', { ply, historyStartPly });
+
+  const atGoal = {
+    A: position.pawns.A.r === checked.goalRows.A,
+    B: position.pawns.B.r === checked.goalRows.B
+  };
+  const goalWinner = atGoal.A ? 'A' : atGoal.B ? 'B' : null;
+  // Derived, never asserted: `validateState` recomputes it and refuses a
+  // disagreement, so writing `{ kind: 'ongoing' }` here would be a claim rather
+  // than a reading, and it would be the wrong claim at exactly the boundaries
+  // this schema exists to get right.
+  const outcome = ply === 0
+    ? { kind: 'ongoing' }
+    : adjudicate(checked, { goalWinner, resultingPositionCount: counts.get(key), resultingPly: ply });
+
+  return validateState(checked, {
+    position,
+    positionKey: key,
+    ply,
+    historyStartPly,
+    repetitionCounts: canonicalRepetitionCounts(counts),
+    outcome
+  });
+}
+
+/**
  * Index of the first element whose BITS differ, or -1.
  *
  * Bits rather than `!==` because the claim being made is bit equality: `===`
@@ -606,12 +743,49 @@ function firstDifferingElement(actual, expected) {
  */
 export function verifyRecord(config, features, legalMask) {
   const checked = validateConfig(config);
+  assertMaskShape(checked, legalMask);
+  return auditRecordAgainst(checked, features, legalMask, stateFromFeatures(checked, features));
+}
+
+/**
+ * The same audit against a state the CALLER built, for records that carry one.
+ *
+ * Under the v2 schema the state is not reconstructed, so the audit stops being a
+ * check on the reconstruction and becomes a check on the WRITER: the carried ply
+ * and window came out of one place in the engine and the features out of
+ * another, and this is what says they describe the same position. A shard whose
+ * carried state does not encode to its own features is refused rather than
+ * relabelled -- the same refusal, aimed at the half that can now be wrong.
+ *
+ * It is free either way. The re-encode and the mask build are work the audit was
+ * already doing; all that changes is which state goes in.
+ *
+ * Note what it still does NOT establish, for the same reason as before:
+ * `encodeState` reads only `state.position`, so this cannot tell a right window
+ * from a wrong one. Nothing can, from the features alone -- that is why the
+ * window is carried. What pins the window is `validateState` inside
+ * `stateFromCarried`, which re-derives the outcome and the turn parity of the
+ * whole window from the ply, plus the sum identity checked there explicitly.
+ */
+export function verifyCarriedRecord(config, features, legalMask, carried) {
+  const checked = validateConfig(config);
+  assertMaskShape(checked, legalMask);
+  return auditRecordAgainst(checked, features, legalMask, stateFromCarried(checked, features, carried));
+}
+
+/**
+ * Checked BEFORE any state is built, in both entry points. A caller who passed
+ * the wrong array should hear about the array, not about whichever plane the
+ * inversion happened to trip over first.
+ */
+function assertMaskShape(checked, legalMask) {
   if (!(legalMask instanceof Float32Array)) fail('legal_mask_not_float32', { type: typeof legalMask });
   if (legalMask.length !== policySize(checked)) {
     fail('legal_mask_length', { got: legalMask.length, want: policySize(checked) });
   }
-  const state = stateFromFeatures(checked, features);
+}
 
+function auditRecordAgainst(checked, features, legalMask, state) {
   const reencoded = encodeState(checked, state);
   const featureIndex = firstDifferingElement(reencoded, features);
   if (featureIndex >= 0) {

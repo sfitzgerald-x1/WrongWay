@@ -22,3 +22,8 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run check:normal-duel-corpora
+      # The inversion suite needs no wasm, no shard and no network, and it was
+      # not wired into CI when it landed -- so a change to the plane layout or
+      # to `synthesizeState` could break the reanalyse path with every job here
+      # green. It is seconds of engine-only work.
+      - run: npm run check:feature-inversion

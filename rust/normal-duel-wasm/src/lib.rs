@@ -15,7 +15,7 @@ use wrongway_normal_duel::js_math::Lcg32;
 use wrongway_normal_duel::puct::{PuctParams, PuctTreeSearch};
 use wrongway_normal_duel::selfplay::{
     Exploration, GameOutcome, SelfPlayBatch, SelfPlayOptions, RECORD_FEATURES, RECORD_FLOATS,
-    RECORD_META_FIELDS, RECORD_POLICY,
+    RECORD_META_FIELDS, RECORD_POLICY, RECORD_STATE_FIELDS, RECORD_VERSION, RECORD_WINDOW_FIELDS,
 };
 use wrongway_normal_duel::{
     action_from_json, apply_action, create_initial_state, decode_action, game_state_from_json,
@@ -563,6 +563,19 @@ impl NormalDuelSelfPlayBatch {
         self.inner.record_meta().as_ptr() as u32
     }
 
+    /// The repetition windows, as a `Uint32Array` — NOT a `Float32Array`.
+    ///
+    /// Read AFTER `takeRecords()` and copy out before the next call into wasm.
+    /// Unlike the record sink this buffer is not reserved to its worst case, so
+    /// `takeRecords` may grow the heap and detach anything built before it; there
+    /// is nothing to detach, because there is nothing to read before then. See
+    /// [`SelfPlayBatch::record_window`].
+    #[wasm_bindgen(js_name = recordWindowPtr)]
+    #[must_use]
+    pub fn record_window_ptr(&self) -> u32 {
+        self.inner.record_window().as_ptr() as u32
+    }
+
     // --- Lengths, in elements. ---
 
     #[wasm_bindgen(js_name = featuresLen)]
@@ -593,6 +606,15 @@ impl NormalDuelSelfPlayBatch {
     #[must_use]
     pub fn record_meta_len(&self) -> usize {
         self.inner.record_meta().len()
+    }
+
+    /// `RECORD_WINDOW_FIELDS` u32 per window ENTRY, and the entry count varies
+    /// per record — so this is not `recordCount * k`. Slice it with the
+    /// `windowLen` column of each record, in record order.
+    #[wasm_bindgen(js_name = recordWindowLen)]
+    #[must_use]
+    pub fn record_window_len(&self) -> usize {
+        self.inner.record_window().len()
     }
 
     // --- Run summary. Cold path; JSON is fine. ---
@@ -914,11 +936,27 @@ impl NormalDuelSearch {
 }
 
 /// Record layout constants, so the JS driver never hard-codes a stride.
+///
+/// This is also the ONLY thing that tells a driver which record shape it is
+/// looking at, and that is deliberate. The obvious alternative — a
+/// `recordVersion` on [`SelfPlayOptionsDto`] — would have to be sent to get v2
+/// records, and a key sent unconditionally to an engine that predates it is the
+/// failure this project has already paid for once: the DTO refuses unknown
+/// fields, so every shard dies at construction with `invalid_options` before the
+/// first game. So nothing new crosses the boundary INWARD. The engine emits the
+/// widest record it knows, says so here, and the driver dispatches on the
+/// answer. New driver against an old engine reads `stateFields: 0` (absent) and
+/// writes a v1 shard; old driver against a new engine trips its own
+/// `recordFloats === features + 2*policy + 1` assertion and stops. Neither can
+/// write a mis-shaped shard.
+///
+/// `stateFields` and `windowFields` are new keys in the OUTPUT, which is safe:
+/// this is parsed with `JSON.parse`, and no consumer asserts an exact key set.
 #[wasm_bindgen(js_name = normalDuelSelfPlayLayout)]
 #[must_use]
 pub fn normal_duel_self_play_layout() -> String {
     format!(
-        r#"{{"features":{RECORD_FEATURES},"policy":{RECORD_POLICY},"recordFloats":{RECORD_FLOATS},"metaFields":{RECORD_META_FIELDS}}}"#
+        r#"{{"features":{RECORD_FEATURES},"policy":{RECORD_POLICY},"recordFloats":{RECORD_FLOATS},"metaFields":{RECORD_META_FIELDS},"stateFields":{RECORD_STATE_FIELDS},"windowFields":{RECORD_WINDOW_FIELDS},"recordVersion":{RECORD_VERSION}}}"#
     )
 }
 

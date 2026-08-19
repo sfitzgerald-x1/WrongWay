@@ -70,6 +70,18 @@ jobs:
       # classical normalDuelSearchNodes entry point instead).
       - name: Run the JS suite against the built candidate
         run: npm test
+      # The one place the record's carried state is checked end to end: the Rust
+      # writer produces it, the JS reader rebuilds it, and the reference engine
+      # replaying the same moves says whether they agree. Each side alone can be
+      # self-consistent and wrong about what a window entry means, so this needs
+      # the candidate and belongs in this job.
+      - name: Check the carried state in record schema v2
+        # WW_REQUIRE_WASM turns the local "candidate not built, skip" into a
+        # failure. Without it, renaming or reordering the build step above would
+        # leave this -- the only writer-versus-reader comparison in the repo --
+        # silently green.
+        env: { WW_REQUIRE_WASM: "1" }
+        run: npm run check:record-schema-v2
 
   msrv:
     name: Rust 1.77 minimum version
