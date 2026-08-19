@@ -1,0 +1,22 @@
+{
+  "note": "The v1 record shape, minted from the build that predates shard schema v2 (WrongWay origin/main @ ca6e749) by driving SelfPlayBatch against the deterministic mock evaluator. It is the left half of the golden in rust/normal-duel-core/tests/record_schema_v2.rs: the v2 build replays the same options and its records must agree with these digests over the first `prefixFloats` floats of every record, and over the whole meta buffer. A schema change that perturbs the GAME rather than merely widening the record breaks both.",
+  "options": {
+    "games": 4,
+    "simulations": 16,
+    "maxConsidered": 4,
+    "exploration": "visitTemperature",
+    "temperature": 1.0,
+    "temperatureMoves": 8,
+    "plyCap": 60,
+    "seedBase": 7
+  },
+  "config": "9x9 standard, initialStock 10/10, repetitionThreshold 3, plyCap 200, firstPlayer A",
+  "prefixFloats": 1229,
+  "recordCount": 168,
+  "digestAlgorithm": "FNV-1a 64, over the little-endian bytes of the values in order",
+  "prefixDigest": "2769c2dbdccf4918",
+  "metaDigest": "df66d8d30aa82450",
+  "outcomes": [0, 0, 0, 0],
+  "pliesPlayed": [48, 35, 29, 56],
+  "outcomesNote": "All four games are DRAWS at 48/35/29/56 plies against a cap of 60, so every one of them ended in threefold repetition rather than truncation. That is deliberate: a corpus whose games repeat positions is the one where a carried repetition window has something to carry, and these records include windows with counts above 1."
+}

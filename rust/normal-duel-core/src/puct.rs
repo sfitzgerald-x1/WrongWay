@@ -332,6 +332,18 @@ impl RepetitionWindow {
         self.counts.push((key, 1));
     }
 
+    /// The window's `(key, count)` pairs, in whatever order they were inserted.
+    ///
+    /// Exposed for the shard writer, which has to put the window on disk so a
+    /// later re-search can start from the state the game was actually in rather
+    /// than one synthesised around the position. Insertion order is deterministic
+    /// but it is an implementation detail of [`Self::push`], so the writer sorts
+    /// rather than trusting it; the keys are unique, so the sort is total.
+    #[must_use]
+    pub fn entries(&self) -> &[(u32, u32)] {
+        &self.counts
+    }
+
     /// Rebuild the window from a validated [`GameState`].
     ///
     /// `validateState` guarantees every entry shares the current walls and
