@@ -287,17 +287,29 @@ report(draws.length > 0, 'the games reach a real threefold',
   `${draws.length} of ${terminals.length} terminal states`);
 if (draws.length > 0) {
   const { state, window, historyStartPly } = draws[0];
-  const rebuilt = stateFromCarried(CONFIG, encodeState(CONFIG, state),
-    { ply: state.ply, historyStartPly, window });
-  report(rebuilt.outcome.kind === 'draw' && rebuilt.outcome.reason === 'threefold_repetition',
-    'a threefold window rebuilds as a draw',
-    `${rebuilt.outcome.kind}/${rebuilt.outcome.reason ?? '-'} at ply ${state.ply}`);
-  // And the mask agrees: a terminal state has no legal action, so the audit
-  // would refuse a rebuild that read it as ongoing -- which is what makes this
-  // the same check the corpus records get, not a weaker one.
-  report(legalMaskFloat(CONFIG, rebuilt).every((value) => value === 0),
-    'the rebuilt draw has no legal action',
-    `${legalMaskFloat(CONFIG, rebuilt).reduce((sum, v) => sum + v, 0)} legal codes`);
+  // Caught, not allowed to propagate: a builder that hands `validateState` an
+  // outcome it did not derive is refused as `invalid_state`, and an uncaught
+  // throw would exit this script with no failure marker at all -- which reads as
+  // a crashed harness rather than as the finding it is.
+  let rebuilt = null;
+  try {
+    rebuilt = stateFromCarried(CONFIG, encodeState(CONFIG, state),
+      { ply: state.ply, historyStartPly, window });
+  } catch (error) {
+    report(false, 'a threefold window rebuilds as a draw',
+      `refused: ${error.reason ?? error.code ?? error.message}`);
+  }
+  if (rebuilt) {
+    report(rebuilt.outcome.kind === 'draw' && rebuilt.outcome.reason === 'threefold_repetition',
+      'a threefold window rebuilds as a draw',
+      `${rebuilt.outcome.kind}/${rebuilt.outcome.reason ?? '-'} at ply ${state.ply}`);
+    // And the mask agrees: a terminal state has no legal action, so the audit
+    // would refuse a rebuild that read it as ongoing -- which is what makes this
+    // the same check the corpus records get, not a weaker one.
+    const mask = legalMaskFloat(CONFIG, rebuilt);
+    report(mask.every((value) => value === 0), 'the rebuilt draw has no legal action',
+      `${mask.reduce((sum, value) => sum + value, 0)} legal codes`);
+  }
 }
 
 // ------------------------------------------------------------- the refusals
