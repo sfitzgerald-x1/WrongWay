@@ -407,6 +407,25 @@ function* wallFreeWindowCandidates(config, position, bounds) {
   }
 }
 
+/**
+ * A `Map` of position key to count, in the order `validateState` demands.
+ *
+ * Shared by the two state builders rather than written out twice, and the reason
+ * is a mutation that survived: with the sort spelled out at both call sites,
+ * breaking one of them left the other correct and the suite green, so the check
+ * was pinning one path and reporting on both. One implementation means one thing
+ * to test.
+ *
+ * The order is by the position key's UTF-8 BYTES, which is not the numeric order
+ * of the squares inside it -- `"9"` sorts after `"10"` -- so this cannot be
+ * approximated by sorting the packed keys instead.
+ */
+function canonicalRepetitionCounts(counts) {
+  return [...counts.entries()]
+    .sort(([left], [right]) => comparePositionKeys(left, right))
+    .map(([positionKeyText, count]) => ({ positionKey: positionKeyText, count }));
+}
+
 /** Build and VALIDATE one candidate state; the engine decides whether it stands. */
 function stateAtPly(config, position, ply, historyStartPly) {
   const key = positionKey(config, position);
@@ -455,9 +474,7 @@ function stateAtPly(config, position, ply, historyStartPly) {
     positionKey: key,
     ply,
     historyStartPly,
-    repetitionCounts: [...counts.entries()]
-      .sort(([left], [right]) => comparePositionKeys(left, right))
-      .map(([positionKeyText, count]) => ({ positionKey: positionKeyText, count })),
+    repetitionCounts: canonicalRepetitionCounts(counts),
     outcome
   });
 }
@@ -666,9 +683,7 @@ export function stateFromCarried(config, features, carried) {
     positionKey: key,
     ply,
     historyStartPly,
-    repetitionCounts: [...counts.entries()]
-      .sort(([left], [right]) => comparePositionKeys(left, right))
-      .map(([positionKeyText, count]) => ({ positionKey: positionKeyText, count })),
+    repetitionCounts: canonicalRepetitionCounts(counts),
     outcome
   });
 }

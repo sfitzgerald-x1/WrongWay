@@ -35,9 +35,11 @@ import { fileURLToPath } from 'node:url';
 import {
   applyLegalAction, createInitialState, decodeAction, policySize
 } from '../js/normal-duel-engine.mjs';
+import { encodeState, legalMaskFloat } from '../js/normal-duel-nn-encoding.mjs';
 import { hashFeatures, mix32 } from '../js/normal-duel-mock-evaluator.mjs';
 import {
-  FeatureInversionError, SELFPLAY_CONFIG as CONFIG, featureLength, verifyCarriedRecord
+  FeatureInversionError, SELFPLAY_CONFIG as CONFIG, featureLength, stateFromCarried,
+  verifyCarriedRecord
 } from './feature-inversion.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -179,14 +181,31 @@ for (const record of cut) {
   byGame.get(record.game).push(record);
 }
 
+/** The packed key of a state's own position, in the writer's packing. */
+function packKey(position) {
+  const square = ({ r, c }) => r * CONFIG.columns + c;
+  return square(position.pawns.A)
+    | (square(position.pawns.B) << 8)
+    | ((position.turn === 'B' ? 1 : 0) << 16);
+}
+
 let checked = 0;
 let repeatedPositions = 0;
 let multiEntryWindows = 0;
 let windowsAfterAWall = 0;
 let firstMismatch = null;
+/** Terminal states reached after the last recorded ply, for the outcome case. */
+const terminals = [];
 
 for (const [game, plies] of [...byGame.entries()].sort(([a], [b]) => a - b)) {
   let state = createInitialState(CONFIG);
+  // The window carried forward independently of the writer, updated by the SAME
+  // two rules the engine uses: a wall restarts it, a pawn move extends it. Each
+  // record checks it against the writer's, so by the end of a game it is a
+  // validated window -- which is what lets the terminal case below exist, since
+  // the terminal state itself was never recorded.
+  let tracked = new Map();
+  let trackedStart = 0;
   for (const record of plies) {
     const carried = {
       ply: record.ply,
@@ -223,7 +242,20 @@ for (const [game, plies] of [...byGame.entries()].sort(([a], [b]) => a - b)) {
     if (record.windowLen > 1) multiEntryWindows += 1;
     if (record.historyStartPly > 0 && record.historyStartPly === record.ply) windowsAfterAWall += 1;
 
-    state = applyLegalAction(CONFIG, state, decodeAction(CONFIG, record.playedCode));
+    tracked = new Map(record.window);
+    trackedStart = record.historyStartPly;
+    const action = decodeAction(CONFIG, record.playedCode);
+    state = applyLegalAction(CONFIG, state, action);
+    const key = packKey(state.position);
+    if (action.kind === 'wall') {
+      tracked = new Map([[key, 1]]);
+      trackedStart = state.ply;
+    } else {
+      tracked.set(key, (tracked.get(key) ?? 0) + 1);
+    }
+  }
+  if (state.outcome.kind !== 'ongoing') {
+    terminals.push({ game, state, window: [...tracked.entries()], historyStartPly: trackedStart });
   }
 }
 
@@ -240,6 +272,33 @@ report(multiEntryWindows > 0, 'the corpus contains multi-entry windows',
   `${multiEntryWindows} of ${checked} records carry more than one position`);
 report(windowsAfterAWall > 0, 'the corpus contains just-reset windows',
   `${windowsAfterAWall} of ${checked} records open at their own ply`);
+
+// -------------------------------------------------- the outcome is DERIVED
+//
+// Every RECORDED position is ongoing -- a game ends when a position occurs a
+// third time, so a root the search was asked about never is one -- which means
+// the recorded corpus cannot tell a derived outcome from a hardcoded
+// `{ kind: 'ongoing' }`. The states one move PAST the last record can: they are
+// the threefold draws the games ended on, and their window says so. The state is
+// built from the tracked window, which every record above has already checked
+// against the writer's.
+const draws = terminals.filter(({ state }) => state.outcome.reason === 'threefold_repetition');
+report(draws.length > 0, 'the games reach a real threefold',
+  `${draws.length} of ${terminals.length} terminal states`);
+if (draws.length > 0) {
+  const { state, window, historyStartPly } = draws[0];
+  const rebuilt = stateFromCarried(CONFIG, encodeState(CONFIG, state),
+    { ply: state.ply, historyStartPly, window });
+  report(rebuilt.outcome.kind === 'draw' && rebuilt.outcome.reason === 'threefold_repetition',
+    'a threefold window rebuilds as a draw',
+    `${rebuilt.outcome.kind}/${rebuilt.outcome.reason ?? '-'} at ply ${state.ply}`);
+  // And the mask agrees: a terminal state has no legal action, so the audit
+  // would refuse a rebuild that read it as ongoing -- which is what makes this
+  // the same check the corpus records get, not a weaker one.
+  report(legalMaskFloat(CONFIG, rebuilt).every((value) => value === 0),
+    'the rebuilt draw has no legal action',
+    `${legalMaskFloat(CONFIG, rebuilt).reduce((sum, v) => sum + v, 0)} legal codes`);
+}
 
 // ------------------------------------------------------------- the refusals
 //

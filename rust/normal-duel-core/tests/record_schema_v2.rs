@@ -52,8 +52,10 @@ fn config() -> Config {
     }
 }
 
-/// The golden's options, spelled out once so the two tests that use them cannot
-/// drift apart.
+/// The golden's `draws` arm, spelled out once so every test that uses it cannot
+/// drift from the fixture. Every game in it ends in threefold repetition, which
+/// makes it the arm with something to say about repetition windows and the arm
+/// with nothing to say about `z` — see [`decisive_options`].
 fn golden_options() -> SelfPlayOptions {
     SelfPlayOptions {
         games: 4,
@@ -64,6 +66,26 @@ fn golden_options() -> SelfPlayOptions {
         temperature_moves: 8,
         ply_cap: 60,
         seed_base: 7,
+        ..SelfPlayOptions::default()
+    }
+}
+
+/// The golden's `decisive` arm: eight games, one of them won.
+///
+/// It exists because the draws arm cannot pin the `z` column at all. Every game
+/// there is a draw, so every `z` is exactly 0, and a writer that stamped the
+/// outcome from the wrong side — or from nowhere — would hash identically. This
+/// arm carries 36 records at +1 and 36 at -1, so the digest sees the column.
+fn decisive_options() -> SelfPlayOptions {
+    SelfPlayOptions {
+        games: 8,
+        simulations: 24,
+        max_considered: 8,
+        exploration: Exploration::VisitTemperature,
+        temperature: 1.0,
+        temperature_moves: 16,
+        ply_cap: 120,
+        seed_base: 5,
         ..SelfPlayOptions::default()
     }
 }
@@ -209,6 +231,9 @@ fn run_taking(config: &Config, options: SelfPlayOptions, takes: usize) -> Run {
 }
 
 /// THE golden. Same options, same evaluator, one build apart.
+///
+/// Both arms, and both for a reason: `draws` is where the repetition windows
+/// live and `decisive` is the only one whose `z` column is not uniformly zero.
 #[test]
 fn the_v1_prefix_of_a_v2_record_is_the_v1_record() {
     assert_eq!(
@@ -219,8 +244,36 @@ fn the_v1_prefix_of_a_v2_record_is_the_v1_record() {
     assert_eq!(RECORD_FLOATS, RECORD_PREFIX + RECORD_STATE_FIELDS);
     assert_eq!(RECORD_VERSION, 2);
 
-    let run = run(&config(), golden_options());
-    assert_eq!(run.count, golden_u64("recordCount") as usize);
+    check_arm(
+        "draws",
+        golden_options(),
+        &[0, 0, 0, 0],
+        &[48, 35, 29, 56],
+        (0, 0, 168),
+    );
+    check_arm(
+        "decisive",
+        decisive_options(),
+        &[0, 0, -1, 0, 0, 0, 0, 0],
+        &[32, 31, 72, 34, 47, 39, 35, 32],
+        (36, 36, 250),
+    );
+}
+
+fn check_arm(
+    arm: &str,
+    options: SelfPlayOptions,
+    want_outcomes: &[i32],
+    want_plies: &[u64],
+    want_z: (usize, usize, usize),
+) {
+    let key = |suffix: &str| format!("{arm}{suffix}");
+    let run = run(&config(), options);
+    assert_eq!(
+        run.count,
+        golden_u64(&key("RecordCount")) as usize,
+        "{arm}: record count"
+    );
     assert_eq!(run.records.len(), run.count * RECORD_FLOATS);
     assert_eq!(run.meta.len(), run.count * RECORD_META_FIELDS);
 
@@ -233,9 +286,9 @@ fn the_v1_prefix_of_a_v2_record_is_the_v1_record() {
     }
     assert_eq!(
         format!("{:016x}", digest_f32(&prefix)),
-        format!("{:016x}", golden_digest("prefixDigest")),
-        "the v1 prefix changed: widening the record perturbed the game or its \
-         targets, which is the one thing this schema change may not do"
+        format!("{:016x}", golden_digest(&key("PrefixDigest"))),
+        "{arm}: the v1 prefix changed -- widening the record perturbed the game \
+         or its targets, which is the one thing this schema change may not do"
     );
 
     // The meta buffer is an independent description of the same game — which
@@ -244,8 +297,8 @@ fn the_v1_prefix_of_a_v2_record_is_the_v1_record() {
     // old bytes attached to a different game.
     assert_eq!(
         format!("{:016x}", digest_i32(&run.meta)),
-        format!("{:016x}", golden_digest("metaDigest")),
-        "the same records came out of a different sequence of moves"
+        format!("{:016x}", golden_digest(&key("MetaDigest"))),
+        "{arm}: the same records came out of a different sequence of moves"
     );
 
     let outcomes: Vec<i32> = run
@@ -258,8 +311,22 @@ fn the_v1_prefix_of_a_v2_record_is_the_v1_record() {
             GameOutcome::Ongoing => 2,
         })
         .collect();
-    assert_eq!(outcomes, vec![0, 0, 0, 0], "the golden's games all drew");
-    assert_eq!(run.plies, vec![48, 35, 29, 56]);
+    assert_eq!(outcomes, want_outcomes, "{arm}: outcomes");
+    assert_eq!(run.plies, want_plies, "{arm}: plies played");
+
+    // Spelled out per arm rather than inferred, so the fixture's claim that one
+    // arm exercises the z column and the other does not is checked rather than
+    // trusted. A digest match with the wrong z spread would mean the digest is
+    // not covering the column it is supposed to.
+    let mut z = (0_usize, 0_usize, 0_usize);
+    for index in 0..run.count {
+        match run.record(index)[RECORD_PREFIX - 1] {
+            v if v > 0.5 => z.0 += 1,
+            v if v < -0.5 => z.1 += 1,
+            _ => z.2 += 1,
+        }
+    }
+    assert_eq!(z, want_z, "{arm}: z spread (wins, losses, draws)");
 }
 
 /// `take_records` DRAINS the games into the batch's sinks, so a second call

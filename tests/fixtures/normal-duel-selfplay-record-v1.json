@@ -1,22 +1,32 @@
 {
   "note": "The v1 record shape, minted from the build that predates shard schema v2 (WrongWay origin/main @ ca6e749) by driving SelfPlayBatch against the deterministic mock evaluator. It is the left half of the golden in rust/normal-duel-core/tests/record_schema_v2.rs: the v2 build replays the same options and its records must agree with these digests over the first `prefixFloats` floats of every record, and over the whole meta buffer. A schema change that perturbs the GAME rather than merely widening the record breaks both.",
-  "options": {
-    "games": 4,
-    "simulations": 16,
-    "maxConsidered": 4,
-    "exploration": "visitTemperature",
-    "temperature": 1.0,
-    "temperatureMoves": 8,
-    "plyCap": 60,
-    "seedBase": 7
-  },
-  "config": "9x9 standard, initialStock 10/10, repetitionThreshold 3, plyCap 200, firstPlayer A",
   "prefixFloats": 1229,
-  "recordCount": 168,
   "digestAlgorithm": "FNV-1a 64, over the little-endian bytes of the values in order",
-  "prefixDigest": "2769c2dbdccf4918",
-  "metaDigest": "df66d8d30aa82450",
-  "outcomes": [0, 0, 0, 0],
-  "pliesPlayed": [48, 35, 29, 56],
-  "outcomesNote": "All four games are DRAWS at 48/35/29/56 plies against a cap of 60, so every one of them ended in threefold repetition rather than truncation. That is deliberate: a corpus whose games repeat positions is the one where a carried repetition window has something to carry, and these records include windows with counts above 1."
+  "config": "9x9 standard, initialStock 10/10, repetitionThreshold 3, plyCap 200, firstPlayer A",
+
+  "armsNote": "TWO arms, because one of them cannot pin the z column. Every game in `draws` ends in threefold repetition, so every z in it is exactly 0 and a writer that stamped the outcome wrongly would hash identically. `decisive` contains a game that is won, so it carries 36 records at z=+1 and 36 at z=-1 alongside 250 draws. `draws` is still the arm that matters for the window: its games repeat positions constantly, which is what a carried repetition window is for.",
+
+  "drawsOptions": {
+    "games": 4, "simulations": 16, "maxConsidered": 4,
+    "exploration": "visitTemperature", "temperature": 1.0, "temperatureMoves": 8,
+    "plyCap": 60, "seedBase": 7
+  },
+  "drawsRecordCount": 168,
+  "drawsPrefixDigest": "2769c2dbdccf4918",
+  "drawsMetaDigest": "df66d8d30aa82450",
+  "drawsOutcomes": [0, 0, 0, 0],
+  "drawsPliesPlayed": [48, 35, 29, 56],
+  "drawsZ": { "wins": 0, "losses": 0, "draws": 168 },
+
+  "decisiveOptions": {
+    "games": 8, "simulations": 24, "maxConsidered": 8,
+    "exploration": "visitTemperature", "temperature": 1.0, "temperatureMoves": 16,
+    "plyCap": 120, "seedBase": 5
+  },
+  "decisiveRecordCount": 322,
+  "decisivePrefixDigest": "e90461c8428b3b12",
+  "decisiveMetaDigest": "d224c4a7a5581ad5",
+  "decisiveOutcomes": [0, 0, -1, 0, 0, 0, 0, 0],
+  "decisivePliesPlayed": [32, 31, 72, 34, 47, 39, 35, 32],
+  "decisiveZ": { "wins": 36, "losses": 36, "draws": 250 }
 }
