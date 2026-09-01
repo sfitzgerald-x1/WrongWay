@@ -18,8 +18,12 @@
  * that is the forward on MPS, the rest HTTP and tree). So a move costs roughly
  * 3 ms x simulations -- ~0.4 s at 128, ~1.5 s at 512, ~3 s at 1024. That is why
  * the simulation count is a slider in the UI rather than a constant: it is the
- * strength/patience dial, and the sims ladder says each doubling is worth roughly
- * 85 Elo up to 128.
+ * strength/patience dial.
+ *
+ * The ladder used to read as though it went flat past 128 sims. It does not --
+ * that was the ROOT WIDTH, which was pinned at a constant while the budget moved.
+ * Width is now derived from the budget (see js/normal-duel-root-width.mjs), which
+ * is worth +58 Elo at this slider's 256 setting and +154 at 512.
  */
 
 import { createHash } from 'node:crypto';
@@ -29,6 +33,7 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 
+import { rootWidth } from '../js/normal-duel-root-width.mjs';
 import {
   createInitialState, applyAction, legalActions, decodeAction,
   positionKey, validateState, normalizePosition
@@ -172,7 +177,7 @@ async function aiMove({ wasm, memory }, state, sims, seed) {
   const t0 = performance.now();
   const search = new wasm.NormalDuelSearch(
     JSON.stringify(CONFIG), JSON.stringify(state),
-    JSON.stringify({ simulations: sims, maxConsidered: 12, cPuct: 1.25, seed })
+    JSON.stringify({ simulations: sims, maxConsidered: rootWidth(sims), cPuct: 1.25, seed })
   );
   const guard = createNetGuard(search.policyLen());
   try {
