@@ -462,6 +462,51 @@ fn default_ply_cap() -> u64 {
 ///    access and the views are rebuilt when it changes. The tree arenas still
 ///    allocate as a search deepens, so defence 1 shrinks the window rather than
 ///    closing it; defence 2 is what actually closes it.
+/// Solve a position in which BOTH players have spent every barricade, returning
+/// the optimal move and the exact result, or `null` when the position is not one.
+///
+/// With no stock left the layout is frozen, so the rest of the game is a finite
+/// two-pawn race that retrograde analysis settles outright. That makes a search
+/// there not merely wasteful but strictly worse: it spends a full simulation
+/// budget approximating a value this returns exactly. Measured on played games,
+/// 18.2% of all plies are played after both stocks are gone.
+///
+/// The table is solved per call. It depends only on the wall layout, so a caller
+/// holding one position for a whole endgame can cache it by that layout -- but a
+/// solve is milliseconds and a search at this budget is seconds, so caching is an
+/// optimisation rather than a requirement.
+///
+/// NOT usable when only one side is out of walls. The race is then a LOWER BOUND
+/// on the side that still holds walls, since declining to place one is always
+/// available to it -- so its answer may be beaten and must not be taken as exact.
+#[wasm_bindgen(js_name = solveZeroStock)]
+pub fn solve_zero_stock(
+    config_json: &str,
+    state_json: &str,
+) -> std::result::Result<Option<String>, JsValue> {
+    let config = parse_config(config_json).map_err(js_error)?;
+    let state_value = parse_value(state_json, "invalid_state").map_err(js_error)?;
+    let state = validated_search_state(&config, &state_value).map_err(js_error)?;
+    if state.position.stock.a != 0 || state.position.stock.b != 0 {
+        return Ok(None);
+    }
+    let table = wrongway_normal_duel::endgame::solve_layout(&config, &state.position.walls)
+        .map_err(|error| js_error(format!("{error:?}")))?;
+    let verdict = table.lookup(&config, state.position.pawns, state.position.turn);
+    let action = table.best_move(&config, &state.position.walls, state.position.pawns, state.position.turn);
+    let (Some(verdict), Some(action)) = (verdict, action) else { return Ok(None) };
+    let (winner, plies) = match verdict {
+        wrongway_normal_duel::endgame::Endgame::Wins { player, plies } => (
+            match player { wrongway_normal_duel::Player::A => "A", wrongway_normal_duel::Player::B => "B" },
+            plies,
+        ),
+        wrongway_normal_duel::endgame::Endgame::Draw => ("", 0),
+    };
+    Ok(Some(format!(
+        "{{\"actionCode\":{action},\"winner\":\"{winner}\",\"plies\":{plies}}}"
+    )))
+}
+
 #[wasm_bindgen(js_name = NormalDuelSelfPlayBatch)]
 pub struct NormalDuelSelfPlayBatch {
     inner: SelfPlayBatch,
