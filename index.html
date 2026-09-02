@@ -5611,10 +5611,24 @@ function App(){
   const[neuralSims,setNeuralSims]=useState(()=>{
     const v=Number(localStorage.getItem(NEURAL_SIMS_KEY)); return v>=16?v:128;});
   useEffect(()=>{localStorage.setItem(NEURAL_SIMS_KEY,String(neuralSims));},[neuralSims]);
+  // Which checkpoint to play. The server answers null when the deployment serves a
+  // single network, and then no picker is rendered -- the roster is optional.
+  const NEURAL_OPP_KEY='ww_neural_opponent';
+  const[opponents,setOpponents]=useState(null);
+  const[opponentId,setOpponentId]=useState(()=>localStorage.getItem(NEURAL_OPP_KEY)||'');
+  useEffect(()=>{let live=true;
+    fetch('/api/opponents').then(r=>r.json()).then(d=>{
+      if(!live||!d||!Array.isArray(d.opponents)||!d.opponents.length)return;
+      setOpponents(d);
+      // A stale id from a previous roster must not stick: fall back to the default.
+      setOpponentId(prev=>d.opponents.some(o=>o.id===prev)?prev:d.default);
+    }).catch(()=>{});
+    return()=>{live=false;};},[]);
+  useEffect(()=>{if(opponentId)localStorage.setItem(NEURAL_OPP_KEY,opponentId);},[opponentId]);
   const[neuralInfo,setNeuralInfo]=useState(null);
   const neuralMove=async(st,w,aiGoal,stillOurs=()=>true)=>{
     const hist=(st.moveHist||[]).filter(m=>m&&(m.type==='move'||m.type==='wall'));
-    const body={history:hist,sims:neuralSims,seed:hist.length+1,
+    const body={history:hist,sims:neuralSims,seed:hist.length+1,opponent:opponentId||undefined,
       board:{map:st.selectedMap,duelSize:st.duelSize,initialStock:st.initialStock,
              chaos:!!st.chaosMode,hammer:!!st.hammerMode,drop:!!st.dropMode},
       expect:{pawns:{A:st.pA,B:st.pB},walls:[...w],
@@ -8964,6 +8978,27 @@ function App(){
             <div style={{fontSize:10,opacity:.6,marginTop:4}}>
               More simulations play stronger and think longer.
             </div>
+            {opponents&&opponents.opponents.length>1&&(
+              <div style={{marginTop:10,borderTop:'1px solid rgba(99,102,241,0.25)',paddingTop:8}}>
+                <div style={{fontSize:11,fontWeight:800,opacity:.85,marginBottom:6}}>OPPONENT</div>
+                <select value={opponentId} onChange={e=>setOpponentId(e.target.value)}
+                  style={{width:'100%',padding:'7px 8px',borderRadius:8,fontSize:12,
+                          fontFamily:'inherit',border:'1px solid rgba(99,102,241,0.35)'}}>
+                  {opponents.opponents.map(o=>(
+                    <option key={o.id} value={o.id}>
+                      {o.label}{typeof o.elo==='number'?`  (${o.elo>=0?'+':''}${Math.round(o.elo)} Elo)`:''}
+                    </option>
+                  ))}
+                </select>
+                {/* The rating is only meaningful with the search it was measured
+                    under -- the same checkpoints reorder under different settings. */}
+                {(()=>{const o=opponents.opponents.find(x=>x.id===opponentId);
+                  return o&&o.measuredAt?(
+                    <div style={{fontSize:10,opacity:.6,marginTop:4}}>
+                      Elo measured at {o.measuredAt}.{o.note?' '+o.note:''}
+                    </div>):null;})()}
+              </div>
+            )}
           </div>
         </div>
       </div>
