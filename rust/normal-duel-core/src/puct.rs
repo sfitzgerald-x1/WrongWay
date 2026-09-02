@@ -825,14 +825,20 @@ impl PuctTreeSearch {
         if mask.len() != config.policy_size() {
             return Err(PuctError::InvalidBufferLength);
         }
-        if self.phase != Phase::BatchAwaiting {
-            return Err(PuctError::OutOfOrderEvaluation);
-        }
-        let leaf = self
-            .pending
-            .get(index)
-            .ok_or(PuctError::InvalidBufferLength)?
-            .leaf;
+        // The root is handed out as a batch of one, so a caller driving the batch
+        // API sees it through this accessor too. Without this it has to special-case
+        // the very first collection, which is exactly the kind of asymmetry that
+        // gets it wrong.
+        let leaf = match self.phase {
+            Phase::RootAwaiting if index == 0 => 0,
+            Phase::BatchAwaiting => {
+                self.pending
+                    .get(index)
+                    .ok_or(PuctError::InvalidBufferLength)?
+                    .leaf
+            }
+            _ => return Err(PuctError::OutOfOrderEvaluation),
+        };
         let position = self.nodes[leaf as usize].position;
         let count = position.legal_action_codes_fast(config, &mut self.codes);
         mask.fill(0.0);
@@ -931,8 +937,17 @@ impl PuctTreeSearch {
             // batch the halving reads complete statistics and is exactly what the
             // sequential search does here, so deferring it would end the search a
             // round early instead of protecting anything.
-            let halved = self.survivors != before.0 && !self.pending.is_empty();
-            if halved || (self.virtual_loss == 0.0 && seen.contains(&candidate)) {
+            // BOTH guards require something to actually be in flight. A visit that
+            // lands on a terminal node scores and unwinds immediately, adding to
+            // `seen` without adding to `pending` -- so a later duplicate could break
+            // the loop with an EMPTY batch, which the caller reads as "search
+            // finished". That silently truncated the search: 241 simulations used of
+            // 256, with the lost visits coming off the two best candidates. An empty
+            // batch has nothing to conflict with, so neither guard applies to it.
+            let in_flight = !self.pending.is_empty();
+            let halved = self.survivors != before.0 && in_flight;
+            let repeat = self.virtual_loss == 0.0 && in_flight && seen.contains(&candidate);
+            if halved || repeat {
                 self.restore_scheduler(before);
                 break;
             }
