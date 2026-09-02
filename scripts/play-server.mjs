@@ -41,6 +41,7 @@ import {
 import { CONFIG_9X9 } from '../tests/support/nn-runtime-fixture.mjs';
 import { createNetGuard } from './net-guard.mjs';
 import { createStore } from './play-store.mjs';
+import { loadRoster, pick as pickOpponent, publicView as rosterView } from './play-roster.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -48,6 +49,9 @@ const argv = process.argv.slice(2);
 const arg = (n, d) => { const i = argv.indexOf(`--${n}`); return i === -1 ? d : argv[i + 1]; };
 const PORT = Number(arg('port', 8177));
 const INFER = String(arg('infer', 'http://127.0.0.1:8099')).replace(/\/$/, '');
+// A roster makes the opponent a CHOICE rather than a deployment decision. Without
+// one the server behaves exactly as before: a single network at INFER.
+const ROSTER = loadRoster(arg('roster', process.env.WW_PLAY_ROSTER || ''));
 // Loopback by DEFAULT: this serves a game with no authentication, so exposing it on
 // a network has to be an explicit choice rather than something that happens because
 // a port was free. Pass --host 0.0.0.0 to publish it.
@@ -99,7 +103,12 @@ async function loadWasm() {
 // 8.8 ms of actual network time -- ~40 ms of delayed-ACK stall per simulation. Both
 // ends have to set it; one is not enough.
 const agent = new http.Agent({ keepAlive: true, maxSockets: 4, noDelay: true });
-const inferUrl = new URL(`${INFER}/infer`);
+const inferUrlCache = new Map();
+const inferUrlFor = (base) => {
+  let u = inferUrlCache.get(base);
+  if (!u) { u = new URL(`${base}/infer`); inferUrlCache.set(base, u); }
+  return u;
+};
 
 /**
  * The features MUST be copied out of wasm memory before any await.
@@ -112,7 +121,8 @@ const inferUrl = new URL(`${INFER}/infer`);
  * costs nothing. Found by a search-scaling run where it hung 1 game for 90 minutes at
  * 0% CPU, and it is the likeliest cause of a game freezing mid-turn on the site.
  */
-function inferOne(features) {
+function inferOne(features, base = INFER) {
+  const inferUrl = inferUrlFor(base);
   // copyBytesFrom, NOT Buffer.from: the latter coerces each float to a single byte
   // and silently sends a body a quarter of the right size.
   const body = Buffer.copyBytesFrom(features);   // copy NOW, before any await
@@ -173,7 +183,7 @@ function inferOne(features) {
  * the inference server's own length check catches that. `netLeaves` is evidence, not a
  * proof of correctness.
  */
-async function aiMove({ wasm, memory }, state, sims, seed) {
+async function aiMove({ wasm, memory }, state, sims, seed, base = INFER) {
   const t0 = performance.now();
   const search = new wasm.NormalDuelSearch(
     JSON.stringify(CONFIG), JSON.stringify(state),
@@ -188,7 +198,7 @@ async function aiMove({ wasm, memory }, state, sims, seed) {
       // heap and detach an old ArrayBuffer, and a stale view then reads freed
       // memory rather than throwing.
       const features = new Float32Array(memory.buffer, search.featuresPtr(), search.featuresLen());
-      const out = await inferOne(features);
+      const out = await inferOne(features, base);
 
       // submit() wants NON-NEGATIVE PROBABILITIES over the whole policy vector, not
       // the network's raw logits, and it validates every entry -- including ones behind
@@ -239,9 +249,9 @@ let nextId = 1;
 // one entry per game it had ever hosted. Bounded by dropping the oldest, which is safe
 // because a game is addressed by id and an evicted one simply reads as unknown.
 const MAX_GAMES = 200;
-function freshGame(humanSide, sims) {
+function freshGame(humanSide, sims, opponent = null) {
   const id = String(nextId++);
-  games.set(id, { id, state: createInitialState(CONFIG), humanSide, sims, history: [] });
+  games.set(id, { id, state: createInitialState(CONFIG), humanSide, sims, opponent, history: [] });
   while (games.size > MAX_GAMES) games.delete(games.keys().next().value);
   return games.get(id);
 }
@@ -260,6 +270,12 @@ console.log(`[play] network at ${INFER}`);
 {
   const st = store.stats(); const g = store.googleReady();
   console.log(`[play] store ${st.dir}: ${st.users} users, ${st.games} games`);
+  if (ROSTER) {
+    console.log(`[play] roster: ${ROSTER.opponents.map((o) => o.id).join(', ')} `
+      + `(default ${ROSTER.defaultId})`);
+  } else {
+    console.log(`[play] roster: none -- single network at ${INFER}`);
+  }
   console.log(`[play] google sign-in: ${g.enabled ? 'enabled' : `disabled (missing ${g.missing.join(', ')})`}`);
 }
 
@@ -449,6 +465,11 @@ http.createServer(async (req, res) => {
         identified: Object.keys(ts).length > 0
       });
     }
+    if (req.method === 'GET' && req.url.startsWith('/api/opponents')) {
+      // null, not 404, when no roster is configured: "this deployment serves one
+      // network" is a normal answer, and the client renders no picker for it.
+      return json(res, 200, rosterView(ROSTER));
+    }
     if (req.method === 'GET' && req.url.startsWith('/api/leaderboard')) {
       return json(res, 200, { ...store.leaderboard(10), auth: store.googleReady() });
     }
@@ -506,14 +527,15 @@ http.createServer(async (req, res) => {
           detail: 'chaos/hammer/drop modes add actions the trained rules do not contain' });
       }
       const state = stateFromHistory(b.history || [], b.expect);
-      const mv = await aiMove(wasmBits, state, sims, Number(b.seed) || 1);
+      const opp = pickOpponent(ROSTER, b.opponent);
+      const mv = await aiMove(wasmBits, state, sims, Number(b.seed) || 1, opp ? opp.url : INFER);
       // Log every served move. Without this, "the app never asked" and "the app
       // asked and it failed" look identical from here -- and they need completely
       // different fixes.
-      console.log(`[play] move ply=${state.ply} sims=${sims} ${mv.ms}ms `
+      console.log(`[play] move${opp ? ' vs=' + opp.id : ''} ply=${state.ply} sims=${sims} ${mv.ms}ms `
         + `net=${mv.netLeaves}/${mv.leaves} v=${mv.rootValue.toFixed(3)} `
         + `-> ${JSON.stringify(mv.action)}`);
-      return json(res, 200, { ...mv, turn: state.position.turn, ply: state.ply });
+      return json(res, 200, { ...mv, turn: state.position.turn, ply: state.ply, opponent: opp ? opp.id : null });
     }
     if (req.method === 'GET' && req.url.startsWith('/sw.js')) {
       // The app is a PWA and registers a service worker that caches the shell. On
@@ -574,10 +596,12 @@ http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && req.url.startsWith('/api/new')) {
       const b = await readBody(req);
-      const g = freshGame(b.humanSide === 'B' ? 'B' : 'A', Number(b.sims) || 128);
+      const g = freshGame(b.humanSide === 'B' ? 'B' : 'A', Number(b.sims) || 128,
+                          (pickOpponent(ROSTER, b.opponent) || {}).id || null);
       // If the human is B, A moves first and A is the machine.
       if (g.state.position.turn !== g.humanSide) {
-        const mv = await aiMove(wasmBits, g.state, g.sims, g.state.ply + 1);
+        const mv = await aiMove(wasmBits, g.state, g.sims, g.state.ply + 1,
+                                (pickOpponent(ROSTER, g.opponent) || {}).url || INFER);
         g.state = applyAction(CONFIG, g.state, mv.action);
         g.history.push({ by: 'ai', ...mv });
         return json(res, 200, view(g, { ai: mv }));
@@ -600,7 +624,10 @@ http.createServer(async (req, res) => {
       g.state = applyAction(CONFIG, g.state, b.action);
       g.history.push({ by: 'human', action: b.action });
       if (g.state.outcome.kind !== 'ongoing') return json(res, 200, view(g));
-      const mv = await aiMove(wasmBits, g.state, g.sims, g.state.ply + 1);
+      // The game's OWN opponent, not the request's: a game that could switch
+      // networks mid-match would have no single opponent to record a result against.
+      const mv = await aiMove(wasmBits, g.state, g.sims, g.state.ply + 1,
+                              (pickOpponent(ROSTER, g.opponent) || {}).url || INFER);
       g.state = applyAction(CONFIG, g.state, mv.action);
       g.history.push({ by: 'ai', ...mv });
       return json(res, 200, view(g, { ai: mv }));
