@@ -687,6 +687,10 @@ pub struct NormalDuelSearch {
     features: Vec<f32>,
     policy: Vec<f32>,
     mask: Vec<f32>,
+    /// One value per leaf in the current batch; unused by the one-at-a-time API.
+    values: Vec<f64>,
+    /// How many leaves the feature and policy buffers are sized for.
+    batch_width: usize,
 }
 
 /// Options DTO for [`NormalDuelSearch`]. Read once at construction.
@@ -768,7 +772,73 @@ impl NormalDuelSearch {
             features,
             policy,
             mask,
+            values: vec![0.0],
+            batch_width: 1,
         })
+    }
+
+    /// Size the buffers for batched collection, and return the width in use.
+    ///
+    /// `featuresPtr` and `policyPtr` are invalidated by this call: it reallocates.
+    #[wasm_bindgen(js_name = configureBatch)]
+    pub fn configure_batch(&mut self, width: usize) -> std::result::Result<usize, JsValue> {
+        if width == 0 {
+            return Err(js_error("invalid_batch_width".to_owned()));
+        }
+        let stride = NN_INPUT_PLANES * self.config.cells();
+        self.features.resize(stride * width, 0.0);
+        self.policy.resize(self.config.policy_size() * width, 0.0);
+        self.values.resize(width, 0.0);
+        self.batch_width = width;
+        Ok(width)
+    }
+
+    /// The in-flight penalty. `0` keeps the search bit-identical to the
+    /// one-at-a-time API; anything else trades exactness for larger batches.
+    #[wasm_bindgen(js_name = setVirtualLoss)]
+    pub fn set_virtual_loss(&mut self, virtual_loss: f64) -> std::result::Result<(), JsValue> {
+        self.inner
+            .set_virtual_loss(virtual_loss)
+            .map_err(|error| js_error(error.reason().to_owned()))
+    }
+
+    /// Fill up to `configureBatch(width)` leaves' features at once and return how
+    /// many were written; `0` means the search is finished. Evaluate all of them,
+    /// write the policies into `policy` slot by slot and the values into `values`,
+    /// then call `submitBatch(n)`.
+    #[wasm_bindgen(js_name = collectLeaves)]
+    pub fn collect_leaves(&mut self) -> std::result::Result<usize, JsValue> {
+        let width = self.batch_width;
+        self.inner
+            .collect_leaves(&self.config, &mut self.features, width)
+            .map_err(|error| js_error(error.reason().to_owned()))
+    }
+
+    /// Hand back `n` evaluations for the leaves `collectLeaves` produced.
+    #[wasm_bindgen(js_name = submitBatch)]
+    pub fn submit_batch(&mut self, n: usize) -> std::result::Result<(), JsValue> {
+        let policy = std::mem::take(&mut self.policy);
+        let values = std::mem::take(&mut self.values);
+        let outcome = self.inner.submit_batch(&self.config, &policy, &values, n);
+        self.policy = policy;
+        self.values = values;
+        outcome.map_err(|error| js_error(error.reason().to_owned()))
+    }
+
+    /// Fill `mask` with the `index`-th batched leaf's legal-action mask.
+    #[wasm_bindgen(js_name = batchLeafMask)]
+    pub fn batch_leaf_mask(&mut self, index: usize) -> std::result::Result<(), JsValue> {
+        let mut mask = std::mem::take(&mut self.mask);
+        let outcome = self.inner.batch_leaf_mask(&self.config, index, &mut mask);
+        self.mask = mask;
+        outcome.map_err(|error| js_error(error.reason().to_owned()))
+    }
+
+    /// Base of the per-leaf value buffer; `n` f64s, one per collected leaf.
+    #[wasm_bindgen(js_name = valuesPtr)]
+    #[must_use]
+    pub fn values_ptr(&self) -> u32 {
+        self.values.as_ptr() as u32
     }
 
     /// Advance to the next leaf awaiting evaluation, filling `features`.

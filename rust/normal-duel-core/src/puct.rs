@@ -447,7 +447,21 @@ enum Phase {
     Ready,
     /// A descent is paused at `pending_leaf`, whose features are with the caller.
     LeafAwaiting,
+    /// Several descents are paused at once and their features are with the
+    /// caller. Only reachable through [`PuctTreeSearch::collect_leaves`].
+    BatchAwaiting,
     Done,
+}
+
+/// A descent paused at a leaf while the rest of its batch is collected.
+///
+/// Only `path` and `leaf` are needed: the repetition-window state
+/// (`descent_keys`, `window_from`, `root_window_active`) is consumed during the
+/// descent and reset by `begin_visit`, and `submit` reads neither.
+#[derive(Clone, Debug)]
+struct PendingLeaf {
+    path: Vec<(u32, u32)>,
+    leaf: u32,
 }
 
 /// One game's search. Holds at most one outstanding leaf evaluation.
@@ -478,6 +492,18 @@ pub struct PuctTreeSearch {
     next_survivor: usize,
     round_fresh: bool,
     draining_single: bool,
+
+    /// Descents collected for the current batch, in collection order.
+    pending: Vec<PendingLeaf>,
+    /// Penalty applied to every node on an in-flight path so a later descent in
+    /// the same batch is steered away from it.
+    ///
+    /// `0.0` means no penalty, which is the ONLY setting that keeps the search
+    /// bit-identical to the sequential reference: with no penalty a batch may
+    /// only hold descents into DISTINCT root candidates, whose subtrees are
+    /// disjoint, so batching them changes nothing. Any non-zero value permits
+    /// several descents into one subtree and makes this a different algorithm.
+    virtual_loss: f64,
 
     /// `(node, edge)` frames of the paused descent, root-first.
     path: Vec<(u32, u32)>,
@@ -686,6 +712,8 @@ impl PuctTreeSearch {
             round_fresh: true,
             draining_single: false,
             path: Vec::new(),
+            pending: Vec::new(),
+            virtual_loss: 0.0,
             descent_keys: Vec::new(),
             window_from: 0,
             root_window_active: true,
@@ -721,7 +749,10 @@ impl PuctTreeSearch {
 
     #[must_use]
     pub fn awaiting_evaluation(&self) -> bool {
-        matches!(self.phase, Phase::RootAwaiting | Phase::LeafAwaiting)
+        matches!(
+            self.phase,
+            Phase::RootAwaiting | Phase::LeafAwaiting | Phase::BatchAwaiting
+        )
     }
 
     /// Advance the search to its next leaf evaluation.
@@ -756,7 +787,7 @@ impl PuctTreeSearch {
                         return Ok(true);
                     }
                 }
-                Phase::RootAwaiting | Phase::LeafAwaiting => {
+                Phase::RootAwaiting | Phase::LeafAwaiting | Phase::BatchAwaiting => {
                     return Err(PuctError::OutOfOrderEvaluation)
                 }
             }
@@ -778,6 +809,39 @@ impl PuctTreeSearch {
     /// bit-identical to the serial JS `evaluate`. The two are algebraically the
     /// same and differ only in f32 rounding, which is exactly the difference
     /// the parity suite is built to catch.
+    /// The legal-action mask for the `index`-th leaf of the current batch.
+    ///
+    /// A batch has several leaves outstanding, so [`Self::pending_leaf_mask`]'s
+    /// "the pending leaf" has no meaning here. Each leaf needs its OWN mask: the
+    /// caller uses it to turn raw logits into probabilities, and a mask from the
+    /// wrong position would produce a well-formed distribution over the wrong
+    /// moves -- which `submit_batch` would accept without complaint.
+    pub fn batch_leaf_mask(
+        &mut self,
+        config: &Config,
+        index: usize,
+        mask: &mut [f32],
+    ) -> Result<()> {
+        if mask.len() != config.policy_size() {
+            return Err(PuctError::InvalidBufferLength);
+        }
+        if self.phase != Phase::BatchAwaiting {
+            return Err(PuctError::OutOfOrderEvaluation);
+        }
+        let leaf = self
+            .pending
+            .get(index)
+            .ok_or(PuctError::InvalidBufferLength)?
+            .leaf;
+        let position = self.nodes[leaf as usize].position;
+        let count = position.legal_action_codes_fast(config, &mut self.codes);
+        mask.fill(0.0);
+        for code in &self.codes[..count] {
+            mask[usize::from(*code)] = 1.0;
+        }
+        Ok(())
+    }
+
     pub fn pending_leaf_mask(&mut self, config: &Config, mask: &mut [f32]) -> Result<()> {
         if mask.len() != config.policy_size() {
             return Err(PuctError::InvalidBufferLength);
@@ -794,6 +858,229 @@ impl PuctTreeSearch {
             mask[usize::from(*code)] = 1.0;
         }
         Ok(())
+    }
+
+    /// Set the in-flight penalty used by [`Self::collect_leaves`].
+    ///
+    /// Leave it at `0.0` for a search that is bit-identical to the sequential
+    /// one. See the field's documentation for why anything else is a different
+    /// algorithm rather than a scheduling change.
+    pub fn set_virtual_loss(&mut self, virtual_loss: f64) -> Result<()> {
+        if !virtual_loss.is_finite() || virtual_loss < 0.0 {
+            return Err(PuctError::InvalidEvaluation);
+        }
+        self.virtual_loss = virtual_loss;
+        Ok(())
+    }
+
+    /// Collect up to `max_n` leaves at once, writing each one's features into
+    /// its own `NN_INPUT_PLANES * cells` slice of `features`.
+    ///
+    /// Returns how many were collected; `0` means the search is finished. The
+    /// caller evaluates all of them together and hands the results back through
+    /// [`Self::submit_batch`] in the SAME order.
+    ///
+    /// The root is always a batch of one: nothing else can be selected until it
+    /// has been expanded.
+    ///
+    /// With `virtual_loss == 0.0` a batch never holds two descents into the same
+    /// root candidate. Sequential halving visits survivors on a fixed schedule
+    /// that no evaluation influences, and distinct survivors own disjoint
+    /// subtrees, so those descents cannot interact and batching them is a pure
+    /// scheduling change. That also bounds the batch: the last halving round
+    /// drains a single survivor, and that phase stays serial.
+    pub fn collect_leaves(
+        &mut self,
+        config: &Config,
+        features: &mut [f32],
+        max_n: usize,
+    ) -> Result<usize> {
+        let stride = NN_INPUT_PLANES * config.cells();
+        if max_n == 0 || features.len() < stride * max_n {
+            return Err(PuctError::InvalidBufferLength);
+        }
+        if self.awaiting_evaluation() {
+            return Err(PuctError::OutOfOrderEvaluation);
+        }
+        self.pending.clear();
+        match self.phase {
+            Phase::Done => return Ok(0),
+            Phase::RootPending => {
+                self.encode(config, 0, &mut features[..stride]);
+                self.phase = Phase::RootAwaiting;
+                return Ok(1);
+            }
+            _ => {}
+        }
+
+        let mut seen: Vec<usize> = Vec::new();
+        while self.pending.len() < max_n {
+            // Without a penalty, stop rather than repeat a candidate: a second
+            // descent into a subtree that already has an unevaluated leaf would
+            // see stale statistics and could pick a different edge than the
+            // sequential search did.
+            let before = self.scheduler_state();
+            let Some(candidate) = self.next_candidate() else { break };
+            // A batch must not span a halving boundary. `halve()` ranks the
+            // survivors on their accumulated statistics, and a leaf still in
+            // flight has not contributed its value yet -- so halving mid-batch
+            // decides on stale numbers and keeps a different candidate than the
+            // sequential search would. Caught by the equivalence test: two
+            // candidates swapped visit counts while the total stayed right.
+            // ...but only when something is actually in flight. With an empty
+            // batch the halving reads complete statistics and is exactly what the
+            // sequential search does here, so deferring it would end the search a
+            // round early instead of protecting anything.
+            let halved = self.survivors != before.0 && !self.pending.is_empty();
+            if halved || (self.virtual_loss == 0.0 && seen.contains(&candidate)) {
+                self.restore_scheduler(before);
+                break;
+            }
+            seen.push(candidate);
+            if self.begin_visit(config, candidate)? {
+                let slot = self.pending.len();
+                self.encode(
+                    config,
+                    self.pending_leaf,
+                    &mut features[slot * stride..(slot + 1) * stride],
+                );
+                let path = core::mem::take(&mut self.path);
+                let leaf = self.pending_leaf;
+                if self.virtual_loss != 0.0 {
+                    self.apply_virtual_loss(&path, leaf);
+                }
+                self.pending.push(PendingLeaf { path, leaf });
+                self.pending_leaf = NO_CHILD;
+            }
+        }
+
+        if self.pending.is_empty() {
+            self.phase = Phase::Done;
+            return Ok(0);
+        }
+        self.phase = Phase::BatchAwaiting;
+        Ok(self.pending.len())
+    }
+
+    /// Hand back `n` evaluations for the leaves [`Self::collect_leaves`] produced,
+    /// in the order it produced them.
+    ///
+    /// `policies` is `n` consecutive `policy_size` vectors. Applying them in
+    /// collection order is what keeps the zero-penalty case bit-identical: every
+    /// node accumulates the same values in the same sequence as it would have
+    /// sequentially, so even the floating-point sums match.
+    pub fn submit_batch(
+        &mut self,
+        config: &Config,
+        policies: &[f32],
+        values: &[f64],
+        n: usize,
+    ) -> Result<()> {
+        let width = config.policy_size();
+        if policies.len() < width * n || values.len() < n {
+            return Err(PuctError::InvalidBufferLength);
+        }
+        if self.phase == Phase::RootAwaiting {
+            if n != 1 {
+                return Err(PuctError::OutOfOrderEvaluation);
+            }
+            return self.submit(config, &policies[..width], values[0]);
+        }
+        if self.phase != Phase::BatchAwaiting || n != self.pending.len() {
+            return Err(PuctError::OutOfOrderEvaluation);
+        }
+        // Validate the WHOLE batch before mutating anything: a half-applied batch
+        // would leave virtual loss on the paths that were never submitted.
+        for (index, value) in values[..n].iter().enumerate() {
+            if !value.is_finite() || !(-1.0..=1.0).contains(value) {
+                return Err(PuctError::InvalidEvaluation);
+            }
+            for probability in &policies[index * width..(index + 1) * width] {
+                if !probability.is_finite() || *probability < 0.0 {
+                    return Err(PuctError::InvalidEvaluation);
+                }
+            }
+        }
+
+        let pending = core::mem::take(&mut self.pending);
+        for (index, slot) in pending.into_iter().enumerate() {
+            if self.virtual_loss != 0.0 {
+                self.undo_virtual_loss(&slot.path, slot.leaf);
+            }
+            let value = values[index];
+            self.expand(config, slot.leaf, &policies[index * width..(index + 1) * width], value)?;
+            let node = &mut self.nodes[slot.leaf as usize];
+            node.visits += 1;
+            node.value_sum += value;
+            self.path = slot.path;
+            self.unwind(value);
+        }
+        self.path.clear();
+        self.phase = Phase::Ready;
+        Ok(())
+    }
+
+    /// The scheduler's whole mutable position, so a candidate can be looked at
+    /// and then put back.
+    fn scheduler_state(&self) -> (Vec<usize>, u32, u32, usize, bool, bool, i64) {
+        (
+            self.survivors.clone(),
+            self.per_candidate,
+            self.pass,
+            self.next_survivor,
+            self.round_fresh,
+            self.draining_single,
+            self.budget,
+        )
+    }
+
+    fn restore_scheduler(&mut self, state: (Vec<usize>, u32, u32, usize, bool, bool, i64)) {
+        let (survivors, per_candidate, pass, next_survivor, round_fresh, draining_single, budget) =
+            state;
+        self.survivors = survivors;
+        self.per_candidate = per_candidate;
+        self.pass = pass;
+        self.next_survivor = next_survivor;
+        self.round_fresh = round_fresh;
+        self.draining_single = draining_single;
+        self.budget = budget;
+    }
+
+    /// Charge an in-flight visit along `path` and its leaf, as a loss for the
+    /// side to move at each node. Mirrors `unwind`'s alternation exactly so the
+    /// undo is its inverse.
+    fn apply_virtual_loss(&mut self, path: &[(u32, u32)], leaf: u32) {
+        let vl = self.virtual_loss;
+        let node = &mut self.nodes[leaf as usize];
+        node.visits += 1;
+        node.value_sum -= vl;
+        let mut value = -vl;
+        for (node_index, edge_index) in path.iter().rev() {
+            value = -value;
+            let entry = &mut self.edges[*edge_index as usize];
+            entry.visits += 1;
+            entry.value_sum += value;
+            let entry = &mut self.nodes[*node_index as usize];
+            entry.visits += 1;
+            entry.value_sum += value;
+        }
+    }
+
+    fn undo_virtual_loss(&mut self, path: &[(u32, u32)], leaf: u32) {
+        let vl = self.virtual_loss;
+        let node = &mut self.nodes[leaf as usize];
+        node.visits -= 1;
+        node.value_sum += vl;
+        let mut value = -vl;
+        for (node_index, edge_index) in path.iter().rev() {
+            value = -value;
+            let entry = &mut self.edges[*edge_index as usize];
+            entry.visits -= 1;
+            entry.value_sum -= value;
+            let entry = &mut self.nodes[*node_index as usize];
+            entry.visits -= 1;
+            entry.value_sum -= value;
+        }
     }
 
     pub fn submit(&mut self, config: &Config, policy: &[f32], value: f64) -> Result<()> {

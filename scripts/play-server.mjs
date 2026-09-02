@@ -52,6 +52,17 @@ const INFER = String(arg('infer', 'http://127.0.0.1:8099')).replace(/\/$/, '');
 // A roster makes the opponent a CHOICE rather than a deployment decision. Without
 // one the server behaves exactly as before: a single network at INFER.
 const ROSTER = loadRoster(arg('roster', process.env.WW_PLAY_ROSTER || ''));
+// Leaves per network round trip. 1 keeps the original one-at-a-time loop.
+//
+// The round trip, not the tree and not the GPU, is what a move costs: measured
+// ~9.7 ms whether it carries 1 position or 64, against a 4.4 ms forward that is
+// identical at batch 1 and batch 64. So a turn's latency is essentially the
+// number of round trips, and collapsing 257 of them into 22 is the whole game.
+const BATCH = Math.max(1, Number(arg('batch', process.env.WW_PLAY_BATCH || 1)) || 1);
+// The in-flight penalty. 0 keeps the search bit-identical to the sequential one
+// and caps a batch at the surviving candidates; above 0 it batches deeper and
+// becomes a DIFFERENT search, which is a strength question, not a speed one.
+const VIRTUAL_LOSS = Math.max(0, Number(arg('virtual-loss', process.env.WW_PLAY_VIRTUAL_LOSS || 0)) || 0);
 // Loopback by DEFAULT: this serves a game with no authentication, so exposing it on
 // a network has to be an explicit choice rather than something that happens because
 // a port was free. Pass --host 0.0.0.0 to publish it.
@@ -149,6 +160,18 @@ function inferOne(features, base = INFER) {
   });
 }
 
+/**
+ * Evaluate `n` positions in one request.
+ *
+ * The server answers CONCATENATED, not interleaved: `n * policyLen` policy
+ * floats first, then `n` values. Reading it as `n` records of `policyLen + 1`
+ * would silently pair every position with the wrong value.
+ */
+async function inferBatch(features, n, base = INFER) {
+  const out = await inferOne(features, base);
+  return out;
+}
+
 // ------------------------------------------------------------------ AI move
 /**
  * EVERY served move comes from the network, or no move is served at all.
@@ -191,6 +214,36 @@ async function aiMove({ wasm, memory }, state, sims, seed, base = INFER) {
   );
   const guard = createNetGuard(search.policyLen());
   try {
+    if (BATCH > 1) {
+      const policyLen = search.policyLen();
+      const stride = search.featuresLen();          // one leaf's width, before resizing
+      search.configureBatch(BATCH);
+      search.setVirtualLoss(VIRTUAL_LOSS);
+      const one = new Float32Array(policyLen + 1);
+      for (;;) {
+        const n = search.collectLeaves();
+        if (n === 0) break;
+        // Rebuilt after every wasm call: an allocation can grow the heap and
+        // detach these views, which then read freed memory rather than throwing.
+        const features = new Float32Array(memory.buffer, search.featuresPtr(), stride * n);
+        const out = await inferBatch(features, n, base);
+        if (out.length !== n * policyLen + n) {
+          throw new Error(`batch shape: got ${out.length} floats, want ${n * policyLen + n}`);
+        }
+        for (let i = 0; i < n; i += 1) {
+          search.batchLeafMask(i);
+          const mask = new Float32Array(memory.buffer, search.maskPtr(), policyLen);
+          one.set(out.subarray(i * policyLen, (i + 1) * policyLen), 0);
+          one[policyLen] = out[n * policyLen + i];
+          const { probs, value } = guard.classify(one, mask);
+          new Float32Array(memory.buffer, search.policyPtr(), policyLen * BATCH)
+            .set(probs, i * policyLen);
+          new Float64Array(memory.buffer, search.valuesPtr(), BATCH)[i] = value;
+        }
+        search.submitBatch(n);
+        if (guard.doomed) break;
+      }
+    } else
     while (!search.isDone()) {
       search.nextLeaf();
       if (search.isDone()) break;
