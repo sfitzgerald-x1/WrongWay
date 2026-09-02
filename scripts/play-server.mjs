@@ -645,7 +645,17 @@ http.createServer(async (req, res) => {
       // ok tracks the NETWORK, not this process. This server is useless without the
       // net -- it will not substitute another opponent -- so "the HTTP layer is up"
       // is not a health answer worth giving.
-      return json(res, 200, { ok: Boolean(r), wasm: wasmBits.build, network: r, meta });
+      // Normalise the inference server's health into the field names the client
+      // reads. It answers `model_version`; the page renders `version` and
+      // `device`, so passing the payload through verbatim rendered the
+      // checkpoint chip as "? · ?" and left the recorded checkpoint EMPTY --
+      // a mismatch that looks like a missing network rather than a naming slip.
+      const network = r ? {
+        ...r,
+        version: r.version || r.model_version || null,
+        device: r.device || r.gpu || null
+      } : r;
+      return json(res, 200, { ok: Boolean(r), wasm: wasmBits.build, network, meta });
     }
     if (req.method === 'POST' && req.url.startsWith('/api/new')) {
       const b = await readBody(req);
