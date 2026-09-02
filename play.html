@@ -28,6 +28,15 @@ header{max-width:940px;margin:0 auto 16px;display:flex;flex-direction:column;
   align-items:center;gap:7px;text-align:center}
 .chip{font:600 10px/1 ui-monospace,Menlo,monospace;color:var(--muted);
   border:1px solid var(--border);border-radius:999px;padding:5px 9px;white-space:nowrap}
+/* The checkpoint picker borrows `.chip` for its shape, but `.chip` is a LABEL
+   style: it sets a colour and a border and no background, which is right for a
+   div and wrong for a native control -- unstyled, a <select> renders with the
+   browser's own light background on this dark page. Both other interactive
+   controls here (button, text input) declare background AND colour, so this one
+   does too, and takes the text input's focus ring for the same reason. */
+select.chip{background:#0e1424;color:#e8edf7;cursor:pointer;max-width:230px}
+select.chip:hover{border-color:#3b82f6}
+select.chip:focus{outline:none;border-color:#3b82f6}
 /* two columns: board on the left, everything measured on the right */
 /* One screen: standings | board | analysis. The board is fixed width, so the two
    side columns take the slack and everything stays visible without scrolling. */
