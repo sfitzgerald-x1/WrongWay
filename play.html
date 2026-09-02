@@ -34,7 +34,8 @@ header{max-width:940px;margin:0 auto 16px;display:flex;flex-direction:column;
    browser's own light background on this dark page. Both other interactive
    controls here (button, text input) declare background AND colour, so this one
    does too, and takes the text input's focus ring for the same reason. */
-select.chip{background:#0e1424;color:#e8edf7;cursor:pointer;max-width:230px}
+select.chip{background:#0e1424;color:#e8edf7;cursor:pointer;
+  width:auto;display:inline-block;text-align:center;text-align-last:center}
 select.chip:hover{border-color:#3b82f6}
 select.chip:focus{outline:none;border-color:#3b82f6}
 /* two columns: board on the left, everything measured on the right */
@@ -206,7 +207,10 @@ button.link:hover{background:none;color:#cbd5e1;text-decoration:underline}
 <header>
   <h1>Quoridor Zero</h1>
   <div class="chip" id="ckpt">loading&hellip;</div>
-  <select id="opp" class="chip" style="display:none" title="which checkpoint you are playing"></select>
+  <!-- Takes the checkpoint chip's PLACE when a roster exists, rather than sitting
+       under it: the pill under the title is where the checkpoint has always been
+       shown, and two controls saying the same thing is one too many. -->
+  <select id="opp" class="chip" style="display:none"></select>
 </header>
 
 <div id="page">
@@ -767,6 +771,10 @@ fetch('/api/opponents').then((r) => r.json()).then((d) => {
   }
   sel.value = opponentId;
   sel.style.display = '';
+  // One control, in the chip's position. The version/device the chip carried
+  // moves to the tooltip rather than being dropped.
+  sel.title = $('ckpt').textContent;
+  $('ckpt').style.display = 'none';
   sel.addEventListener('change', () => {
     opponentId = sel.value;
     localStorage.setItem(OPP_KEY, opponentId);
