@@ -716,6 +716,11 @@ pub fn root_qtransform(stats: &[ActionStats], raw_value: f64) -> RootQtransform 
             code: index as u16,
             prior: stat.prior,
             visits: stat.visits,
+            // Equal to `visits`, matching the convention a resumed edge uses. The
+            // transform never reads it -- it takes the prior, the visits and the value
+            // sum -- but a synthetic edge that disagreed with itself would be a trap for
+            // the next reader.
+            visits_since: stat.visits,
             value_sum: f64::from(stat.visits) * stat.qvalue,
             child: NO_CHILD,
         })
@@ -1006,6 +1011,15 @@ struct Edge {
     code: u16,
     prior: f64,
     visits: u32,
+    /// Visits accrued since the last [`PuctTreeSearch::restart`].
+    ///
+    /// Equal to `visits` for a search that never resumed, so nothing changes for
+    /// one. On a RESUMED search the two diverge, and the difference is the whole
+    /// point: `visits` carries the inherited value estimate, which is what reuse is
+    /// for, while the halving schedule must rank on what THIS search has explored.
+    /// Ranking on the total let a candidate that was good before the opponent moved
+    /// arrive with a visit count no fresh candidate could match.
+    visits_since: u32,
     value_sum: f64,
     child: u32,
 }
@@ -1538,6 +1552,22 @@ impl PuctTreeSearch {
         Ok(())
     }
 
+    /// `(visits, visits_since)` for each root edge, in code order.
+    ///
+    /// Exposed so the separation between inherited exploration and this search's own
+    /// can be asserted rather than assumed -- it is the difference between reuse
+    /// helping and reuse handing halving a stale ranking.
+    #[must_use]
+    pub fn root_edge_visits(&self) -> Vec<(u32, u32)> {
+        let root = self.nodes[0];
+        (root.edges_start..root.edges_start + root.edges_len)
+            .map(|index| {
+                let edge = self.edges[index as usize];
+                (edge.visits, edge.visits_since)
+            })
+            .collect()
+    }
+
     /// The root's repetition window. Exposed so a resumed search can be checked
     /// against a fresh one at the same position -- the rebase is the part of
     /// extraction most likely to be wrong, and wrong silently.
@@ -1603,7 +1633,11 @@ impl PuctTreeSearch {
         // gone -- what survives is the node's refined estimate. That is the best
         // available and it is NOT the same number a fresh search would hold here,
         // which is a real difference between a resumed root and a fresh one.
-        let root_value = if expanded { inherited.nodes[0].value } else { 0.0 };
+        let root_value = if expanded {
+            inherited.nodes[0].value
+        } else {
+            0.0
+        };
 
         let mut search = Self {
             params,
@@ -1627,7 +1661,11 @@ impl PuctTreeSearch {
             window_from: 0,
             root_window_active: true,
             pending_leaf: NO_CHILD,
-            phase: if expanded { Phase::Ready } else { Phase::RootPending },
+            phase: if expanded {
+                Phase::Ready
+            } else {
+                Phase::RootPending
+            },
             ranking: Vec::new(),
             ..inherited
         };
@@ -1651,7 +1689,12 @@ impl PuctTreeSearch {
     #[must_use]
     pub fn into_subtree(self, config: &Config, codes: &[u16]) -> Option<Self> {
         let (nodes, edges, window) = self.extract_parts(config, codes)?;
-        Some(Self { nodes, edges, root_window: window, ..self })
+        Some(Self {
+            nodes,
+            edges,
+            root_window: window,
+            ..self
+        })
     }
 
     /// Re-root IN PLACE, keeping the statistics; `false` when the path was not in
@@ -1708,7 +1751,16 @@ impl PuctTreeSearch {
         self.root_window_active = true;
         self.pending_leaf = NO_CHILD;
         self.ranking.clear();
-        self.phase = if expanded { Phase::Ready } else { Phase::RootPending };
+        // The inherited VALUE estimates stay; the inherited exploration counts do
+        // not get to drive this search's halving.
+        for edge in &mut self.edges {
+            edge.visits_since = 0;
+        }
+        self.phase = if expanded {
+            Phase::Ready
+        } else {
+            Phase::RootPending
+        };
         if expanded {
             self.seed_candidates();
         }
@@ -1888,7 +1940,9 @@ impl PuctTreeSearch {
             // see stale statistics and could pick a different edge than the
             // sequential search did.
             let before = self.scheduler_state();
-            let Some(candidate) = self.next_candidate() else { break };
+            let Some(candidate) = self.next_candidate() else {
+                break;
+            };
             // A batch must not span a halving boundary. `halve()` ranks the
             // survivors on their accumulated statistics, and a leaf still in
             // flight has not contributed its value yet -- so halving mid-batch
@@ -1919,14 +1973,22 @@ impl PuctTreeSearch {
             let nodes_before = self.nodes.len();
             let depth_before = self.max_depth;
             let used_before = self.used;
-            if self.begin_visit(config, candidate)? {
+            // `next_candidate` yields a candidate INDEX; `begin_visit` takes the edge
+            // id, as the classic root's call site does. Under v3 the two roots share
+            // this path, so the conversion belongs here rather than in the callee.
+            let candidate_edge = self.candidates[candidate].edge;
+            if self.begin_visit(config, candidate_edge)? {
                 // A leaf stays UNEXPANDED until its evaluation is submitted, so a later
                 // descent in the same batch can land on it again -- the penalty is the
                 // only thing steering away, and one too small to change the argmax does
                 // not steer. Expanding a node twice allocates a second edge list,
                 // orphans the first, and unwinds the same path twice, inflating the
                 // statistics of exactly the line the search likes most.
-                if self.pending.iter().any(|slot| slot.leaf == self.pending_leaf) {
+                if self
+                    .pending
+                    .iter()
+                    .any(|slot| slot.leaf == self.pending_leaf)
+                {
                     // Undo the descent and end the batch; the visit happens next time,
                     // against statistics that include this batch's results.
                     for (_, edge) in &self.path {
@@ -2012,7 +2074,12 @@ impl PuctTreeSearch {
                 self.undo_virtual_loss(&slot.path, slot.leaf);
             }
             let value = values[index];
-            self.expand(config, slot.leaf, &policies[index * width..(index + 1) * width], value)?;
+            self.expand(
+                config,
+                slot.leaf,
+                &policies[index * width..(index + 1) * width],
+                value,
+            )?;
             let node = &mut self.nodes[slot.leaf as usize];
             node.visits += 1;
             node.value_sum += value;
@@ -2063,6 +2130,7 @@ impl PuctTreeSearch {
             value = -value;
             let entry = &mut self.edges[*edge_index as usize];
             entry.visits += 1;
+            entry.visits_since += 1;
             entry.value_sum += value;
             let entry = &mut self.nodes[*node_index as usize];
             entry.visits += 1;
@@ -2080,6 +2148,7 @@ impl PuctTreeSearch {
             value = -value;
             let entry = &mut self.edges[*edge_index as usize];
             entry.visits -= 1;
+            entry.visits_since -= 1;
             entry.value_sum -= value;
             let entry = &mut self.nodes[*node_index as usize];
             entry.visits -= 1;
@@ -2685,6 +2754,7 @@ impl PuctTreeSearch {
             value = -value;
             let entry = &mut self.edges[edge as usize];
             entry.visits += 1;
+            entry.visits_since += 1;
             entry.value_sum += value;
             let entry = &mut self.nodes[node as usize];
             entry.visits += 1;
@@ -2739,6 +2809,7 @@ impl PuctTreeSearch {
                 code: *code,
                 prior,
                 visits: 0,
+                visits_since: 0,
                 value_sum: 0.0,
                 child: NO_CHILD,
             });
@@ -2815,6 +2886,9 @@ mod tests {
             code,
             prior,
             visits,
+            // These helpers build edges for a search that never resumed, where the
+            // two counters are by definition equal.
+            visits_since: visits,
             value_sum: f64::from(visits) * q,
             child: NO_CHILD,
         }

@@ -26,7 +26,12 @@ const MAX_CONSIDERED: u32 = 12;
 const C_PUCT: f64 = 1.25;
 
 fn params() -> PuctParams {
-    PuctParams { simulations: SIMULATIONS, max_considered: MAX_CONSIDERED, c_puct: C_PUCT }
+    PuctParams {
+        simulations: SIMULATIONS,
+        max_considered: MAX_CONSIDERED,
+        c_puct: C_PUCT,
+        ..PuctParams::default()
+    }
 }
 
 fn sequential(config: &Config, state: &GameState, seed: u32) -> PuctResult {
@@ -42,11 +47,18 @@ fn sequential(config: &Config, state: &GameState, seed: u32) -> PuctResult {
 }
 
 /// Returns the result and the batch sizes actually achieved.
-fn batched(config: &Config, state: &GameState, seed: u32, max_n: usize, vl: f64)
-    -> (PuctResult, Vec<usize>) {
+fn batched(
+    config: &Config,
+    state: &GameState,
+    seed: u32,
+    max_n: usize,
+    vl: f64,
+) -> (PuctResult, Vec<usize>) {
     let mut search = PuctTreeSearch::from_state(config, state, params(), Lcg32::new(seed))
         .expect("an ongoing state starts a search");
-    search.set_virtual_loss(vl).expect("a finite non-negative penalty");
+    search
+        .set_virtual_loss(vl)
+        .expect("a finite non-negative penalty");
     let stride = NN_INPUT_PLANES * config.cells();
     let width = config.policy_size();
     let mut features = vec![0.0_f32; stride * max_n];
@@ -54,8 +66,12 @@ fn batched(config: &Config, state: &GameState, seed: u32, max_n: usize, vl: f64)
     let mut values = vec![0.0_f64; max_n];
     let mut sizes = Vec::new();
     loop {
-        let n = search.collect_leaves(config, &mut features, max_n).expect("advances");
-        if n == 0 { break; }
+        let n = search
+            .collect_leaves(config, &mut features, max_n)
+            .expect("advances");
+        if n == 0 {
+            break;
+        }
         sizes.push(n);
         for i in 0..n {
             values[i] = mock_evaluator::evaluate(
@@ -63,7 +79,9 @@ fn batched(config: &Config, state: &GameState, seed: u32, max_n: usize, vl: f64)
                 &mut policies[i * width..(i + 1) * width],
             );
         }
-        search.submit_batch(config, &policies, &values, n).expect("well formed");
+        search
+            .submit_batch(config, &policies, &values, n)
+            .expect("well formed");
     }
     (search.result(), sizes)
 }
@@ -72,13 +90,36 @@ fn assert_identical(a: &PuctResult, b: &PuctResult, what: &str) {
     assert_eq!(a.action_code, b.action_code, "{what}: chosen action");
     assert_eq!(a.visit_counts, b.visit_counts, "{what}: visit counts");
     assert_eq!(a.considered, b.considered, "{what}: considered set");
-    assert_eq!(a.simulations_used, b.simulations_used, "{what}: simulations used");
-    assert_eq!(a.max_depth_reached, b.max_depth_reached, "{what}: max depth");
-    assert_eq!(a.root_value.to_bits(), b.root_value.to_bits(), "{what}: root value bits");
-    assert_eq!(a.improved_policy.len(), b.improved_policy.len(), "{what}: policy length");
-    for (i, (x, y)) in a.improved_policy.iter().zip(b.improved_policy.iter()).enumerate() {
+    assert_eq!(
+        a.simulations_used, b.simulations_used,
+        "{what}: simulations used"
+    );
+    assert_eq!(
+        a.max_depth_reached, b.max_depth_reached,
+        "{what}: max depth"
+    );
+    assert_eq!(
+        a.root_value.to_bits(),
+        b.root_value.to_bits(),
+        "{what}: root value bits"
+    );
+    assert_eq!(
+        a.improved_policy.len(),
+        b.improved_policy.len(),
+        "{what}: policy length"
+    );
+    for (i, (x, y)) in a
+        .improved_policy
+        .iter()
+        .zip(b.improved_policy.iter())
+        .enumerate()
+    {
         assert_eq!(x.0, y.0, "{what}: policy code at {i}");
-        assert_eq!(x.1.to_bits(), y.1.to_bits(), "{what}: policy weight bits at {i}");
+        assert_eq!(
+            x.1.to_bits(),
+            y.1.to_bits(),
+            "{what}: policy weight bits at {i}"
+        );
     }
 }
 
@@ -137,7 +178,10 @@ fn a_virtual_loss_changes_the_search_and_lifts_the_batch_size() {
     let (_, vl_sizes) = batched(&config, state, 7, 32, 1.0);
     let safe_mean = safe_sizes.iter().sum::<usize>() as f64 / safe_sizes.len() as f64;
     let vl_mean = vl_sizes.iter().sum::<usize>() as f64 / vl_sizes.len() as f64;
-    assert!(vl_mean > safe_mean, "a penalty must permit larger batches ({vl_mean} vs {safe_mean})");
+    assert!(
+        vl_mean > safe_mean,
+        "a penalty must permit larger batches ({vl_mean} vs {safe_mean})"
+    );
     // NOT "a batch may exceed the considered set". It could, before a batch was
     // stopped from holding the same leaf twice -- and those oversized batches were
     // the same leaf repeated, not extra work. What a penalty legitimately buys is a
@@ -149,8 +193,8 @@ fn a_virtual_loss_changes_the_search_and_lifts_the_batch_size() {
 fn a_negative_or_non_finite_penalty_is_refused() {
     let config = state_pool::canonical_config();
     let state = &state_pool::state_pool(&config, 1)[0];
-    let mut search = PuctTreeSearch::from_state(&config, state, params(), Lcg32::new(1))
-        .expect("starts");
+    let mut search =
+        PuctTreeSearch::from_state(&config, state, params(), Lcg32::new(1)).expect("starts");
     assert!(search.set_virtual_loss(-0.1).is_err());
     assert!(search.set_virtual_loss(f64::NAN).is_err());
     assert!(search.set_virtual_loss(f64::INFINITY).is_err());
