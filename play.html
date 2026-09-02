@@ -741,7 +741,9 @@ fetch('/api/health').then(r => r.json()).then(h => {
   // No network means no opponent: this site has no built-in bot to stand in, so say
   // so plainly instead of rendering "? · ?" as though a checkpoint were loaded.
   if (!h.network) { $('ckpt').textContent = 'network unreachable'; return; }
-  $('ckpt').textContent = `${n.version || '?'} · ${n.device || '?'}`;
+  // The device is optional -- this inference server does not report one -- so a
+  // missing value drops the separator rather than rendering a second '?'.
+  $('ckpt').textContent = (n.version || '?') + (n.device ? ` · ${n.device}` : '');
   $('mCk').textContent = m.label || n.version || '—';
   $('mDev').textContent = n.device || '—';
   ckptLabel = m.label || n.version || '';
