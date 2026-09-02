@@ -14,7 +14,9 @@
 use wrongway_normal_duel::js_math::Lcg32;
 use wrongway_normal_duel::mock_evaluator;
 use wrongway_normal_duel::puct::{PuctParams, PuctResult, PuctTreeSearch};
-use wrongway_normal_duel::{Config, GameState, NN_INPUT_PLANES};
+use wrongway_normal_duel::{
+    apply_legal_action, create_initial_state, decode_action, Config, GameState, NN_INPUT_PLANES,
+};
 
 #[path = "common/state_pool.rs"]
 mod state_pool;
@@ -83,11 +85,17 @@ fn assert_identical(a: &PuctResult, b: &PuctResult, what: &str) {
 #[test]
 fn zero_virtual_loss_batching_is_bit_identical_to_the_sequential_search() {
     let config = state_pool::canonical_config();
-    let states = state_pool::state_pool(&config, 12);
+    // A WIDE pool, not a handful. The first version of this test used 12 states and
+    // passed against a search that silently truncated itself -- 241 simulations of
+    // 256 -- because the bug needed a visit landing on a terminal node followed by a
+    // repeat of that candidate, which only shows up in deeper, wall-heavy positions.
+    // `state_pool` walks trajectories of varying length and wall bias, so breadth
+    // here is what reaches the corner cases.
+    let states = state_pool::state_pool(&config, 160);
     for (index, state) in states.iter().enumerate() {
         let seed = 1_000 + index as u32;
         let want = sequential(&config, state, seed);
-        for max_n in [2_usize, 8, 16, 64] {
+        for max_n in [2_usize, 8, 32] {
             let (got, _) = batched(&config, state, seed, max_n, 0.0);
             assert_identical(&want, &got, &format!("state {index}, max_n {max_n}"));
         }
@@ -146,4 +154,37 @@ fn a_negative_or_non_finite_penalty_is_refused() {
     assert!(search.set_virtual_loss(f64::NAN).is_err());
     assert!(search.set_virtual_loss(f64::INFINITY).is_err());
     assert!(search.set_virtual_loss(0.0).is_ok());
+}
+
+#[test]
+fn a_walked_game_never_diverges_and_never_truncates() {
+    // Sampled positions are not enough. The pool draws independent states from random
+    // trajectories, and 160 of those passed against a search that silently truncated
+    // itself to 241 simulations of 256. The failure needed a visit landing on a
+    // terminal node followed by a repeat of that candidate, which is reached by
+    // following the search's OWN moves into the positions it steers toward -- not by
+    // sampling around them.
+    //
+    // Truncation is checked explicitly as well as through the result comparison: a
+    // batched search that quietly stops early still returns a well-formed move, and
+    // `simulations_used` is the only field that says it did less work.
+    let config = state_pool::canonical_config();
+    let mut state = create_initial_state(&config).expect("an initial state");
+    for ply in 0..60_u32 {
+        if !state.outcome.is_ongoing() {
+            break;
+        }
+        let seed = 12_345_u32 ^ ply.wrapping_mul(2_654_435_761);
+        let want = sequential(&config, &state, seed);
+        for max_n in [8_usize, 32] {
+            let (got, _) = batched(&config, &state, seed, max_n, 0.0);
+            assert_identical(&want, &got, &format!("ply {ply}, max_n {max_n}"));
+            assert_eq!(
+                got.simulations_used, want.simulations_used,
+                "ply {ply}, max_n {max_n}: batched search truncated itself"
+            );
+        }
+        let action = decode_action(&config, want.action_code as usize).expect("a legal code");
+        state = apply_legal_action(&config, &state, &action).expect("a legal move");
+    }
 }
