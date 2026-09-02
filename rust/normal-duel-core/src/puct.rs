@@ -866,6 +866,221 @@ impl PuctTreeSearch {
         Ok(())
     }
 
+    /// The root's repetition window. Exposed so a resumed search can be checked
+    /// against a fresh one at the same position -- the rebase is the part of
+    /// extraction most likely to be wrong, and wrong silently.
+    #[must_use]
+    pub fn root_window(&self) -> &RepetitionWindow {
+        &self.root_window
+    }
+
+    /// The root's occurrence count within its own window.
+    #[must_use]
+    pub fn root_rep_count(&self) -> u32 {
+        self.nodes[0].rep_count
+    }
+
+    /// How many nodes the tree holds. Reuse is only worth anything if this is
+    /// large after extraction.
+    #[must_use]
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Start a search on an inherited tree from [`Self::into_subtree`].
+    ///
+    /// THE LOAD-BEARING DECISION: the Gumbel sequential-halving schedule is re-run
+    /// from scratch -- fresh draws, fresh candidates/survivors/rounds, `used = 0`,
+    /// budget reset. Only `visits`/`value_sum`/`value`/`prior` on inherited nodes
+    /// and edges are kept.
+    ///
+    /// Counting inherited visits toward the plan would break Gumbel's
+    /// policy-improvement guarantee, which rests on each candidate receiving a
+    /// PLANNED number of visits, and it would bias the target: a candidate with 40
+    /// inherited visits and 10 planned ones would dominate the visit-count policy
+    /// for reasons that have nothing to do with this search.
+    ///
+    /// The honest consequence: inherited statistics make each simulation BETTER
+    /// INFORMED, they do not make simulations unnecessary. The payoff shows up as
+    /// strength at equal simulations, not as fewer simulations for equal strength.
+    pub fn resume(
+        config: &Config,
+        inherited: Self,
+        params: PuctParams,
+        rng: Lcg32,
+    ) -> Result<Self> {
+        config.validate()?;
+        if config.rows != 9 || config.columns != 9 {
+            return Err(PuctError::UnsupportedBoard);
+        }
+        if params.simulations < 1 {
+            return Err(PuctError::InvalidSimulations);
+        }
+        if params.max_considered < 1 {
+            return Err(PuctError::InvalidMaxConsidered);
+        }
+        if !params.c_puct.is_finite() || params.c_puct <= 0.0 {
+            return Err(PuctError::InvalidCPuct);
+        }
+        if inherited.nodes.is_empty() {
+            return Err(PuctError::InvalidState);
+        }
+
+        let expanded = inherited.nodes[0].expanded;
+        // An expanded root has no network evaluation pending, so its raw value is
+        // gone -- what survives is the node's refined estimate. That is the best
+        // available and it is NOT the same number a fresh search would hold here,
+        // which is a real difference between a resumed root and a fresh one.
+        let root_value = if expanded { inherited.nodes[0].value } else { 0.0 };
+
+        let mut search = Self {
+            params,
+            rng,
+            root_value,
+            max_depth: 0,
+            used: 0,
+            budget: i64::from(params.simulations),
+            candidates: Vec::new(),
+            survivors: Vec::new(),
+            rounds: 1,
+            per_candidate: 0,
+            pass: 0,
+            next_survivor: 0,
+            round_fresh: true,
+            draining_single: false,
+            path: Vec::new(),
+            pending: Vec::new(),
+            virtual_loss: 0.0,
+            descent_keys: Vec::new(),
+            window_from: 0,
+            root_window_active: true,
+            pending_leaf: NO_CHILD,
+            phase: if expanded { Phase::Ready } else { Phase::RootPending },
+            ranking: Vec::new(),
+            ..inherited
+        };
+        if expanded {
+            search.seed_candidates();
+        }
+        Ok(search)
+    }
+
+    /// The tree rooted at the node reached by following `codes` from this root,
+    /// or `None` when that path was never expanded.
+    ///
+    /// This is the extraction half of tree reuse: after we move and the opponent
+    /// replies, the position we now face was a grandchild of the tree we are about
+    /// to throw away, and the visits under it are still valid statistics about the
+    /// same game.
+    ///
+    /// Only the arena and the repetition window come across. The Gumbel schedule is
+    /// NOT inherited -- see [`Self::resume`] for why that is load-bearing rather
+    /// than incidental.
+    #[must_use]
+    pub fn into_subtree(self, config: &Config, codes: &[u16]) -> Option<Self> {
+        // 1. Walk to the new root, rebasing the repetition window as we go.
+        //
+        // The new root's window is NOT the old root's. Each step either extends the
+        // window or, at a wall placement, starts a fresh one -- `resets_window`
+        // records which. Getting this wrong changes threefold adjudication silently:
+        // the search would see draws that are not there, or miss ones that are.
+        let mut window = self.root_window.clone();
+        let mut current = 0_u32;
+        for code in codes {
+            let node = self.nodes[current as usize];
+            if !node.expanded {
+                return None;
+            }
+            let start = node.edges_start as usize;
+            let end = start + node.edges_len as usize;
+            let edge = (start..end).find(|index| self.edges[*index].code == *code)?;
+            let child = self.edges[edge].child;
+            if child == NO_CHILD {
+                return None;
+            }
+            let key = position_key(config, &self.nodes[child as usize].position);
+            if self.nodes[child as usize].resets_window {
+                window.reset(key);
+            } else {
+                window.push(key);
+            }
+            current = child;
+        }
+
+        // 2. Reachability copy. The arena has no free list, so compacting in place
+        //    would leave a partial remap nobody can review; this builds fresh
+        //    vectors and remaps as it goes.
+        let mut mapping = vec![NO_CHILD; self.nodes.len()];
+        let mut nodes: Vec<Node> = Vec::new();
+        let mut edges: Vec<Edge> = Vec::new();
+        mapping[current as usize] = 0;
+        nodes.push(self.nodes[current as usize]);
+        let mut queue = vec![current];
+        let mut head = 0_usize;
+        while head < queue.len() {
+            let old = queue[head];
+            head += 1;
+            let new_index = mapping[old as usize] as usize;
+            let node = self.nodes[old as usize];
+            if !node.expanded {
+                nodes[new_index].edges_start = 0;
+                nodes[new_index].edges_len = 0;
+                continue;
+            }
+            let start = node.edges_start as usize;
+            let end = start + node.edges_len as usize;
+            let new_start = u32::try_from(edges.len()).ok()?;
+            for index in start..end {
+                let mut edge = self.edges[index];
+                if edge.child != NO_CHILD {
+                    let child = edge.child;
+                    if mapping[child as usize] == NO_CHILD {
+                        mapping[child as usize] = u32::try_from(nodes.len()).ok()?;
+                        nodes.push(self.nodes[child as usize]);
+                        queue.push(child);
+                    }
+                    edge.child = mapping[child as usize];
+                }
+                edges.push(edge);
+            }
+            nodes[new_index].edges_start = new_start;
+        }
+
+        // 3. `rep_count` is relative to a node's OWN window, and the window just
+        //    moved, so every copied node's count has to be recomputed rather than
+        //    carried over. Walk down from the new root carrying the window.
+        let root_key = position_key(config, &nodes[0].position);
+        nodes[0].rep_count = window.get(root_key);
+        let mut stack: Vec<(u32, RepetitionWindow)> = vec![(0, window.clone())];
+        while let Some((index, at)) = stack.pop() {
+            let node = nodes[index as usize];
+            let start = node.edges_start as usize;
+            let end = start + node.edges_len as usize;
+            for edge in start..end {
+                let child = edges[edge].child;
+                if child == NO_CHILD {
+                    continue;
+                }
+                let key = position_key(config, &nodes[child as usize].position);
+                let mut next = at.clone();
+                if nodes[child as usize].resets_window {
+                    next.reset(key);
+                } else {
+                    next.push(key);
+                }
+                nodes[child as usize].rep_count = next.get(key);
+                stack.push((child, next));
+            }
+        }
+
+        Some(Self {
+            nodes,
+            edges,
+            root_window: window,
+            ..self
+        })
+    }
+
     /// The node ids currently awaiting evaluation, in collection order.
     ///
     /// Exposed so a caller (and the tests) can assert the batch holds DISTINCT
