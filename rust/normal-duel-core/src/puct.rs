@@ -403,6 +403,15 @@ struct Edge {
     code: u16,
     prior: f64,
     visits: u32,
+    /// Visits accrued since the last [`PuctTreeSearch::restart`].
+    ///
+    /// Equal to `visits` for a search that never resumed, so nothing changes for
+    /// one. On a RESUMED search the two diverge, and the difference is the whole
+    /// point: `visits` carries the inherited value estimate, which is what reuse is
+    /// for, while the halving schedule must rank on what THIS search has explored.
+    /// Ranking on the total let a candidate that was good before the opponent moved
+    /// arrive with a visit count no fresh candidate could match.
+    visits_since: u32,
     value_sum: f64,
     child: u32,
 }
@@ -866,6 +875,22 @@ impl PuctTreeSearch {
         Ok(())
     }
 
+    /// `(visits, visits_since)` for each root edge, in code order.
+    ///
+    /// Exposed so the separation between inherited exploration and this search's own
+    /// can be asserted rather than assumed -- it is the difference between reuse
+    /// helping and reuse handing halving a stale ranking.
+    #[must_use]
+    pub fn root_edge_visits(&self) -> Vec<(u32, u32)> {
+        let root = self.nodes[0];
+        (root.edges_start..root.edges_start + root.edges_len)
+            .map(|index| {
+                let edge = self.edges[index as usize];
+                (edge.visits, edge.visits_since)
+            })
+            .collect()
+    }
+
     /// The root's repetition window. Exposed so a resumed search can be checked
     /// against a fresh one at the same position -- the rebase is the part of
     /// extraction most likely to be wrong, and wrong silently.
@@ -1036,6 +1061,11 @@ impl PuctTreeSearch {
         self.root_window_active = true;
         self.pending_leaf = NO_CHILD;
         self.ranking.clear();
+        // The inherited VALUE estimates stay; the inherited exploration counts do
+        // not get to drive this search's halving.
+        for edge in &mut self.edges {
+            edge.visits_since = 0;
+        }
         self.phase = if expanded { Phase::Ready } else { Phase::RootPending };
         if expanded {
             self.seed_candidates();
@@ -1391,6 +1421,7 @@ impl PuctTreeSearch {
             value = -value;
             let entry = &mut self.edges[*edge_index as usize];
             entry.visits += 1;
+            entry.visits_since += 1;
             entry.value_sum += value;
             let entry = &mut self.nodes[*node_index as usize];
             entry.visits += 1;
@@ -1408,6 +1439,7 @@ impl PuctTreeSearch {
             value = -value;
             let entry = &mut self.edges[*edge_index as usize];
             entry.visits -= 1;
+            entry.visits_since -= 1;
             entry.value_sum -= value;
             let entry = &mut self.nodes[*node_index as usize];
             entry.visits -= 1;
@@ -1624,10 +1656,15 @@ impl PuctTreeSearch {
 
     /// Keep the top `ceil(k / 2)` by `g + logit + sigma(qhat)`.
     fn halve(&mut self) {
+        // `visits_since`, not `visits`: sigma scales the value term by how far THIS
+        // search has got, and inherited visits made it large from the first round,
+        // drowning the Gumbel noise and turning halving greedy on a stale estimate.
+        // For a search that never resumed the two are identical, so this changes
+        // nothing for one.
         let max_visits = self
             .survivors
             .iter()
-            .map(|index| self.edges[self.candidates[*index].edge as usize].visits)
+            .map(|index| self.edges[self.candidates[*index].edge as usize].visits_since)
             .max()
             .unwrap_or(0);
 
@@ -1853,6 +1890,7 @@ impl PuctTreeSearch {
             value = -value;
             let entry = &mut self.edges[edge as usize];
             entry.visits += 1;
+            entry.visits_since += 1;
             entry.value_sum += value;
             let entry = &mut self.nodes[node as usize];
             entry.visits += 1;
@@ -1907,6 +1945,7 @@ impl PuctTreeSearch {
                 code: *code,
                 prior,
                 visits: 0,
+                visits_since: 0,
                 value_sum: 0.0,
                 child: NO_CHILD,
             });
@@ -1962,6 +2001,9 @@ mod tests {
             code,
             prior,
             visits,
+            // These helpers build edges for a search that never resumed, where the
+            // two counters are by definition equal.
+            visits_since: visits,
             value_sum: f64::from(visits) * q,
             child: NO_CHILD,
         }

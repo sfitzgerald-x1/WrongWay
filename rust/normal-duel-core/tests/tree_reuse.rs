@@ -131,3 +131,33 @@ fn a_path_that_was_never_expanded_yields_nothing() {
     // this budget; the point is that a miss returns None rather than a bad tree.
     assert!(search.into_subtree(&config, &[9_999]).is_none(), "an unknown code must miss");
 }
+
+#[test]
+fn a_restart_keeps_inherited_value_but_not_inherited_exploration() {
+    // The separation reuse depends on. `visits` carries the value estimate, which is
+    // the whole benefit; `visits_since` is what the halving schedule ranks on, and it
+    // must start this search at zero. Ranking on the total measured -177 Elo at the
+    // site's default budget, because a candidate that was good before the opponent
+    // moved arrived with a visit count no fresh candidate could match.
+    let config = state_pool::canonical_config();
+    let state = create_initial_state(&config).expect("initial");
+    let mut search = fresh(&config, &state, 4_242);
+    let result = drive(&mut search, &config);
+
+    // A search that never resumed must be unaffected: the two counters agree.
+    for (visits, since) in search.root_edge_visits() {
+        assert_eq!(visits, since, "a fresh search must keep the two counters identical");
+    }
+
+    let mut sub = search.into_subtree(&config, &[result.action_code]).expect("own move");
+    sub.restart(params(), Lcg32::new(9)).expect("restarts");
+    let after = sub.root_edge_visits();
+    assert!(
+        after.iter().any(|(visits, _)| *visits > 0),
+        "the inherited value estimates were thrown away with the exploration counts"
+    );
+    assert!(
+        after.iter().all(|(_, since)| *since == 0),
+        "inherited exploration is still visible to the halving schedule"
+    );
+}
