@@ -777,6 +777,69 @@ impl NormalDuelSearch {
         })
     }
 
+    /// One leaf's policy width, independent of the batch buffers.
+    ///
+    /// `policyLen()` is the BUFFER length and `configureBatch` multiplies it, so on a
+    /// REUSED search it reads back `batch` times too large -- and a caller that sizes
+    /// its mask view from it runs thousands of floats past a buffer that never grew,
+    /// which corrupts wasm memory rather than throwing. Sibling of `featureStride`.
+    #[wasm_bindgen(js_name = policyWidth)]
+    #[must_use]
+    pub fn policy_width(&self) -> usize {
+        self.config.policy_size()
+    }
+
+    /// One leaf's feature width, independent of the batch buffers.
+    ///
+    /// `featuresLen()` is the BUFFER length, which `configureBatch` multiplies. A
+    /// caller that derives the stride from it is right exactly once -- on a search
+    /// whose buffers have never been resized -- and wrong on every reused search,
+    /// where it reads back a stride `batch` times too large.
+    #[wasm_bindgen(js_name = featureStride)]
+    #[must_use]
+    pub fn feature_stride(&self) -> usize {
+        NN_INPUT_PLANES * self.config.cells()
+    }
+
+    /// Re-root this search at the node reached by `codes`, keeping the statistics
+    /// underneath, and reset the schedule from `options`.
+    ///
+    /// Returns `false` when that path was never expanded -- the caller then builds a
+    /// fresh search as before. A miss is ordinary: the opponent's reply is only in
+    /// the tree if the previous search actually visited it.
+    ///
+    /// This is tree reuse across moves. What is inherited is the VALUE estimates;
+    /// the Gumbel plan is re-run from scratch, so a resumed search still spends its
+    /// whole budget. It makes each simulation better informed, it does not make
+    /// simulations unnecessary.
+    #[wasm_bindgen(js_name = reroot)]
+    pub fn reroot(&mut self, codes: Vec<u16>, options: &str) -> std::result::Result<bool, JsValue> {
+        let dto: SearchOptionsDto =
+            serde_json::from_str(options).map_err(|error| js_error(error.to_string()))?;
+        if !self.inner.reroot(&self.config, &codes) {
+            return Ok(false);
+        }
+        self.inner
+            .restart(
+                PuctParams {
+                    simulations: dto.simulations,
+                    max_considered: dto.max_considered,
+                    c_puct: dto.c_puct,
+                },
+                Lcg32::new(dto.seed),
+            )
+            .map_err(|error| js_error(error.reason().to_owned()))?;
+        Ok(true)
+    }
+
+    /// Nodes currently held. A reroot that inherits nothing is not worth having, and
+    /// this is how a caller can tell without guessing.
+    #[wasm_bindgen(js_name = nodeCount)]
+    #[must_use]
+    pub fn node_count(&self) -> usize {
+        self.inner.node_count()
+    }
+
     /// Size the buffers for batched collection, and return the width in use.
     ///
     /// `featuresPtr` and `policyPtr` are invalidated by this call: it reallocates.

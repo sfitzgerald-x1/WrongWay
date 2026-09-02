@@ -978,6 +978,76 @@ impl PuctTreeSearch {
     /// than incidental.
     #[must_use]
     pub fn into_subtree(self, config: &Config, codes: &[u16]) -> Option<Self> {
+        let (nodes, edges, window) = self.extract_parts(config, codes)?;
+        Some(Self { nodes, edges, root_window: window, ..self })
+    }
+
+    /// Re-root IN PLACE, keeping the statistics; `false` when the path was not in
+    /// the tree and the caller must start fresh.
+    ///
+    /// Same extraction as [`Self::into_subtree`], in the shape a wasm binding can
+    /// actually use: consuming `self` across that boundary would mean holding the
+    /// search in an `Option` and unwrapping it in every other method.
+    pub fn reroot(&mut self, config: &Config, codes: &[u16]) -> bool {
+        match self.extract_parts(config, codes) {
+            Some((nodes, edges, window)) => {
+                self.nodes = nodes;
+                self.edges = edges;
+                self.root_window = window;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Reset the schedule for a new search on the tree this already holds.
+    ///
+    /// The statistics stay; everything the Gumbel plan owns is rebuilt. See
+    /// [`Self::resume`] for why that separation is load-bearing.
+    pub fn restart(&mut self, params: PuctParams, rng: Lcg32) -> Result<()> {
+        if params.simulations < 1 {
+            return Err(PuctError::InvalidSimulations);
+        }
+        if params.max_considered < 1 {
+            return Err(PuctError::InvalidMaxConsidered);
+        }
+        if !params.c_puct.is_finite() || params.c_puct <= 0.0 {
+            return Err(PuctError::InvalidCPuct);
+        }
+        let expanded = self.nodes[0].expanded;
+        self.params = params;
+        self.rng = rng;
+        self.root_value = if expanded { self.nodes[0].value } else { 0.0 };
+        self.max_depth = 0;
+        self.used = 0;
+        self.budget = i64::from(params.simulations);
+        self.candidates.clear();
+        self.survivors.clear();
+        self.rounds = 1;
+        self.per_candidate = 0;
+        self.pass = 0;
+        self.next_survivor = 0;
+        self.round_fresh = true;
+        self.draining_single = false;
+        self.path.clear();
+        self.pending.clear();
+        self.descent_keys.clear();
+        self.window_from = 0;
+        self.root_window_active = true;
+        self.pending_leaf = NO_CHILD;
+        self.ranking.clear();
+        self.phase = if expanded { Phase::Ready } else { Phase::RootPending };
+        if expanded {
+            self.seed_candidates();
+        }
+        Ok(())
+    }
+
+    fn extract_parts(
+        &self,
+        config: &Config,
+        codes: &[u16],
+    ) -> Option<(Vec<Node>, Vec<Edge>, RepetitionWindow)> {
         // 1. Walk to the new root, rebasing the repetition window as we go.
         //
         // The new root's window is NOT the old root's. Each step either extends the
@@ -1073,12 +1143,7 @@ impl PuctTreeSearch {
             }
         }
 
-        Some(Self {
-            nodes,
-            edges,
-            root_window: window,
-            ..self
-        })
+        Some((nodes, edges, window))
     }
 
     /// The node ids currently awaiting evaluation, in collection order.
