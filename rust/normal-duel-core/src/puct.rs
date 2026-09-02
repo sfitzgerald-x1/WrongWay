@@ -866,6 +866,16 @@ impl PuctTreeSearch {
         Ok(())
     }
 
+    /// The node ids currently awaiting evaluation, in collection order.
+    ///
+    /// Exposed so a caller (and the tests) can assert the batch holds DISTINCT
+    /// leaves: nothing in the descent guarantees it, and a repeat would be
+    /// expanded twice.
+    #[must_use]
+    pub fn pending_leaf_ids(&self) -> Vec<u32> {
+        self.pending.iter().map(|slot| slot.leaf).collect()
+    }
+
     /// Set the in-flight penalty used by [`Self::collect_leaves`].
     ///
     /// Leave it at `0.0` for a search that is bit-identical to the sequential
@@ -952,7 +962,34 @@ impl PuctTreeSearch {
                 break;
             }
             seen.push(candidate);
+            // Everything begin_visit/descend can mutate, so a descent that lands on a
+            // leaf already in this batch can be undone completely.
+            let nodes_before = self.nodes.len();
+            let depth_before = self.max_depth;
+            let used_before = self.used;
             if self.begin_visit(config, candidate)? {
+                // A leaf stays UNEXPANDED until its evaluation is submitted, so a later
+                // descent in the same batch can land on it again -- the penalty is the
+                // only thing steering away, and one too small to change the argmax does
+                // not steer. Expanding a node twice allocates a second edge list,
+                // orphans the first, and unwinds the same path twice, inflating the
+                // statistics of exactly the line the search likes most.
+                if self.pending.iter().any(|slot| slot.leaf == self.pending_leaf) {
+                    // Undo the descent and end the batch; the visit happens next time,
+                    // against statistics that include this batch's results.
+                    for (_, edge) in &self.path {
+                        if self.edges[*edge as usize].child >= nodes_before as u32 {
+                            self.edges[*edge as usize].child = NO_CHILD;
+                        }
+                    }
+                    self.nodes.truncate(nodes_before);
+                    self.max_depth = depth_before;
+                    self.used = used_before;
+                    self.path.clear();
+                    self.pending_leaf = NO_CHILD;
+                    self.restore_scheduler(before);
+                    break;
+                }
                 let slot = self.pending.len();
                 self.encode(
                     config,
