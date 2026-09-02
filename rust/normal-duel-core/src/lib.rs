@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use thiserror::Error;
 
+pub mod endgame;
 pub mod js_math;
 pub mod mock_evaluator;
 pub mod puct;
