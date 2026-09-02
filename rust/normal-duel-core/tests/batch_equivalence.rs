@@ -138,10 +138,11 @@ fn a_virtual_loss_changes_the_search_and_lifts_the_batch_size() {
     let safe_mean = safe_sizes.iter().sum::<usize>() as f64 / safe_sizes.len() as f64;
     let vl_mean = vl_sizes.iter().sum::<usize>() as f64 / vl_sizes.len() as f64;
     assert!(vl_mean > safe_mean, "a penalty must permit larger batches ({vl_mean} vs {safe_mean})");
-    assert!(
-        *vl_sizes.iter().max().unwrap() > MAX_CONSIDERED as usize,
-        "with a penalty a batch may exceed the considered set"
-    );
+    // NOT "a batch may exceed the considered set". It could, before a batch was
+    // stopped from holding the same leaf twice -- and those oversized batches were
+    // the same leaf repeated, not extra work. What a penalty legitimately buys is a
+    // larger MEAN, which is asserted above; the ceiling is a measurement, not a
+    // property, and it lives in batch_profile.rs.
 }
 
 #[test]
