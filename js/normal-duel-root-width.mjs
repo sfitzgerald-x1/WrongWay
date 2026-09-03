@@ -23,23 +23,43 @@
  * too narrow, 512 at all-legal is 7.5 and too wide. The peak is interior, and it
  * moves with the budget.
  *
- * CALIBRATION RANGE: 128 to 512 simulations. Below and above that this is
- * extrapolation from three points. It is a reasonable extrapolation -- the ratio
- * is the thing the halving schedule actually cares about -- but it has not been
- * measured there, and the slider reaches 4096.
+ * THE RATIO RULE IS REFUTED ABOVE 512. Measured at 4096 simulations, against
+ * width 24: width 12 is +88.7 Elo [28, 155], width 48 is -106.3 [-151, -65], and
+ * all-legal is -60.3 [-115, -8]. The ratio predicted 192. So the optimum does not
+ * keep growing with the budget -- it peaks and comes back down, and no
+ * explanation for that is offered here because none has been measured.
+ *
+ * What is left is a table of what was actually observed, and nearest-measured
+ * selection between the entries. That is uglier than a formula and honest about
+ * where the evidence stops: 1024 and 2048 have never been measured, and they take
+ * whichever neighbouring budget is nearer on a log scale.
  */
 
-// Simulations per considered root child, at the three measured optima.
-// 128/6 = 21.3, 256/12 = 21.3, 512/24 = 21.3.
-export const SIMS_PER_CONSIDERED_CHILD = 21.3;
+// Widths measured as best at each budget, each against the next-best width tried
+// there. 128 -> 6 (24 was -129), 256 -> 12 (+58.5 over 6), 512 -> 24 (+154 over
+// 6), 4096 -> 12 (+88.7 over 24).
+export const MEASURED_WIDTHS = Object.freeze([
+  Object.freeze({ sims: 128, width: 6 }),
+  Object.freeze({ sims: 256, width: 12 }),
+  Object.freeze({ sims: 512, width: 24 }),
+  Object.freeze({ sims: 4096, width: 12 }),
+]);
 
-// Fewer than two candidates is not a choice, so the smallest budgets on the
-// slider (16 sims would ask for 1) still compare a pair.
+// Fewer than two candidates is not a choice, so the smallest budgets still
+// compare a pair.
 export const MIN_ROOT_WIDTH = 2;
 
 export function rootWidth(simulations) {
   if (!Number.isFinite(simulations) || simulations <= 0) {
     throw new TypeError(`rootWidth needs a positive simulation count, got ${simulations}`);
   }
-  return Math.max(MIN_ROOT_WIDTH, Math.round(simulations / SIMS_PER_CONSIDERED_CHILD));
+  // Nearest measured budget on a LOG scale: budgets are compared by ratio, not by
+  // difference, so 1024 sits nearer 512 than 4096 and 2048 nearer 4096 than 512.
+  let best = MEASURED_WIDTHS[0];
+  let bestDistance = Infinity;
+  for (const entry of MEASURED_WIDTHS) {
+    const distance = Math.abs(Math.log(simulations) - Math.log(entry.sims));
+    if (distance < bestDistance) { bestDistance = distance; best = entry; }
+  }
+  return Math.max(MIN_ROOT_WIDTH, best.width);
 }
