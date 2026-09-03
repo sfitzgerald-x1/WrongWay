@@ -310,10 +310,20 @@ const CONFIG = Object.freeze({
   jumpRule: 'permissive-adjacent-exit-v1', repetitionThreshold: 3,
   plyCap: 200, firstPlayer: 'A'
 });
-// Fixed at 512, and not surfaced in the UI. This is the budget the checkpoint's
-// targets were generated at; whether more search helps above it is still being
-// measured, so the site neither exposes nor advertises the number.
-const SIMS = 512;
+// Fixed at 4096, and not surfaced in the UI.
+//
+// It was 512 because more search was unmeasured. It has since been measured: the
+// budget is worth roughly a doubling of strength per step where the ROOT WIDTH is
+// right for it, and three changes made 4096 affordable -- collecting search leaves
+// in batches (2.85-3.77x, bit-identical), an evaluation cache (~30%, identical by
+// construction), and a root width taken from what was measured at each budget
+// rather than extrapolated. At 512 a move cost 4787ms before those; 512 now costs
+// ~919ms.
+//
+// The width matters as much as the number: rootWidth(4096) returns 12, which
+// measured +88.7 Elo against 24 at this budget, while the formula this replaced
+// would have asked for 192 -- about 150 Elo worse.
+const SIMS = 4096;
 
 // Which checkpoint to play. The server answers null when the deployment serves a
 // single network, and then the control stays hidden.
