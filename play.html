@@ -28,6 +28,16 @@ header{max-width:940px;margin:0 auto 16px;display:flex;flex-direction:column;
   align-items:center;gap:7px;text-align:center}
 .chip{font:600 10px/1 ui-monospace,Menlo,monospace;color:var(--muted);
   border:1px solid var(--border);border-radius:999px;padding:5px 9px;white-space:nowrap}
+/* The checkpoint picker borrows `.chip` for its shape, but `.chip` is a LABEL
+   style: it sets a colour and a border and no background, which is right for a
+   div and wrong for a native control -- unstyled, a <select> renders with the
+   browser's own light background on this dark page. Both other interactive
+   controls here (button, text input) declare background AND colour, so this one
+   does too, and takes the text input's focus ring for the same reason. */
+select.chip{background:#0e1424;color:#e8edf7;cursor:pointer;
+  width:auto;display:inline-block;text-align:center;text-align-last:center}
+select.chip:hover{border-color:#3b82f6}
+select.chip:focus{outline:none;border-color:#3b82f6}
 /* two columns: board on the left, everything measured on the right */
 /* One screen: standings | board | analysis. The board is fixed width, so the two
    side columns take the slack and everything stays visible without scrolling. */
@@ -197,6 +207,10 @@ button.link:hover{background:none;color:#cbd5e1;text-decoration:underline}
 <header>
   <h1>Quoridor Zero</h1>
   <div class="chip" id="ckpt">loading&hellip;</div>
+  <!-- Takes the checkpoint chip's PLACE when a roster exists, rather than sitting
+       under it: the pill under the title is where the checkpoint has always been
+       shown, and two controls saying the same thing is one too many. -->
+  <select id="opp" class="chip" style="display:none"></select>
 </header>
 
 <div id="page">
@@ -296,10 +310,26 @@ const CONFIG = Object.freeze({
   jumpRule: 'permissive-adjacent-exit-v1', repetitionThreshold: 3,
   plyCap: 200, firstPlayer: 'A'
 });
-// Fixed at 512, and not surfaced in the UI. This is the budget the checkpoint's
-// targets were generated at; whether more search helps above it is still being
-// measured, so the site neither exposes nor advertises the number.
-const SIMS = 512;
+// Fixed at 4096, and not surfaced in the UI.
+//
+// It was 512 because more search was unmeasured. It has since been measured: the
+// budget is worth roughly a doubling of strength per step where the ROOT WIDTH is
+// right for it, and three changes made 4096 affordable -- collecting search leaves
+// in batches (2.85-3.77x, bit-identical), an evaluation cache (~30%, identical by
+// construction), and a root width taken from what was measured at each budget
+// rather than extrapolated. At 512 a move cost 4787ms before those; 512 now costs
+// ~919ms.
+//
+// The width matters as much as the number: rootWidth(4096) returns 12, which
+// measured +88.7 Elo against 24 at this budget, while the formula this replaced
+// would have asked for 192 -- about 150 Elo worse.
+const SIMS = 4096;
+
+// Which checkpoint to play. The server answers null when the deployment serves a
+// single network, and then the control stays hidden.
+const OPP_KEY = 'ww_play_opponent';
+let opponentId = localStorage.getItem(OPP_KEY) || '';
+let opponents = null;
 
 const $ = (id) => document.getElementById(id);
 const px = (n) => `${n}px`;
@@ -428,7 +458,10 @@ async function reportResult(result) {
     const r = await fetch('/api/result', { method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ result, side: human, plies: state.ply,
-                             checkpoint: ckptLabel, sims: SIMS }) });
+                             // The chosen opponent, not the server's default: a
+                             // result recorded against the wrong checkpoint is
+                             // worse than one not recorded at all.
+                             checkpoint: opponentLabel() || ckptLabel, sims: SIMS }) });
     const d = await r.json().catch(() => ({}));
     if (!r.ok || d.error) throw new Error(d.error || `http_${r.status}`);
     refreshBoard();      // the standings are on screen now, so keep them current
@@ -617,6 +650,7 @@ async function requestMove(signal) {
       history: history.filter(m => m.type === 'move' || m.type === 'wall')
         .map(({ type, p, r: rr, c, k }) => ({ type, p, r: rr, c, k })),
       sims: SIMS, seed: history.length + 1,
+      opponent: opponentId || undefined,
       board: { map: 'duel', duelSize: 'standard', initialStock: 10 },
       expect: { pawns: state.position.pawns, walls: state.position.walls,
                 stock: state.position.stock, turn: state.position.turn }
@@ -717,11 +751,51 @@ fetch('/api/health').then(r => r.json()).then(h => {
   // No network means no opponent: this site has no built-in bot to stand in, so say
   // so plainly instead of rendering "? · ?" as though a checkpoint were loaded.
   if (!h.network) { $('ckpt').textContent = 'network unreachable'; return; }
-  $('ckpt').textContent = `${n.version || '?'} · ${n.device || '?'}`;
+  // The device is optional -- this inference server does not report one -- so a
+  // missing value drops the separator rather than rendering a second '?'.
+  $('ckpt').textContent = (n.version || '?') + (n.device ? ` · ${n.device}` : '');
   $('mCk').textContent = m.label || n.version || '—';
   $('mDev').textContent = n.device || '—';
   ckptLabel = m.label || n.version || '';
 }).catch(() => { $('ckpt').textContent = 'network unreachable'; });
+
+function opponentLabel() {
+  if (!opponents) return '';
+  const o = opponents.opponents.find((x) => x.id === opponentId);
+  return o ? o.label : '';
+}
+
+fetch('/api/opponents').then((r) => r.json()).then((d) => {
+  if (!d || !Array.isArray(d.opponents) || d.opponents.length < 2) return;
+  opponents = d;
+  // A stale id from a previous roster must not silently play something else.
+  if (!d.opponents.some((o) => o.id === opponentId)) opponentId = d.default;
+  const sel = $('opp');
+  sel.innerHTML = '';
+  for (const o of d.opponents) {
+    const opt = document.createElement('option');
+    opt.value = o.id;
+    opt.textContent = typeof o.elo === 'number'
+      ? `${o.label} (${o.elo >= 0 ? '+' : ''}${Math.round(o.elo)})`
+      : o.label;
+    if (o.measuredAt) opt.title = `Elo measured at ${o.measuredAt}`;
+    sel.appendChild(opt);
+  }
+  sel.value = opponentId;
+  sel.style.display = '';
+  // One control, in the chip's position. The version/device the chip carried
+  // moves to the tooltip rather than being dropped.
+  sel.title = $('ckpt').textContent;
+  $('ckpt').style.display = 'none';
+  sel.addEventListener('change', () => {
+    opponentId = sel.value;
+    localStorage.setItem(OPP_KEY, opponentId);
+    // A game is bound to the opponent it started against -- the server enforces
+    // that, and a result recorded against a checkpoint that only played half the
+    // game would be a lie. So switching starts a fresh game.
+    newGame();
+  });
+}).catch(() => { /* no roster: the control stays hidden */ });
 
 refreshBoard();
 if (restoreGame()) {

@@ -403,6 +403,15 @@ struct Edge {
     code: u16,
     prior: f64,
     visits: u32,
+    /// Visits accrued since the last [`PuctTreeSearch::restart`].
+    ///
+    /// Equal to `visits` for a search that never resumed, so nothing changes for
+    /// one. On a RESUMED search the two diverge, and the difference is the whole
+    /// point: `visits` carries the inherited value estimate, which is what reuse is
+    /// for, while the halving schedule must rank on what THIS search has explored.
+    /// Ranking on the total let a candidate that was good before the opponent moved
+    /// arrive with a visit count no fresh candidate could match.
+    visits_since: u32,
     value_sum: f64,
     child: u32,
 }
@@ -447,7 +456,21 @@ enum Phase {
     Ready,
     /// A descent is paused at `pending_leaf`, whose features are with the caller.
     LeafAwaiting,
+    /// Several descents are paused at once and their features are with the
+    /// caller. Only reachable through [`PuctTreeSearch::collect_leaves`].
+    BatchAwaiting,
     Done,
+}
+
+/// A descent paused at a leaf while the rest of its batch is collected.
+///
+/// Only `path` and `leaf` are needed: the repetition-window state
+/// (`descent_keys`, `window_from`, `root_window_active`) is consumed during the
+/// descent and reset by `begin_visit`, and `submit` reads neither.
+#[derive(Clone, Debug)]
+struct PendingLeaf {
+    path: Vec<(u32, u32)>,
+    leaf: u32,
 }
 
 /// One game's search. Holds at most one outstanding leaf evaluation.
@@ -478,6 +501,18 @@ pub struct PuctTreeSearch {
     next_survivor: usize,
     round_fresh: bool,
     draining_single: bool,
+
+    /// Descents collected for the current batch, in collection order.
+    pending: Vec<PendingLeaf>,
+    /// Penalty applied to every node on an in-flight path so a later descent in
+    /// the same batch is steered away from it.
+    ///
+    /// `0.0` means no penalty, which is the ONLY setting that keeps the search
+    /// bit-identical to the sequential reference: with no penalty a batch may
+    /// only hold descents into DISTINCT root candidates, whose subtrees are
+    /// disjoint, so batching them changes nothing. Any non-zero value permits
+    /// several descents into one subtree and makes this a different algorithm.
+    virtual_loss: f64,
 
     /// `(node, edge)` frames of the paused descent, root-first.
     path: Vec<(u32, u32)>,
@@ -686,6 +721,8 @@ impl PuctTreeSearch {
             round_fresh: true,
             draining_single: false,
             path: Vec::new(),
+            pending: Vec::new(),
+            virtual_loss: 0.0,
             descent_keys: Vec::new(),
             window_from: 0,
             root_window_active: true,
@@ -721,7 +758,10 @@ impl PuctTreeSearch {
 
     #[must_use]
     pub fn awaiting_evaluation(&self) -> bool {
-        matches!(self.phase, Phase::RootAwaiting | Phase::LeafAwaiting)
+        matches!(
+            self.phase,
+            Phase::RootAwaiting | Phase::LeafAwaiting | Phase::BatchAwaiting
+        )
     }
 
     /// Advance the search to its next leaf evaluation.
@@ -756,7 +796,7 @@ impl PuctTreeSearch {
                         return Ok(true);
                     }
                 }
-                Phase::RootAwaiting | Phase::LeafAwaiting => {
+                Phase::RootAwaiting | Phase::LeafAwaiting | Phase::BatchAwaiting => {
                     return Err(PuctError::OutOfOrderEvaluation)
                 }
             }
@@ -778,6 +818,45 @@ impl PuctTreeSearch {
     /// bit-identical to the serial JS `evaluate`. The two are algebraically the
     /// same and differ only in f32 rounding, which is exactly the difference
     /// the parity suite is built to catch.
+    /// The legal-action mask for the `index`-th leaf of the current batch.
+    ///
+    /// A batch has several leaves outstanding, so [`Self::pending_leaf_mask`]'s
+    /// "the pending leaf" has no meaning here. Each leaf needs its OWN mask: the
+    /// caller uses it to turn raw logits into probabilities, and a mask from the
+    /// wrong position would produce a well-formed distribution over the wrong
+    /// moves -- which `submit_batch` would accept without complaint.
+    pub fn batch_leaf_mask(
+        &mut self,
+        config: &Config,
+        index: usize,
+        mask: &mut [f32],
+    ) -> Result<()> {
+        if mask.len() != config.policy_size() {
+            return Err(PuctError::InvalidBufferLength);
+        }
+        // The root is handed out as a batch of one, so a caller driving the batch
+        // API sees it through this accessor too. Without this it has to special-case
+        // the very first collection, which is exactly the kind of asymmetry that
+        // gets it wrong.
+        let leaf = match self.phase {
+            Phase::RootAwaiting if index == 0 => 0,
+            Phase::BatchAwaiting => {
+                self.pending
+                    .get(index)
+                    .ok_or(PuctError::InvalidBufferLength)?
+                    .leaf
+            }
+            _ => return Err(PuctError::OutOfOrderEvaluation),
+        };
+        let position = self.nodes[leaf as usize].position;
+        let count = position.legal_action_codes_fast(config, &mut self.codes);
+        mask.fill(0.0);
+        for code in &self.codes[..count] {
+            mask[usize::from(*code)] = 1.0;
+        }
+        Ok(())
+    }
+
     pub fn pending_leaf_mask(&mut self, config: &Config, mask: &mut [f32]) -> Result<()> {
         if mask.len() != config.policy_size() {
             return Err(PuctError::InvalidBufferLength);
@@ -794,6 +873,578 @@ impl PuctTreeSearch {
             mask[usize::from(*code)] = 1.0;
         }
         Ok(())
+    }
+
+    /// `(visits, visits_since)` for each root edge, in code order.
+    ///
+    /// Exposed so the separation between inherited exploration and this search's own
+    /// can be asserted rather than assumed -- it is the difference between reuse
+    /// helping and reuse handing halving a stale ranking.
+    #[must_use]
+    pub fn root_edge_visits(&self) -> Vec<(u32, u32)> {
+        let root = self.nodes[0];
+        (root.edges_start..root.edges_start + root.edges_len)
+            .map(|index| {
+                let edge = self.edges[index as usize];
+                (edge.visits, edge.visits_since)
+            })
+            .collect()
+    }
+
+    /// The root's repetition window. Exposed so a resumed search can be checked
+    /// against a fresh one at the same position -- the rebase is the part of
+    /// extraction most likely to be wrong, and wrong silently.
+    #[must_use]
+    pub fn root_window(&self) -> &RepetitionWindow {
+        &self.root_window
+    }
+
+    /// The root's occurrence count within its own window.
+    #[must_use]
+    pub fn root_rep_count(&self) -> u32 {
+        self.nodes[0].rep_count
+    }
+
+    /// How many nodes the tree holds. Reuse is only worth anything if this is
+    /// large after extraction.
+    #[must_use]
+    pub fn node_count(&self) -> usize {
+        self.nodes.len()
+    }
+
+    /// Start a search on an inherited tree from [`Self::into_subtree`].
+    ///
+    /// THE LOAD-BEARING DECISION: the Gumbel sequential-halving schedule is re-run
+    /// from scratch -- fresh draws, fresh candidates/survivors/rounds, `used = 0`,
+    /// budget reset. Only `visits`/`value_sum`/`value`/`prior` on inherited nodes
+    /// and edges are kept.
+    ///
+    /// Counting inherited visits toward the plan would break Gumbel's
+    /// policy-improvement guarantee, which rests on each candidate receiving a
+    /// PLANNED number of visits, and it would bias the target: a candidate with 40
+    /// inherited visits and 10 planned ones would dominate the visit-count policy
+    /// for reasons that have nothing to do with this search.
+    ///
+    /// The honest consequence: inherited statistics make each simulation BETTER
+    /// INFORMED, they do not make simulations unnecessary. The payoff shows up as
+    /// strength at equal simulations, not as fewer simulations for equal strength.
+    pub fn resume(
+        config: &Config,
+        inherited: Self,
+        params: PuctParams,
+        rng: Lcg32,
+    ) -> Result<Self> {
+        config.validate()?;
+        if config.rows != 9 || config.columns != 9 {
+            return Err(PuctError::UnsupportedBoard);
+        }
+        if params.simulations < 1 {
+            return Err(PuctError::InvalidSimulations);
+        }
+        if params.max_considered < 1 {
+            return Err(PuctError::InvalidMaxConsidered);
+        }
+        if !params.c_puct.is_finite() || params.c_puct <= 0.0 {
+            return Err(PuctError::InvalidCPuct);
+        }
+        if inherited.nodes.is_empty() {
+            return Err(PuctError::InvalidState);
+        }
+
+        let expanded = inherited.nodes[0].expanded;
+        // An expanded root has no network evaluation pending, so its raw value is
+        // gone -- what survives is the node's refined estimate. That is the best
+        // available and it is NOT the same number a fresh search would hold here,
+        // which is a real difference between a resumed root and a fresh one.
+        let root_value = if expanded { inherited.nodes[0].value } else { 0.0 };
+
+        let mut search = Self {
+            params,
+            rng,
+            root_value,
+            max_depth: 0,
+            used: 0,
+            budget: i64::from(params.simulations),
+            candidates: Vec::new(),
+            survivors: Vec::new(),
+            rounds: 1,
+            per_candidate: 0,
+            pass: 0,
+            next_survivor: 0,
+            round_fresh: true,
+            draining_single: false,
+            path: Vec::new(),
+            pending: Vec::new(),
+            virtual_loss: 0.0,
+            descent_keys: Vec::new(),
+            window_from: 0,
+            root_window_active: true,
+            pending_leaf: NO_CHILD,
+            phase: if expanded { Phase::Ready } else { Phase::RootPending },
+            ranking: Vec::new(),
+            ..inherited
+        };
+        if expanded {
+            search.seed_candidates();
+        }
+        Ok(search)
+    }
+
+    /// The tree rooted at the node reached by following `codes` from this root,
+    /// or `None` when that path was never expanded.
+    ///
+    /// This is the extraction half of tree reuse: after we move and the opponent
+    /// replies, the position we now face was a grandchild of the tree we are about
+    /// to throw away, and the visits under it are still valid statistics about the
+    /// same game.
+    ///
+    /// Only the arena and the repetition window come across. The Gumbel schedule is
+    /// NOT inherited -- see [`Self::resume`] for why that is load-bearing rather
+    /// than incidental.
+    #[must_use]
+    pub fn into_subtree(self, config: &Config, codes: &[u16]) -> Option<Self> {
+        let (nodes, edges, window) = self.extract_parts(config, codes)?;
+        Some(Self { nodes, edges, root_window: window, ..self })
+    }
+
+    /// Re-root IN PLACE, keeping the statistics; `false` when the path was not in
+    /// the tree and the caller must start fresh.
+    ///
+    /// Same extraction as [`Self::into_subtree`], in the shape a wasm binding can
+    /// actually use: consuming `self` across that boundary would mean holding the
+    /// search in an `Option` and unwrapping it in every other method.
+    pub fn reroot(&mut self, config: &Config, codes: &[u16]) -> bool {
+        match self.extract_parts(config, codes) {
+            Some((nodes, edges, window)) => {
+                self.nodes = nodes;
+                self.edges = edges;
+                self.root_window = window;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Reset the schedule for a new search on the tree this already holds.
+    ///
+    /// The statistics stay; everything the Gumbel plan owns is rebuilt. See
+    /// [`Self::resume`] for why that separation is load-bearing.
+    pub fn restart(&mut self, params: PuctParams, rng: Lcg32) -> Result<()> {
+        if params.simulations < 1 {
+            return Err(PuctError::InvalidSimulations);
+        }
+        if params.max_considered < 1 {
+            return Err(PuctError::InvalidMaxConsidered);
+        }
+        if !params.c_puct.is_finite() || params.c_puct <= 0.0 {
+            return Err(PuctError::InvalidCPuct);
+        }
+        let expanded = self.nodes[0].expanded;
+        self.params = params;
+        self.rng = rng;
+        self.root_value = if expanded { self.nodes[0].value } else { 0.0 };
+        self.max_depth = 0;
+        self.used = 0;
+        self.budget = i64::from(params.simulations);
+        self.candidates.clear();
+        self.survivors.clear();
+        self.rounds = 1;
+        self.per_candidate = 0;
+        self.pass = 0;
+        self.next_survivor = 0;
+        self.round_fresh = true;
+        self.draining_single = false;
+        self.path.clear();
+        self.pending.clear();
+        self.descent_keys.clear();
+        self.window_from = 0;
+        self.root_window_active = true;
+        self.pending_leaf = NO_CHILD;
+        self.ranking.clear();
+        // The inherited VALUE estimates stay; the inherited exploration counts do
+        // not get to drive this search's halving.
+        for edge in &mut self.edges {
+            edge.visits_since = 0;
+        }
+        self.phase = if expanded { Phase::Ready } else { Phase::RootPending };
+        if expanded {
+            self.seed_candidates();
+        }
+        Ok(())
+    }
+
+    fn extract_parts(
+        &self,
+        config: &Config,
+        codes: &[u16],
+    ) -> Option<(Vec<Node>, Vec<Edge>, RepetitionWindow)> {
+        // 1. Walk to the new root, rebasing the repetition window as we go.
+        //
+        // The new root's window is NOT the old root's. Each step either extends the
+        // window or, at a wall placement, starts a fresh one -- `resets_window`
+        // records which. Getting this wrong changes threefold adjudication silently:
+        // the search would see draws that are not there, or miss ones that are.
+        let mut window = self.root_window.clone();
+        let mut current = 0_u32;
+        for code in codes {
+            let node = self.nodes[current as usize];
+            if !node.expanded {
+                return None;
+            }
+            let start = node.edges_start as usize;
+            let end = start + node.edges_len as usize;
+            let edge = (start..end).find(|index| self.edges[*index].code == *code)?;
+            let child = self.edges[edge].child;
+            if child == NO_CHILD {
+                return None;
+            }
+            let key = position_key(config, &self.nodes[child as usize].position);
+            if self.nodes[child as usize].resets_window {
+                window.reset(key);
+            } else {
+                window.push(key);
+            }
+            current = child;
+        }
+
+        // 2. Reachability copy. The arena has no free list, so compacting in place
+        //    would leave a partial remap nobody can review; this builds fresh
+        //    vectors and remaps as it goes.
+        let mut mapping = vec![NO_CHILD; self.nodes.len()];
+        let mut nodes: Vec<Node> = Vec::new();
+        let mut edges: Vec<Edge> = Vec::new();
+        mapping[current as usize] = 0;
+        nodes.push(self.nodes[current as usize]);
+        let mut queue = vec![current];
+        let mut head = 0_usize;
+        while head < queue.len() {
+            let old = queue[head];
+            head += 1;
+            let new_index = mapping[old as usize] as usize;
+            let node = self.nodes[old as usize];
+            if !node.expanded {
+                nodes[new_index].edges_start = 0;
+                nodes[new_index].edges_len = 0;
+                continue;
+            }
+            let start = node.edges_start as usize;
+            let end = start + node.edges_len as usize;
+            let new_start = u32::try_from(edges.len()).ok()?;
+            for index in start..end {
+                let mut edge = self.edges[index];
+                if edge.child != NO_CHILD {
+                    let child = edge.child;
+                    if mapping[child as usize] == NO_CHILD {
+                        mapping[child as usize] = u32::try_from(nodes.len()).ok()?;
+                        nodes.push(self.nodes[child as usize]);
+                        queue.push(child);
+                    }
+                    edge.child = mapping[child as usize];
+                }
+                edges.push(edge);
+            }
+            nodes[new_index].edges_start = new_start;
+        }
+
+        // 3. `rep_count` is relative to a node's OWN window, and the window just
+        //    moved, so every copied node's count has to be recomputed rather than
+        //    carried over. Walk down from the new root carrying the window.
+        let root_key = position_key(config, &nodes[0].position);
+        nodes[0].rep_count = window.get(root_key);
+        let mut stack: Vec<(u32, RepetitionWindow)> = vec![(0, window.clone())];
+        while let Some((index, at)) = stack.pop() {
+            let node = nodes[index as usize];
+            let start = node.edges_start as usize;
+            let end = start + node.edges_len as usize;
+            for edge in start..end {
+                let child = edges[edge].child;
+                if child == NO_CHILD {
+                    continue;
+                }
+                let key = position_key(config, &nodes[child as usize].position);
+                let mut next = at.clone();
+                if nodes[child as usize].resets_window {
+                    next.reset(key);
+                } else {
+                    next.push(key);
+                }
+                nodes[child as usize].rep_count = next.get(key);
+                stack.push((child, next));
+            }
+        }
+
+        Some((nodes, edges, window))
+    }
+
+    /// The node ids currently awaiting evaluation, in collection order.
+    ///
+    /// Exposed so a caller (and the tests) can assert the batch holds DISTINCT
+    /// leaves: nothing in the descent guarantees it, and a repeat would be
+    /// expanded twice.
+    #[must_use]
+    pub fn pending_leaf_ids(&self) -> Vec<u32> {
+        self.pending.iter().map(|slot| slot.leaf).collect()
+    }
+
+    /// Set the in-flight penalty used by [`Self::collect_leaves`].
+    ///
+    /// Leave it at `0.0` for a search that is bit-identical to the sequential
+    /// one. See the field's documentation for why anything else is a different
+    /// algorithm rather than a scheduling change.
+    pub fn set_virtual_loss(&mut self, virtual_loss: f64) -> Result<()> {
+        if !virtual_loss.is_finite() || virtual_loss < 0.0 {
+            return Err(PuctError::InvalidEvaluation);
+        }
+        self.virtual_loss = virtual_loss;
+        Ok(())
+    }
+
+    /// Collect up to `max_n` leaves at once, writing each one's features into
+    /// its own `NN_INPUT_PLANES * cells` slice of `features`.
+    ///
+    /// Returns how many were collected; `0` means the search is finished. The
+    /// caller evaluates all of them together and hands the results back through
+    /// [`Self::submit_batch`] in the SAME order.
+    ///
+    /// The root is always a batch of one: nothing else can be selected until it
+    /// has been expanded.
+    ///
+    /// With `virtual_loss == 0.0` a batch never holds two descents into the same
+    /// root candidate. Sequential halving visits survivors on a fixed schedule
+    /// that no evaluation influences, and distinct survivors own disjoint
+    /// subtrees, so those descents cannot interact and batching them is a pure
+    /// scheduling change. That also bounds the batch: the last halving round
+    /// drains a single survivor, and that phase stays serial.
+    pub fn collect_leaves(
+        &mut self,
+        config: &Config,
+        features: &mut [f32],
+        max_n: usize,
+    ) -> Result<usize> {
+        let stride = NN_INPUT_PLANES * config.cells();
+        if max_n == 0 || features.len() < stride * max_n {
+            return Err(PuctError::InvalidBufferLength);
+        }
+        if self.awaiting_evaluation() {
+            return Err(PuctError::OutOfOrderEvaluation);
+        }
+        self.pending.clear();
+        match self.phase {
+            Phase::Done => return Ok(0),
+            Phase::RootPending => {
+                self.encode(config, 0, &mut features[..stride]);
+                self.phase = Phase::RootAwaiting;
+                return Ok(1);
+            }
+            _ => {}
+        }
+
+        let mut seen: Vec<usize> = Vec::new();
+        while self.pending.len() < max_n {
+            // Without a penalty, stop rather than repeat a candidate: a second
+            // descent into a subtree that already has an unevaluated leaf would
+            // see stale statistics and could pick a different edge than the
+            // sequential search did.
+            let before = self.scheduler_state();
+            let Some(candidate) = self.next_candidate() else { break };
+            // A batch must not span a halving boundary. `halve()` ranks the
+            // survivors on their accumulated statistics, and a leaf still in
+            // flight has not contributed its value yet -- so halving mid-batch
+            // decides on stale numbers and keeps a different candidate than the
+            // sequential search would. Caught by the equivalence test: two
+            // candidates swapped visit counts while the total stayed right.
+            // ...but only when something is actually in flight. With an empty
+            // batch the halving reads complete statistics and is exactly what the
+            // sequential search does here, so deferring it would end the search a
+            // round early instead of protecting anything.
+            // BOTH guards require something to actually be in flight. A visit that
+            // lands on a terminal node scores and unwinds immediately, adding to
+            // `seen` without adding to `pending` -- so a later duplicate could break
+            // the loop with an EMPTY batch, which the caller reads as "search
+            // finished". That silently truncated the search: 241 simulations used of
+            // 256, with the lost visits coming off the two best candidates. An empty
+            // batch has nothing to conflict with, so neither guard applies to it.
+            let in_flight = !self.pending.is_empty();
+            let halved = self.survivors != before.0 && in_flight;
+            let repeat = self.virtual_loss == 0.0 && in_flight && seen.contains(&candidate);
+            if halved || repeat {
+                self.restore_scheduler(before);
+                break;
+            }
+            seen.push(candidate);
+            // Everything begin_visit/descend can mutate, so a descent that lands on a
+            // leaf already in this batch can be undone completely.
+            let nodes_before = self.nodes.len();
+            let depth_before = self.max_depth;
+            let used_before = self.used;
+            if self.begin_visit(config, candidate)? {
+                // A leaf stays UNEXPANDED until its evaluation is submitted, so a later
+                // descent in the same batch can land on it again -- the penalty is the
+                // only thing steering away, and one too small to change the argmax does
+                // not steer. Expanding a node twice allocates a second edge list,
+                // orphans the first, and unwinds the same path twice, inflating the
+                // statistics of exactly the line the search likes most.
+                if self.pending.iter().any(|slot| slot.leaf == self.pending_leaf) {
+                    // Undo the descent and end the batch; the visit happens next time,
+                    // against statistics that include this batch's results.
+                    for (_, edge) in &self.path {
+                        if self.edges[*edge as usize].child >= nodes_before as u32 {
+                            self.edges[*edge as usize].child = NO_CHILD;
+                        }
+                    }
+                    self.nodes.truncate(nodes_before);
+                    self.max_depth = depth_before;
+                    self.used = used_before;
+                    self.path.clear();
+                    self.pending_leaf = NO_CHILD;
+                    self.restore_scheduler(before);
+                    break;
+                }
+                let slot = self.pending.len();
+                self.encode(
+                    config,
+                    self.pending_leaf,
+                    &mut features[slot * stride..(slot + 1) * stride],
+                );
+                let path = core::mem::take(&mut self.path);
+                let leaf = self.pending_leaf;
+                if self.virtual_loss != 0.0 {
+                    self.apply_virtual_loss(&path, leaf);
+                }
+                self.pending.push(PendingLeaf { path, leaf });
+                self.pending_leaf = NO_CHILD;
+            }
+        }
+
+        if self.pending.is_empty() {
+            self.phase = Phase::Done;
+            return Ok(0);
+        }
+        self.phase = Phase::BatchAwaiting;
+        Ok(self.pending.len())
+    }
+
+    /// Hand back `n` evaluations for the leaves [`Self::collect_leaves`] produced,
+    /// in the order it produced them.
+    ///
+    /// `policies` is `n` consecutive `policy_size` vectors. Applying them in
+    /// collection order is what keeps the zero-penalty case bit-identical: every
+    /// node accumulates the same values in the same sequence as it would have
+    /// sequentially, so even the floating-point sums match.
+    pub fn submit_batch(
+        &mut self,
+        config: &Config,
+        policies: &[f32],
+        values: &[f64],
+        n: usize,
+    ) -> Result<()> {
+        let width = config.policy_size();
+        if policies.len() < width * n || values.len() < n {
+            return Err(PuctError::InvalidBufferLength);
+        }
+        if self.phase == Phase::RootAwaiting {
+            if n != 1 {
+                return Err(PuctError::OutOfOrderEvaluation);
+            }
+            return self.submit(config, &policies[..width], values[0]);
+        }
+        if self.phase != Phase::BatchAwaiting || n != self.pending.len() {
+            return Err(PuctError::OutOfOrderEvaluation);
+        }
+        // Validate the WHOLE batch before mutating anything: a half-applied batch
+        // would leave virtual loss on the paths that were never submitted.
+        for (index, value) in values[..n].iter().enumerate() {
+            if !value.is_finite() || !(-1.0..=1.0).contains(value) {
+                return Err(PuctError::InvalidEvaluation);
+            }
+            for probability in &policies[index * width..(index + 1) * width] {
+                if !probability.is_finite() || *probability < 0.0 {
+                    return Err(PuctError::InvalidEvaluation);
+                }
+            }
+        }
+
+        let pending = core::mem::take(&mut self.pending);
+        for (index, slot) in pending.into_iter().enumerate() {
+            if self.virtual_loss != 0.0 {
+                self.undo_virtual_loss(&slot.path, slot.leaf);
+            }
+            let value = values[index];
+            self.expand(config, slot.leaf, &policies[index * width..(index + 1) * width], value)?;
+            let node = &mut self.nodes[slot.leaf as usize];
+            node.visits += 1;
+            node.value_sum += value;
+            self.path = slot.path;
+            self.unwind(value);
+        }
+        self.path.clear();
+        self.phase = Phase::Ready;
+        Ok(())
+    }
+
+    /// The scheduler's whole mutable position, so a candidate can be looked at
+    /// and then put back.
+    fn scheduler_state(&self) -> (Vec<usize>, u32, u32, usize, bool, bool, i64) {
+        (
+            self.survivors.clone(),
+            self.per_candidate,
+            self.pass,
+            self.next_survivor,
+            self.round_fresh,
+            self.draining_single,
+            self.budget,
+        )
+    }
+
+    fn restore_scheduler(&mut self, state: (Vec<usize>, u32, u32, usize, bool, bool, i64)) {
+        let (survivors, per_candidate, pass, next_survivor, round_fresh, draining_single, budget) =
+            state;
+        self.survivors = survivors;
+        self.per_candidate = per_candidate;
+        self.pass = pass;
+        self.next_survivor = next_survivor;
+        self.round_fresh = round_fresh;
+        self.draining_single = draining_single;
+        self.budget = budget;
+    }
+
+    /// Charge an in-flight visit along `path` and its leaf, as a loss for the
+    /// side to move at each node. Mirrors `unwind`'s alternation exactly so the
+    /// undo is its inverse.
+    fn apply_virtual_loss(&mut self, path: &[(u32, u32)], leaf: u32) {
+        let vl = self.virtual_loss;
+        let node = &mut self.nodes[leaf as usize];
+        node.visits += 1;
+        node.value_sum -= vl;
+        let mut value = -vl;
+        for (node_index, edge_index) in path.iter().rev() {
+            value = -value;
+            let entry = &mut self.edges[*edge_index as usize];
+            entry.visits += 1;
+            entry.visits_since += 1;
+            entry.value_sum += value;
+            let entry = &mut self.nodes[*node_index as usize];
+            entry.visits += 1;
+            entry.value_sum += value;
+        }
+    }
+
+    fn undo_virtual_loss(&mut self, path: &[(u32, u32)], leaf: u32) {
+        let vl = self.virtual_loss;
+        let node = &mut self.nodes[leaf as usize];
+        node.visits -= 1;
+        node.value_sum += vl;
+        let mut value = -vl;
+        for (node_index, edge_index) in path.iter().rev() {
+            value = -value;
+            let entry = &mut self.edges[*edge_index as usize];
+            entry.visits -= 1;
+            entry.visits_since -= 1;
+            entry.value_sum -= value;
+            let entry = &mut self.nodes[*node_index as usize];
+            entry.visits -= 1;
+            entry.value_sum -= value;
+        }
     }
 
     pub fn submit(&mut self, config: &Config, policy: &[f32], value: f64) -> Result<()> {
@@ -1005,10 +1656,15 @@ impl PuctTreeSearch {
 
     /// Keep the top `ceil(k / 2)` by `g + logit + sigma(qhat)`.
     fn halve(&mut self) {
+        // `visits_since`, not `visits`: sigma scales the value term by how far THIS
+        // search has got, and inherited visits made it large from the first round,
+        // drowning the Gumbel noise and turning halving greedy on a stale estimate.
+        // For a search that never resumed the two are identical, so this changes
+        // nothing for one.
         let max_visits = self
             .survivors
             .iter()
-            .map(|index| self.edges[self.candidates[*index].edge as usize].visits)
+            .map(|index| self.edges[self.candidates[*index].edge as usize].visits_since)
             .max()
             .unwrap_or(0);
 
@@ -1234,6 +1890,7 @@ impl PuctTreeSearch {
             value = -value;
             let entry = &mut self.edges[edge as usize];
             entry.visits += 1;
+            entry.visits_since += 1;
             entry.value_sum += value;
             let entry = &mut self.nodes[node as usize];
             entry.visits += 1;
@@ -1288,6 +1945,7 @@ impl PuctTreeSearch {
                 code: *code,
                 prior,
                 visits: 0,
+                visits_since: 0,
                 value_sum: 0.0,
                 child: NO_CHILD,
             });
@@ -1343,6 +2001,9 @@ mod tests {
             code,
             prior,
             visits,
+            // These helpers build edges for a search that never resumed, where the
+            // two counters are by definition equal.
+            visits_since: visits,
             value_sum: f64::from(visits) * q,
             child: NO_CHILD,
         }

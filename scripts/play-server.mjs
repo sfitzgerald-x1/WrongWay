@@ -18,8 +18,12 @@
  * that is the forward on MPS, the rest HTTP and tree). So a move costs roughly
  * 3 ms x simulations -- ~0.4 s at 128, ~1.5 s at 512, ~3 s at 1024. That is why
  * the simulation count is a slider in the UI rather than a constant: it is the
- * strength/patience dial, and the sims ladder says each doubling is worth roughly
- * 85 Elo up to 128.
+ * strength/patience dial.
+ *
+ * The ladder used to read as though it went flat past 128 sims. It does not --
+ * that was the ROOT WIDTH, which was pinned at a constant while the budget moved.
+ * Width is now derived from the budget (see js/normal-duel-root-width.mjs), which
+ * is worth +58 Elo at this slider's 256 setting and +154 at 512.
  */
 
 import { createHash } from 'node:crypto';
@@ -29,6 +33,7 @@ import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 
+import { rootWidth } from '../js/normal-duel-root-width.mjs';
 import {
   createInitialState, applyAction, legalActions, decodeAction,
   positionKey, validateState, normalizePosition
@@ -36,6 +41,7 @@ import {
 import { CONFIG_9X9 } from '../tests/support/nn-runtime-fixture.mjs';
 import { createNetGuard } from './net-guard.mjs';
 import { createStore } from './play-store.mjs';
+import { loadRoster, pick as pickOpponent, publicView as rosterView } from './play-roster.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -43,6 +49,20 @@ const argv = process.argv.slice(2);
 const arg = (n, d) => { const i = argv.indexOf(`--${n}`); return i === -1 ? d : argv[i + 1]; };
 const PORT = Number(arg('port', 8177));
 const INFER = String(arg('infer', 'http://127.0.0.1:8099')).replace(/\/$/, '');
+// A roster makes the opponent a CHOICE rather than a deployment decision. Without
+// one the server behaves exactly as before: a single network at INFER.
+const ROSTER = loadRoster(arg('roster', process.env.WW_PLAY_ROSTER || ''));
+// Leaves per network round trip. 1 keeps the original one-at-a-time loop.
+//
+// The round trip, not the tree and not the GPU, is what a move costs: measured
+// ~9.7 ms whether it carries 1 position or 64, against a 4.4 ms forward that is
+// identical at batch 1 and batch 64. So a turn's latency is essentially the
+// number of round trips, and collapsing 257 of them into 22 is the whole game.
+const BATCH = Math.max(1, Number(arg('batch', process.env.WW_PLAY_BATCH || 1)) || 1);
+// The in-flight penalty. 0 keeps the search bit-identical to the sequential one
+// and caps a batch at the surviving candidates; above 0 it batches deeper and
+// becomes a DIFFERENT search, which is a strength question, not a speed one.
+const VIRTUAL_LOSS = Math.max(0, Number(arg('virtual-loss', process.env.WW_PLAY_VIRTUAL_LOSS || 0)) || 0);
 // Loopback by DEFAULT: this serves a game with no authentication, so exposing it on
 // a network has to be an explicit choice rather than something that happens because
 // a port was free. Pass --host 0.0.0.0 to publish it.
@@ -94,7 +114,12 @@ async function loadWasm() {
 // 8.8 ms of actual network time -- ~40 ms of delayed-ACK stall per simulation. Both
 // ends have to set it; one is not enough.
 const agent = new http.Agent({ keepAlive: true, maxSockets: 4, noDelay: true });
-const inferUrl = new URL(`${INFER}/infer`);
+const inferUrlCache = new Map();
+const inferUrlFor = (base) => {
+  let u = inferUrlCache.get(base);
+  if (!u) { u = new URL(`${base}/infer`); inferUrlCache.set(base, u); }
+  return u;
+};
 
 /**
  * The features MUST be copied out of wasm memory before any await.
@@ -107,7 +132,8 @@ const inferUrl = new URL(`${INFER}/infer`);
  * costs nothing. Found by a search-scaling run where it hung 1 game for 90 minutes at
  * 0% CPU, and it is the likeliest cause of a game freezing mid-turn on the site.
  */
-function inferOne(features) {
+function inferOne(features, base = INFER) {
+  const inferUrl = inferUrlFor(base);
   // copyBytesFrom, NOT Buffer.from: the latter coerces each float to a single byte
   // and silently sends a body a quarter of the right size.
   const body = Buffer.copyBytesFrom(features);   // copy NOW, before any await
@@ -132,6 +158,70 @@ function inferOne(features) {
     req.on('error', reject);
     req.end(body);
   });
+}
+
+/* ---------------------------------------------------------------- eval cache
+ * The network is FIXED for the life of this process, so a position's answer is
+ * the same number every time it is asked for. Serving a repeat from memory is
+ * therefore bit-identical to asking again, and removes a round trip -- unlike
+ * inheriting a search tree, which changes what the search ranks on and measured
+ * between -191 and +27 Elo depending on configuration.
+ *
+ * Measured in the eval harness: 48.3% of positions are repeats, and caching them
+ * cut wall time about 30%. Two sources, both present here: this game's walls
+ * commute, so the same position is reached by different move orders within one
+ * turn and the tree -- being a tree, not a DAG -- evaluates each arrival
+ * separately; and the position a player moves into was already explored last turn.
+ *
+ * Keyed on the FEATURE BYTES, never on the position. The features are what the
+ * network sees, so if the encoding carries ply or repetition state then two
+ * identical boards are legitimately different inputs and this cannot confuse them.
+ *
+ * GENERATIONS. Walls are only ever added in this ruleset -- `apply` pushes to
+ * `walls` and decrements stock, and no action removes one -- so once the game has
+ * N walls down, every cached position with fewer is unreachable. Entries are
+ * bucketed by wall count and whole buckets below the current one are dropped in a
+ * single map delete, AFTER a move has been served rather than before it.
+ */
+const evalCache = { buckets: new Map(), generation: 0, hits: 0, misses: 0 };
+
+const cacheKey = (features) => Buffer.from(
+  features.buffer, features.byteOffset, features.byteLength).toString('latin1');
+
+function cacheLookup(key) {
+  for (const bucket of evalCache.buckets.values()) {
+    const hit = bucket.get(key);
+    if (hit) return hit;
+  }
+  return undefined;
+}
+
+function cacheStore(key, value) {
+  let bucket = evalCache.buckets.get(evalCache.generation);
+  if (!bucket) { bucket = new Map(); evalCache.buckets.set(evalCache.generation, bucket); }
+  bucket.set(key, value);
+}
+
+/** Drop everything the game can no longer reach. Call AFTER serving a move. */
+function cacheEvict(wallCount) {
+  evalCache.generation = wallCount;
+  let dropped = 0;
+  for (const key of [...evalCache.buckets.keys()]) {
+    if (key < wallCount) { dropped += evalCache.buckets.get(key).size; evalCache.buckets.delete(key); }
+  }
+  return dropped;
+}
+
+/**
+ * Evaluate `n` positions in one request.
+ *
+ * The server answers CONCATENATED, not interleaved: `n * policyLen` policy
+ * floats first, then `n` values. Reading it as `n` records of `policyLen + 1`
+ * would silently pair every position with the wrong value.
+ */
+async function inferBatch(features, n, base = INFER) {
+  const out = await inferOne(features, base);
+  return out;
 }
 
 // ------------------------------------------------------------------ AI move
@@ -168,14 +258,69 @@ function inferOne(features) {
  * the inference server's own length check catches that. `netLeaves` is evidence, not a
  * proof of correctness.
  */
-async function aiMove({ wasm, memory }, state, sims, seed) {
+async function aiMove({ wasm, memory }, state, sims, seed, base = INFER) {
   const t0 = performance.now();
   const search = new wasm.NormalDuelSearch(
     JSON.stringify(CONFIG), JSON.stringify(state),
-    JSON.stringify({ simulations: sims, maxConsidered: 12, cPuct: 1.25, seed })
+    JSON.stringify({ simulations: sims, maxConsidered: rootWidth(sims), cPuct: 1.25, seed })
   );
   const guard = createNetGuard(search.policyLen());
   try {
+    if (BATCH > 1) {
+      const policyLen = search.policyLen();
+      const stride = search.featuresLen();          // one leaf's width, before resizing
+      search.configureBatch(BATCH);
+      search.setVirtualLoss(VIRTUAL_LOSS);
+      const one = new Float32Array(policyLen + 1);
+      for (;;) {
+        const n = search.collectLeaves();
+        if (n === 0) break;
+        // Rebuilt after every wasm call: an allocation can grow the heap and
+        // detach these views, which then read freed memory rather than throwing.
+        const features = new Float32Array(memory.buffer, search.featuresPtr(), stride * n);
+        // Serve what is known, send only what is not. `one` is filled per leaf
+        // below from either source, so the guard sees every leaf either way.
+        const keys = [];
+        const known = new Array(n);
+        const missIndex = [];
+        for (let i = 0; i < n; i += 1) {
+          const key = cacheKey(features.subarray(i * stride, (i + 1) * stride));
+          keys.push(key);
+          const hit = cacheLookup(key);
+          if (hit) { known[i] = hit; evalCache.hits += 1; }
+          else { missIndex.push(i); evalCache.misses += 1; }
+        }
+        let out = null;
+        if (missIndex.length) {
+          const send = new Float32Array(missIndex.length * stride);
+          missIndex.forEach((index, slot) => {
+            send.set(features.subarray(index * stride, (index + 1) * stride), slot * stride);
+          });
+          out = await inferBatch(send, missIndex.length, base);
+          const want = missIndex.length * policyLen + missIndex.length;
+          if (out.length !== want) {
+            throw new Error(`batch shape: got ${out.length} floats, want ${want}`);
+          }
+          missIndex.forEach((index, slot) => {
+            const record = new Float32Array(policyLen + 1);
+            record.set(out.subarray(slot * policyLen, (slot + 1) * policyLen), 0);
+            record[policyLen] = out[missIndex.length * policyLen + slot];
+            known[index] = record;
+            cacheStore(keys[index], record);
+          });
+        }
+        for (let i = 0; i < n; i += 1) {
+          search.batchLeafMask(i);
+          const mask = new Float32Array(memory.buffer, search.maskPtr(), policyLen);
+          const { probs, value } = guard.classify(known[i], mask);
+          new Float32Array(memory.buffer, search.policyPtr(), policyLen * BATCH)
+            .set(probs, i * policyLen);
+          new Float64Array(memory.buffer, search.valuesPtr(), BATCH)[i] = value;
+        }
+        search.submitBatch(n);
+        if (guard.doomed) break;
+      }
+    } else
     while (!search.isDone()) {
       search.nextLeaf();
       if (search.isDone()) break;
@@ -183,7 +328,7 @@ async function aiMove({ wasm, memory }, state, sims, seed) {
       // heap and detach an old ArrayBuffer, and a stale view then reads freed
       // memory rather than throwing.
       const features = new Float32Array(memory.buffer, search.featuresPtr(), search.featuresLen());
-      const out = await inferOne(features);
+      const out = await inferOne(features, base);
 
       // submit() wants NON-NEGATIVE PROBABILITIES over the whole policy vector, not
       // the network's raw logits, and it validates every entry -- including ones behind
@@ -234,9 +379,9 @@ let nextId = 1;
 // one entry per game it had ever hosted. Bounded by dropping the oldest, which is safe
 // because a game is addressed by id and an evicted one simply reads as unknown.
 const MAX_GAMES = 200;
-function freshGame(humanSide, sims) {
+function freshGame(humanSide, sims, opponent = null) {
   const id = String(nextId++);
-  games.set(id, { id, state: createInitialState(CONFIG), humanSide, sims, history: [] });
+  games.set(id, { id, state: createInitialState(CONFIG), humanSide, sims, opponent, history: [] });
   while (games.size > MAX_GAMES) games.delete(games.keys().next().value);
   return games.get(id);
 }
@@ -255,6 +400,12 @@ console.log(`[play] network at ${INFER}`);
 {
   const st = store.stats(); const g = store.googleReady();
   console.log(`[play] store ${st.dir}: ${st.users} users, ${st.games} games`);
+  if (ROSTER) {
+    console.log(`[play] roster: ${ROSTER.opponents.map((o) => o.id).join(', ')} `
+      + `(default ${ROSTER.defaultId})`);
+  } else {
+    console.log(`[play] roster: none -- single network at ${INFER}`);
+  }
   console.log(`[play] google sign-in: ${g.enabled ? 'enabled' : `disabled (missing ${g.missing.join(', ')})`}`);
 }
 
@@ -444,6 +595,11 @@ http.createServer(async (req, res) => {
         identified: Object.keys(ts).length > 0
       });
     }
+    if (req.method === 'GET' && req.url.startsWith('/api/opponents')) {
+      // null, not 404, when no roster is configured: "this deployment serves one
+      // network" is a normal answer, and the client renders no picker for it.
+      return json(res, 200, rosterView(ROSTER));
+    }
     if (req.method === 'GET' && req.url.startsWith('/api/leaderboard')) {
       return json(res, 200, { ...store.leaderboard(10), auth: store.googleReady() });
     }
@@ -501,14 +657,19 @@ http.createServer(async (req, res) => {
           detail: 'chaos/hammer/drop modes add actions the trained rules do not contain' });
       }
       const state = stateFromHistory(b.history || [], b.expect);
-      const mv = await aiMove(wasmBits, state, sims, Number(b.seed) || 1);
+      const opp = pickOpponent(ROSTER, b.opponent);
+      const mv = await aiMove(wasmBits, state, sims, Number(b.seed) || 1, opp ? opp.url : INFER);
+      // After the search, never before it. Walls only ever go down, so anything
+      // cached from a shallower position is unreachable and its bucket can go --
+      // a couple of map deletes, off the path to a move.
+      cacheEvict(state.position.walls.length);
       // Log every served move. Without this, "the app never asked" and "the app
       // asked and it failed" look identical from here -- and they need completely
       // different fixes.
-      console.log(`[play] move ply=${state.ply} sims=${sims} ${mv.ms}ms `
+      console.log(`[play] move${opp ? ' vs=' + opp.id : ''} ply=${state.ply} sims=${sims} ${mv.ms}ms `
         + `net=${mv.netLeaves}/${mv.leaves} v=${mv.rootValue.toFixed(3)} `
         + `-> ${JSON.stringify(mv.action)}`);
-      return json(res, 200, { ...mv, turn: state.position.turn, ply: state.ply });
+      return json(res, 200, { ...mv, turn: state.position.turn, ply: state.ply, opponent: opp ? opp.id : null });
     }
     if (req.method === 'GET' && req.url.startsWith('/sw.js')) {
       // The app is a PWA and registers a service worker that caches the shell. On
@@ -565,14 +726,26 @@ http.createServer(async (req, res) => {
       // ok tracks the NETWORK, not this process. This server is useless without the
       // net -- it will not substitute another opponent -- so "the HTTP layer is up"
       // is not a health answer worth giving.
-      return json(res, 200, { ok: Boolean(r), wasm: wasmBits.build, network: r, meta });
+      // Normalise the inference server's health into the field names the client
+      // reads. It answers `model_version`; the page renders `version` and
+      // `device`, so passing the payload through verbatim rendered the
+      // checkpoint chip as "? · ?" and left the recorded checkpoint EMPTY --
+      // a mismatch that looks like a missing network rather than a naming slip.
+      const network = r ? {
+        ...r,
+        version: r.version || r.model_version || null,
+        device: r.device || r.gpu || null
+      } : r;
+      return json(res, 200, { ok: Boolean(r), wasm: wasmBits.build, network, meta });
     }
     if (req.method === 'POST' && req.url.startsWith('/api/new')) {
       const b = await readBody(req);
-      const g = freshGame(b.humanSide === 'B' ? 'B' : 'A', Number(b.sims) || 128);
+      const g = freshGame(b.humanSide === 'B' ? 'B' : 'A', Number(b.sims) || 128,
+                          (pickOpponent(ROSTER, b.opponent) || {}).id || null);
       // If the human is B, A moves first and A is the machine.
       if (g.state.position.turn !== g.humanSide) {
-        const mv = await aiMove(wasmBits, g.state, g.sims, g.state.ply + 1);
+        const mv = await aiMove(wasmBits, g.state, g.sims, g.state.ply + 1,
+                                (pickOpponent(ROSTER, g.opponent) || {}).url || INFER);
         g.state = applyAction(CONFIG, g.state, mv.action);
         g.history.push({ by: 'ai', ...mv });
         return json(res, 200, view(g, { ai: mv }));
@@ -595,7 +768,10 @@ http.createServer(async (req, res) => {
       g.state = applyAction(CONFIG, g.state, b.action);
       g.history.push({ by: 'human', action: b.action });
       if (g.state.outcome.kind !== 'ongoing') return json(res, 200, view(g));
-      const mv = await aiMove(wasmBits, g.state, g.sims, g.state.ply + 1);
+      // The game's OWN opponent, not the request's: a game that could switch
+      // networks mid-match would have no single opponent to record a result against.
+      const mv = await aiMove(wasmBits, g.state, g.sims, g.state.ply + 1,
+                              (pickOpponent(ROSTER, g.opponent) || {}).url || INFER);
       g.state = applyAction(CONFIG, g.state, mv.action);
       g.history.push({ by: 'ai', ...mv });
       return json(res, 200, view(g, { ai: mv }));
