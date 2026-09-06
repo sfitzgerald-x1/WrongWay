@@ -84,8 +84,12 @@ fn decisive_options() -> SelfPlayOptions {
         exploration: Exploration::VisitTemperature,
         temperature: 1.0,
         temperature_moves: 16,
-        ply_cap: 120,
-        seed_base: 5,
+        // Re-baselined 2026-09-05 with the merged `v3` search: at seed 5 / cap 120
+        // the mock evaluator's eight games were all draws under the qtransform, which
+        // would have left the z column unexercised. Seed 42 / cap 200 keeps one
+        // decisive game, as the pre-merge arm had.
+        ply_cap: 200,
+        seed_base: 42,
         ..SelfPlayOptions::default()
     }
 }
@@ -247,16 +251,16 @@ fn the_v1_prefix_of_a_v2_record_is_the_v1_record() {
     check_arm(
         "draws",
         golden_options(),
-        &[0, 0, 0, 0],
-        &[48, 35, 29, 56],
-        (0, 0, 168),
+        &[0, 0, 2, 0],
+        &[39, 36, 60, 37],
+        (0, 0, 172),
     );
     check_arm(
         "decisive",
         decisive_options(),
-        &[0, 0, -1, 0, 0, 0, 0, 0],
-        &[32, 31, 72, 34, 47, 39, 35, 32],
-        (36, 36, 250),
+        &[0, 0, 0, 1, 0, 0, 0, 0],
+        &[50, 53, 54, 51, 41, 29, 31, 64],
+        (26, 25, 322),
     );
 }
 
@@ -542,4 +546,64 @@ fn an_unbuildable_window_budget_is_refused_at_construction() {
         ..SelfPlayOptions::default()
     };
     SelfPlayBatch::new(&config(), production).expect("32 games at the production cap must build");
+}
+
+/// Mint the fixture's per-arm values from THIS build. Ignored by default: it is
+/// the same computation `check_arm` performs, printed instead of asserted, for
+/// the documented re-baselines (the fixture's `note` records each one).
+///
+///   cargo test -p wrongway-normal-duel --test record_schema_v2 --release \
+///     -- --ignored --nocapture mint_fixture_values_from_this_build
+#[test]
+#[ignore]
+fn mint_fixture_values_from_this_build() {
+    for (arm, options) in [("draws", golden_options()), ("decisive", decisive_options())] {
+        let run = run(&config(), options);
+        let mut prefix = Vec::with_capacity(run.count * RECORD_PREFIX);
+        for index in 0..run.count {
+            prefix.extend_from_slice(&run.record(index)[..RECORD_PREFIX]);
+        }
+        let outcomes: Vec<i32> = run
+            .outcomes
+            .iter()
+            .map(|outcome| match outcome {
+                GameOutcome::Win(Player::A) => 1,
+                GameOutcome::Win(Player::B) => -1,
+                GameOutcome::Draw => 0,
+                GameOutcome::Ongoing => 2,
+            })
+            .collect();
+        let mut z = (0_usize, 0_usize, 0_usize);
+        for index in 0..run.count {
+            match run.record(index)[RECORD_PREFIX - 1] {
+                v if v > 0.5 => z.0 += 1,
+                v if v < -0.5 => z.1 += 1,
+                _ => z.2 += 1,
+            }
+        }
+        println!(
+            "MINT {{\"arm\":\"{arm}\",\"RecordCount\":{},\"PrefixDigest\":\"{:016x}\",\"MetaDigest\":\"{:016x}\",\"Outcomes\":{:?},\"PliesPlayed\":{:?},\"Z\":[{},{},{}]}}",
+            run.count,
+            digest_f32(&prefix),
+            digest_i32(&run.meta),
+            outcomes,
+            run.plies,
+            z.0,
+            z.1,
+            z.2
+        );
+    }
+}
+
+/// Sweep a few decisive-arm option sets under THIS build and print their
+/// outcomes, so a re-baseline can keep the arm that exercises the z column
+/// actually decisive. Ignored by default.
+#[test]
+#[ignore]
+fn sweep_decisive_candidates_under_this_build() {
+    for (seed, sims, cap) in [(5, 24, 120), (11, 24, 120), (23, 24, 120), (42, 24, 200), (5, 48, 200), (11, 48, 200), (99, 32, 200), (7, 64, 200)] {
+        let run = run(&config(), SelfPlayOptions { seed_base: seed, simulations: sims, ply_cap: cap, ..decisive_options() });
+        let outcomes: Vec<i32> = run.outcomes.iter().map(|o| match o { GameOutcome::Win(Player::A) => 1, GameOutcome::Win(Player::B) => -1, GameOutcome::Draw => 0, GameOutcome::Ongoing => 2 }).collect();
+        println!("SWEEP seed={seed} sims={sims} cap={cap} outcomes={outcomes:?} plies={:?} records={}", run.plies, run.count);
+    }
 }

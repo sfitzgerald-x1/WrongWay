@@ -75,6 +75,7 @@ fn leaf_evaluations(config: &Config, state: &GameState, simulations: u32) -> usi
         simulations,
         max_considered: 8,
         c_puct: 1.25,
+        ..PuctParams::default()
     };
     let root = RootContext::from_state(config, state).expect("root context");
     let mut tree =

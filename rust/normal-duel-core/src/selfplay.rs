@@ -72,6 +72,13 @@
 //! action — `PuctResult::improved_policy`, `pi'(a) ∝ exp(logit(a) +
 //! sigma(completedQ(a)))` — never a one-hot, and never the visit distribution.
 //!
+//! Unless [`SelfPlayOptions::root_mode`] is `Classic`, in which case there is no
+//! Gumbel root to improve on and the target is that root's visit distribution,
+//! `N(a) / sum N`. The paragraph below is the argument for why the visit
+//! distribution is the wrong target *under sequential halving*; it is not an
+//! argument against visit counts as such, and the classic arm exists to hold the
+//! other end of that distinction.
+//!
 //! It used to be the visit distribution, and that was the defect: under
 //! sequential halving the visit counts are the schedule rather than the search's
 //! opinion. At 128 simulations over 16 candidates the rounds spend 16x2, 8x4,
@@ -85,6 +92,13 @@
 //! finalists, and covers every legal action, which stops targeting unexamined
 //! moves to zero.
 //!
+//! [`SelfPlayOptions::dirichlet_epsilon`] does not change any of that. The
+//! floor perturbs the priors the search *selects* on; the target is still the
+//! improved policy over the network's own priors, so a b2 shard's records are
+//! the same kind of thing a b1 shard's are — they differ in which positions the
+//! search chose to spend its budget on, not in what the network is asked to
+//! imitate at those positions.
+//!
 //! Exploration records the *search's* target for the state actually visited
 //! even when the played move is not the search's argmax. The label answers
 //! "what did search think here", and that question does not change because a
@@ -94,7 +108,7 @@
 use crate::js_math::Lcg32;
 use crate::puct::{
     apply_action_code, compact_key, PuctError, PuctParams, PuctTreeSearch, RepetitionWindow,
-    RootContext,
+    RootContext, RootMode,
 };
 use crate::{Config, Player, SearchPosition, MAX_POLICY_CODES, NN_INPUT_PLANES};
 
@@ -180,8 +194,39 @@ pub enum Exploration {
 pub struct SelfPlayOptions {
     pub games: usize,
     pub simulations: u32,
+    /// Read only by [`RootMode::Gumbel`]; the classic root has no candidate set.
     pub max_considered: u32,
     pub c_puct: f64,
+    /// Which root algorithm the per-move searches run. Defaults to
+    /// [`RootMode::Gumbel`].
+    ///
+    /// Under [`RootMode::Classic`] the recorded policy target is the root's
+    /// visit distribution, so [`Exploration::VisitTemperature`] — which samples
+    /// the played move from the recorded target — becomes AlphaZero's own
+    /// recipe verbatim: sample from visit counts for
+    /// [`Self::temperature_moves`] plies, then play the argmax. That is not a
+    /// coincidence to rely on quietly; it is why the played-move rule needed no
+    /// second implementation for this arm, and it is pinned by
+    /// `tests/root_mode_classic.rs`.
+    pub root_mode: RootMode,
+    /// D3's Dirichlet root floor: `P'(a) = (1 - eps) * P(a) + eps * eta_a` over
+    /// the root's legal actions, `eta ~ Dir(alpha)`, applied to what the search
+    /// *explores* and never to what it *records*.
+    ///
+    /// `0.0` — the default — is byte-for-byte absent: no stream is created, no
+    /// draw is taken, and the shard is identical to one produced by a build
+    /// without D3. The b2 arm runs [`crate::puct::DEFAULT_DIRICHLET_EPSILON`].
+    ///
+    /// Applies under BOTH root modes. Under Gumbel it perturbs the logit the
+    /// Gumbel draw is added to; under Classic it perturbs `P` in the PUCT term,
+    /// which is AlphaZero's own placement.
+    pub dirichlet_epsilon: f64,
+    /// D3's concentration, read only when [`Self::dirichlet_epsilon`] is
+    /// positive and then required to lie in
+    /// `[MIN_DIRICHLET_ALPHA, 1)` — see [`crate::puct::MIN_DIRICHLET_ALPHA`],
+    /// which is a numerical bound and not a taste one. Defaults to
+    /// [`crate::puct::DEFAULT_DIRICHLET_ALPHA`].
+    pub dirichlet_alpha: f64,
     /// Which exploration recipe drives the played move.
     pub exploration: Exploration,
     /// Probability of playing a uniformly random legal move instead of the
@@ -214,6 +259,28 @@ pub struct SelfPlayOptions {
     /// game past the cap by the opening's length, which forked the shard at the
     /// first game to reach it. Adjudication still uses `config.ply_cap`.
     pub ply_cap: u64,
+    /// How much of the value target comes from the SEARCH rather than the game
+    /// outcome: `target = (1 - value_mix) * z + value_mix * searched_root_value`.
+    ///
+    /// `0.0` (the [`Default`]) writes `z` alone and is bit-identical to every
+    /// corpus this project has produced.
+    ///
+    /// WHY THIS EXISTS. The value head's only teacher has been `z`: one bit per
+    /// game supervising ~50 wall-phase plies. The oracle work established that
+    /// value quality, not move quality, is what separates nets at this strength
+    /// -- at stock <= 1 the champion and its 370-Elo-weaker ancestor blunder at
+    /// indistinguishable rates while their value error differs by 2x, and the
+    /// champion's own blunders are search blunders driven by a wrong-signed
+    /// value. The tree computes a better estimate of that same quantity on
+    /// every move and the recorder has always discarded it; see
+    /// [`crate::puct::PuctResult::searched_root_value`].
+    ///
+    /// Both terms are mover-perspective and in `[-1, 1]`, so the convex blend
+    /// is too. The TRAINER must still be told to accept a non-terminal value
+    /// (`softValue`): its default contract admits exactly -1, 0 and 1, and that
+    /// check is the only thing standing between a misaligned shard and a
+    /// training run that looks healthy.
+    pub value_mix: f64,
     /// Game `i` runs off `seed_base + i`, so a batch reproduces exactly.
     pub seed_base: u32,
     /// Optional forced openings as action-code sequences; game `i` uses
@@ -229,10 +296,14 @@ impl Default for SelfPlayOptions {
             simulations: 32,
             max_considered: 8,
             c_puct: crate::puct::DEFAULT_C_PUCT,
+            root_mode: RootMode::Gumbel,
+            dirichlet_epsilon: 0.0,
+            dirichlet_alpha: crate::puct::DEFAULT_DIRICHLET_ALPHA,
             exploration: Exploration::VisitTemperature,
             epsilon: 0.0,
             temperature: 1.0,
             temperature_moves: 0,
+            value_mix: 0.0,
             ply_cap: 200,
             seed_base: 0,
             openings: Vec::new(),
@@ -321,6 +392,9 @@ struct PendingPly {
     /// of [`RepetitionWindow`]'s insertion order.
     window: Vec<(u32, u32)>,
     action_code: u16,
+    /// The search's own value for this position, mover-perspective, kept so
+    /// `finish` can blend it with `z`. See [`SelfPlayOptions::value_mix`].
+    searched_value: f64,
 }
 
 #[derive(Debug)]
@@ -334,6 +408,12 @@ struct Game {
     /// ply, a pawn move extends the window and leaves it alone. Tracked from
     /// ply 0 so the forced opening is counted like any other move.
     history_start_ply: u64,
+    /// The number this game's main stream was constructed from, kept because
+    /// D3's Dirichlet is keyed on `(game_seed, ply)` and `rng` has advanced past
+    /// it by the first search. It is the seed, not the live state: the noise at
+    /// a ply must not depend on how many words the game happened to consume
+    /// before reaching it.
+    seed: u32,
     rng: Lcg32,
     search: Option<PuctTreeSearch>,
     plies: Vec<PendingPly>,
@@ -351,6 +431,7 @@ impl Game {
     fn start(config: &Config, options: &SelfPlayOptions, index: usize) -> Result<Self> {
         let state = crate::create_initial_state(config)?;
         let position = SearchPosition::from_position(config, &state.position)?;
+        let seed = options.seed_base.wrapping_add(index as u32);
         let mut game = Self {
             index,
             position,
@@ -362,7 +443,8 @@ impl Game {
                 position.turn,
             )),
             history_start_ply: 0,
-            rng: Lcg32::new(options.seed_base.wrapping_add(index as u32)),
+            seed,
+            rng: Lcg32::new(seed),
             search: None,
             plies: Vec::new(),
             outcome: GameOutcome::Ongoing,
@@ -447,7 +529,7 @@ impl Game {
             }
             if self.search.is_none() {
                 if self.outcome != GameOutcome::Ongoing || self.ply >= options.ply_cap {
-                    self.finish();
+                    self.finish(options.value_mix);
                     return Ok(false);
                 }
                 self.search = Some(PuctTreeSearch::new(
@@ -461,6 +543,12 @@ impl Game {
                         simulations: options.simulations,
                         max_considered: options.max_considered,
                         c_puct: options.c_puct,
+                        root_mode: options.root_mode,
+                        // `(seed, ply)` and not the live `rng`: D3's noise is a
+                        // pure function of which game and which ply this is.
+                        game_seed: self.seed,
+                        dirichlet_epsilon: options.dirichlet_epsilon,
+                        dirichlet_alpha: options.dirichlet_alpha,
                     },
                     self.rng,
                 )?);
@@ -599,13 +687,14 @@ impl Game {
             history_start_ply: self.history_start_ply,
             window,
             action_code: played,
+            searched_value: result.searched_root_value,
         });
         self.play(config, played)
     }
 
     /// Stamp `z` onto every recorded ply and flatten them into the record
     /// buffer. `z` is from that ply's mover's perspective, as the trainer wants.
-    fn finish(&mut self) {
+    fn finish(&mut self, value_mix: f64) {
         self.finished = true;
         self.records.reserve(self.plies.len() * RECORD_FLOATS);
         self.meta.reserve(self.plies.len() * RECORD_META_FIELDS);
@@ -625,7 +714,15 @@ impl Game {
             self.records.extend_from_slice(&ply.features);
             self.records.extend_from_slice(&ply.policy_target);
             self.records.extend_from_slice(&ply.legal_mask);
-            self.records.push(z);
+            // The value target. At `value_mix = 0` this is `z` and the byte
+            // written is identical to every corpus before this option existed;
+            // the multiply-by-zero is deliberate rather than branched so the
+            // two paths cannot drift. Both terms are mover-perspective and in
+            // [-1, 1], so the convex blend is too and no clamp can fire; the
+            // trainer's range check remains the guard against a writer that
+            // breaks that invariant.
+            let target = (1.0 - value_mix) * z + value_mix * ply.searched_value;
+            self.records.push(target as f32);
             // The v1 record ends at `z`. Everything after this line is v2, and
             // it is appended rather than interleaved so the prefix a v1 consumer
             // slices is the identical run of bytes it always was.
@@ -742,12 +839,13 @@ impl SelfPlayBatch {
         // and the recorded policy target became one-hot at a position with ~130
         // legal codes -- silently, at full record count. That degenerate target
         // removes AlphaZero's improvement ratchet and cost an earlier run 114
-        // flat iterations. The v2 target cannot produce that one-hot (the
-        // improved policy is a distribution over every legal action however the
-        // budget was spent), but a search that runs no simulations still has no
-        // opinion to record: with nothing visited, every completed Q is the root
-        // value and the target collapses to the network's own prior, which
-        // teaches the policy head only what it already said. `max_considered ==
+        // flat iterations. The completed-Q target cannot produce that one-hot
+        // (the improved policy is a distribution over every legal action however
+        // the budget was spent), but a search that runs no simulations still has
+        // no opinion to record: with nothing visited every completed Q is
+        // `v_mix`, which with no visits is the root value, so under `v3` the
+        // target is EXACTLY the renormalised prior -- it teaches the policy head
+        // only what it already said. `max_considered ==
         // 0` was already rejected, so accepting this was an asymmetry rather than
         // a decision, and the trigger is mundane: `Number('')` is 0, so any
         // driver resolving its sim count from an unset environment variable
@@ -781,6 +879,25 @@ impl SelfPlayBatch {
             && !(options.temperature.is_finite() && options.temperature > 0.0)
         {
             return Err(PuctError::InvalidEvaluation);
+        }
+        // D3's floor, checked here as well as in `PuctTreeSearch::new`. The
+        // search's own check is the real guard -- it is what every entry point
+        // funnels through -- but it would not fire until the first root of the
+        // first game was expanded, i.e. after a driver had already allocated a
+        // shard's worth of buffers and run a network forward pass. Rejecting a
+        // malformed `alpha` at construction makes it a startup error the operator
+        // sees instead of a mid-shard one.
+        if !options.dirichlet_epsilon.is_finite()
+            || !(0.0..=1.0).contains(&options.dirichlet_epsilon)
+        {
+            return Err(PuctError::InvalidDirichlet);
+        }
+        if options.dirichlet_epsilon > 0.0
+            && !(options.dirichlet_alpha.is_finite()
+                && options.dirichlet_alpha >= crate::puct::MIN_DIRICHLET_ALPHA
+                && options.dirichlet_alpha < 1.0)
+        {
+            return Err(PuctError::InvalidDirichlet);
         }
         let games = (0..options.games)
             .map(|index| Game::start(config, &options, index))
