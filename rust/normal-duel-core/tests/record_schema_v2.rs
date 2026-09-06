@@ -557,7 +557,10 @@ fn an_unbuildable_window_budget_is_refused_at_construction() {
 #[test]
 #[ignore]
 fn mint_fixture_values_from_this_build() {
-    for (arm, options) in [("draws", golden_options()), ("decisive", decisive_options())] {
+    for (arm, options) in [
+        ("draws", golden_options()),
+        ("decisive", decisive_options()),
+    ] {
         let run = run(&config(), options);
         let mut prefix = Vec::with_capacity(run.count * RECORD_PREFIX);
         for index in 0..run.count {
@@ -601,9 +604,38 @@ fn mint_fixture_values_from_this_build() {
 #[test]
 #[ignore]
 fn sweep_decisive_candidates_under_this_build() {
-    for (seed, sims, cap) in [(5, 24, 120), (11, 24, 120), (23, 24, 120), (42, 24, 200), (5, 48, 200), (11, 48, 200), (99, 32, 200), (7, 64, 200)] {
-        let run = run(&config(), SelfPlayOptions { seed_base: seed, simulations: sims, ply_cap: cap, ..decisive_options() });
-        let outcomes: Vec<i32> = run.outcomes.iter().map(|o| match o { GameOutcome::Win(Player::A) => 1, GameOutcome::Win(Player::B) => -1, GameOutcome::Draw => 0, GameOutcome::Ongoing => 2 }).collect();
-        println!("SWEEP seed={seed} sims={sims} cap={cap} outcomes={outcomes:?} plies={:?} records={}", run.plies, run.count);
+    for (seed, sims, cap) in [
+        (5, 24, 120),
+        (11, 24, 120),
+        (23, 24, 120),
+        (42, 24, 200),
+        (5, 48, 200),
+        (11, 48, 200),
+        (99, 32, 200),
+        (7, 64, 200),
+    ] {
+        let run = run(
+            &config(),
+            SelfPlayOptions {
+                seed_base: seed,
+                simulations: sims,
+                ply_cap: cap,
+                ..decisive_options()
+            },
+        );
+        let outcomes: Vec<i32> = run
+            .outcomes
+            .iter()
+            .map(|o| match o {
+                GameOutcome::Win(Player::A) => 1,
+                GameOutcome::Win(Player::B) => -1,
+                GameOutcome::Draw => 0,
+                GameOutcome::Ongoing => 2,
+            })
+            .collect();
+        println!(
+            "SWEEP seed={seed} sims={sims} cap={cap} outcomes={outcomes:?} plies={:?} records={}",
+            run.plies, run.count
+        );
     }
 }

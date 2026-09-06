@@ -786,8 +786,6 @@ fn most_visited(edges: &[Edge]) -> u16 {
     chosen
 }
 
-
-
 /// `Math.ceil(Math.log2(Math.max(m, 2)))` without a logarithm: the smallest
 /// `r` with `2^r >= max(m, 2)`. Verified equal to the JavaScript expression for
 /// every `m` in `1..=209`, the whole reachable candidate range — an integer
@@ -2451,10 +2449,6 @@ mod tests {
         assert!(improved_policy(&[], 0.0).is_empty());
     }
 
-
-
-
-
     /// An action the halving never visited is completed with the root value, so
     /// two unvisited actions are separated by their priors alone — which is how
     /// the improved policy covers moves the considered set skipped instead of
@@ -2471,9 +2465,6 @@ mod tests {
         let policy = improved_policy(&[edge(2, 0.9, 0, 0.0), edge(8, 0.1, 4, 0.5)], -0.3);
         assert!(mass(&policy, 8) > mass(&policy, 2));
     }
-
-
-
 
     #[test]
     fn clamp_value_passes_nan_through_like_javascript() {

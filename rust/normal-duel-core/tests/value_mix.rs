@@ -25,7 +25,10 @@ fn config() -> Config {
         ruleset: RULESET.into(),
         rows: 9,
         columns: 9,
-        start: Players { a: Coord { r: 8, c: 4 }, b: Coord { r: 0, c: 4 } },
+        start: Players {
+            a: Coord { r: 8, c: 4 },
+            b: Coord { r: 0, c: 4 },
+        },
         goal_rows: Players { a: 0, b: 8 },
         initial_stock: Players { a: 10, b: 10 },
         jump_rule: JUMP_RULE.into(),
