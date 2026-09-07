@@ -656,6 +656,17 @@ impl NormalDuelSelfPlayBatch {
     }
 
     /// Drain finished games into the record sink; returns the record count.
+    /// How many of this batch's records carry the solver's exact value instead of
+    /// `z`. Zero on a shard that asked for `rescoreSolved` means the lever never
+    /// fired -- most likely a staged engine without it, which ignores the key in
+    /// silence -- and that reading is the only thing separating an armed arm from
+    /// one that merely says it is. Read after `takeRecords()`.
+    #[wasm_bindgen(js_name = rescoredPlies)]
+    #[must_use]
+    pub fn rescored_plies(&self) -> u32 {
+        u32::try_from(self.inner.rescored_plies()).unwrap_or(u32::MAX)
+    }
+
     #[wasm_bindgen(js_name = takeRecords)]
     pub fn take_records(&mut self) -> usize {
         self.inner.take_records()
