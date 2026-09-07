@@ -583,11 +583,21 @@ pub fn solve_zero_stock(
     let table = wrongway_normal_duel::endgame::solve_layout(&config, &state.position.walls)
         .map_err(|error| js_error(format!("{error:?}")))?;
     let verdict = table.lookup(&config, state.position.pawns, state.position.turn);
-    let action = table.best_move(&config, &state.position.walls, state.position.pawns, state.position.turn);
-    let (Some(verdict), Some(action)) = (verdict, action) else { return Ok(None) };
+    let action = table.best_move(
+        &config,
+        &state.position.walls,
+        state.position.pawns,
+        state.position.turn,
+    );
+    let (Some(verdict), Some(action)) = (verdict, action) else {
+        return Ok(None);
+    };
     let (winner, plies) = match verdict {
         wrongway_normal_duel::endgame::Endgame::Wins { player, plies } => (
-            match player { wrongway_normal_duel::Player::A => "A", wrongway_normal_duel::Player::B => "B" },
+            match player {
+                wrongway_normal_duel::Player::A => "A",
+                wrongway_normal_duel::Player::B => "B",
+            },
             plies,
         ),
         wrongway_normal_duel::endgame::Endgame::Draw => ("", 0),
@@ -965,6 +975,16 @@ impl NormalDuelSearch {
                     simulations: dto.simulations,
                     max_considered: dto.max_considered,
                     c_puct: dto.c_puct,
+                    // Identical to the constructor above, and it must stay identical: a
+                    // reroot continues ONE search onto a new root, so a restart that
+                    // configured the root differently would silently change the search
+                    // mid-game. Gumbel root and no Dirichlet floor, for the reasons given
+                    // there -- matchplay has no game seed or self-play ply to key a
+                    // stream on, and the floor is a training device.
+                    root_mode: RootMode::Gumbel,
+                    game_seed: 0,
+                    dirichlet_epsilon: 0.0,
+                    dirichlet_alpha: wrongway_normal_duel::puct::DEFAULT_DIRICHLET_ALPHA,
                 },
                 Lcg32::new(dto.seed),
             )

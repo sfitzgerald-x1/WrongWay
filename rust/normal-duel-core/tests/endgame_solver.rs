@@ -8,8 +8,8 @@
 //! the jump rule being the obvious candidate -- the rollout diverges and this fails.
 use wrongway_normal_duel::endgame::{solve_layout, Endgame};
 use wrongway_normal_duel::{
-    apply_legal_action, decode_action, Action, Config, Coord,
-    create_initial_state, legal_actions, GameState, Player, Players,
+    apply_legal_action, create_initial_state, decode_action, legal_actions, Action, Config, Coord,
+    GameState, Player, Players,
 };
 
 #[path = "common/state_pool.rs"]
@@ -28,17 +28,29 @@ fn config() -> Config {
 /// actually produce, which a hand-picked twenty walls might not be.
 fn played_to_zero_stock(config: &Config, seed: u32) -> Option<GameState> {
     let mut random = seed.wrapping_mul(0x9e37_79b9) ^ 0x85eb_ca6b;
-    let mut next = || { random ^= random << 13; random ^= random >> 17; random ^= random << 5; random };
+    let mut next = || {
+        random ^= random << 13;
+        random ^= random >> 17;
+        random ^= random << 5;
+        random
+    };
     let mut state = create_initial_state(config).ok()?;
     for _ in 0..400 {
-        if !state.outcome.is_ongoing() { return None; }
+        if !state.outcome.is_ongoing() {
+            return None;
+        }
         if state.position.stock.a == 0 && state.position.stock.b == 0 {
             return Some(state);
         }
         let actions = legal_actions(config, &state).ok()?;
-        if actions.is_empty() { return None; }
+        if actions.is_empty() {
+            return None;
+        }
         // Prefer walls: the point is to exhaust stock before someone crosses.
-        let walls: Vec<&Action> = actions.iter().filter(|a| matches!(a, Action::Wall { .. })).collect();
+        let walls: Vec<&Action> = actions
+            .iter()
+            .filter(|a| matches!(a, Action::Wall { .. }))
+            .collect();
         let action = if !walls.is_empty() && next() % 10 < 8 {
             walls[(next() as usize) % walls.len()].clone()
         } else {
@@ -59,9 +71,15 @@ fn a_race_with_no_interaction_is_plain_arithmetic() {
     let a = Coord { r: 8, c: 0 };
     let b = Coord { r: 0, c: 8 };
     for (turn, expected) in [(Player::A, Player::A), (Player::B, Player::B)] {
-        match table.lookup(&config, Players { a, b }, turn).expect("on board") {
+        match table
+            .lookup(&config, Players { a, b }, turn)
+            .expect("on board")
+        {
             Endgame::Wins { player, plies } => {
-                assert_eq!(player, expected, "whoever moves first should win an open race");
+                assert_eq!(
+                    player, expected,
+                    "whoever moves first should win an open race"
+                );
                 assert_eq!(plies, 15, "eight moves interleaved with seven");
             }
             Endgame::Draw => panic!("an open race is not a draw"),
@@ -79,11 +97,21 @@ fn pawn_interaction_beats_the_distance_count() {
     let config = config();
     let table = solve_layout(&config, &[]).expect("solves");
     let same_file = table
-        .lookup(&config, Players { a: Coord { r: 8, c: 4 }, b: Coord { r: 0, c: 4 } }, Player::A)
+        .lookup(
+            &config,
+            Players {
+                a: Coord { r: 8, c: 4 },
+                b: Coord { r: 0, c: 4 },
+            },
+            Player::A,
+        )
         .expect("on board");
     assert_eq!(
         same_file,
-        Endgame::Wins { player: Player::B, plies: 16 },
+        Endgame::Wins {
+            player: Player::B,
+            plies: 16
+        },
         "sharing a file must change the result; if this ever reads A in 15 the \
          solver has been replaced by distance counting"
     );
@@ -98,31 +126,57 @@ fn playing_the_solved_line_ends_exactly_as_the_table_says() {
     let config = config();
     let mut checked = 0;
     for seed in 1..40_u32 {
-        let Some(start) = played_to_zero_stock(&config, seed) else { continue };
+        let Some(start) = played_to_zero_stock(&config, seed) else {
+            continue;
+        };
         let walls = start.position.walls.clone();
         let table = solve_layout(&config, &walls).expect("solves");
         let Some(Endgame::Wins { player, plies }) =
-            table.lookup(&config, start.position.pawns, start.position.turn) else { continue };
+            table.lookup(&config, start.position.pawns, start.position.turn)
+        else {
+            continue;
+        };
 
         let mut game = start;
         let mut played = 0_u32;
         let winner = loop {
-            if game.position.pawns.a.r == config.goal_rows.a { break Player::A; }
-            if game.position.pawns.b.r == config.goal_rows.b { break Player::B; }
-            assert!(played <= plies, "seed {seed}: the line ran past the promised {plies} plies");
+            if game.position.pawns.a.r == config.goal_rows.a {
+                break Player::A;
+            }
+            if game.position.pawns.b.r == config.goal_rows.b {
+                break Player::B;
+            }
+            assert!(
+                played <= plies,
+                "seed {seed}: the line ran past the promised {plies} plies"
+            );
             let code = table
                 .best_move(&config, &walls, game.position.pawns, game.position.turn)
                 .expect("a solved position has a move");
             let action = decode_action(&config, usize::from(code)).expect("legal code");
-            assert!(matches!(action, Action::Pawn { .. }), "zero stock leaves only pawn moves");
+            assert!(
+                matches!(action, Action::Pawn { .. }),
+                "zero stock leaves only pawn moves"
+            );
             game = apply_legal_action(&config, &game, &action)
                 .expect("the solver's move must be legal");
             played += 1;
         };
-        assert_eq!(winner, player, "seed {seed}: rollout produced a different winner");
-        assert_eq!(played, plies, "seed {seed}: rollout took a different number of plies");
+        assert_eq!(
+            winner, player,
+            "seed {seed}: rollout produced a different winner"
+        );
+        assert_eq!(
+            played, plies,
+            "seed {seed}: rollout took a different number of plies"
+        );
         checked += 1;
-        if checked >= 8 { break; }
+        if checked >= 8 {
+            break;
+        }
     }
-    assert!(checked >= 5, "only {checked} rollouts ran; the generator is not reaching zero stock");
+    assert!(
+        checked >= 5,
+        "only {checked} rollouts ran; the generator is not reaching zero stock"
+    );
 }

@@ -24,7 +24,10 @@ use crate::{Board, Config, Coord, NormalDuelError, Player, Players, Result};
 /// than the remaining ply cap is a draw in the game actually being played.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Endgame {
-    Wins { player: Player, plies: u32 },
+    Wins {
+        player: Player,
+        plies: u32,
+    },
     /// Neither side can force a crossing. Under threefold repetition and the ply
     /// cap this is the drawn result.
     Draw,
@@ -128,7 +131,10 @@ fn coord_index(config: &Config, coord: Coord) -> Option<usize> {
 
 fn coord_of(config: &Config, index: usize) -> Coord {
     let columns = config.columns as usize;
-    Coord { r: (index / columns) as u8, c: (index % columns) as u8 }
+    Coord {
+        r: (index / columns) as u8,
+        c: (index % columns) as u8,
+    }
 }
 
 /// Solve every zero-stock position on the board described by `walls`.
@@ -148,20 +154,25 @@ pub fn solve_layout(config: &Config, walls: &[String]) -> Result<EndgameTable> {
     let states = cells * cells * 2;
     let mut successors: Vec<Vec<u32>> = vec![Vec::new(); states];
     let mut codes = vec![0_u16; config.policy_size()];
-    let index = |a: usize, b: usize, turn: Player| ((a * cells) + b) * 2 + usize::from(turn == Player::B);
+    let index =
+        |a: usize, b: usize, turn: Player| ((a * cells) + b) * 2 + usize::from(turn == Player::B);
 
     for a in 0..cells {
         for b in 0..cells {
             if a == b {
                 continue;
             }
-            let pawns = Players { a: coord_of(config, a), b: coord_of(config, b) };
+            let pawns = Players {
+                a: coord_of(config, a),
+                b: coord_of(config, b),
+            };
             if decided(config, pawns).is_some() {
                 continue; // terminal: the game is already over here
             }
             for turn in [Player::A, Player::B] {
                 let mut stats = Default::default();
-                let count = board.legal_codes_into(config, pawns, zero, turn, &mut codes, &mut stats);
+                let count =
+                    board.legal_codes_into(config, pawns, zero, turn, &mut codes, &mut stats);
                 let here = index(a, b, turn);
                 for code in &codes[..count] {
                     let destination = usize::from(*code);
@@ -193,7 +204,10 @@ pub fn solve_layout(config: &Config, walls: &[String]) -> Result<EndgameTable> {
             if a == b {
                 continue;
             }
-            let pawns = Players { a: coord_of(config, a), b: coord_of(config, b) };
+            let pawns = Players {
+                a: coord_of(config, a),
+                b: coord_of(config, b),
+            };
             if let Some(winner) = decided(config, pawns) {
                 for turn in [Player::A, Player::B] {
                     let here = index(a, b, turn);
@@ -214,7 +228,11 @@ pub fn solve_layout(config: &Config, walls: &[String]) -> Result<EndgameTable> {
             if label[previous].is_some() {
                 continue;
             }
-            let mover = if previous % 2 == 0 { Player::A } else { Player::B };
+            let mover = if previous % 2 == 0 {
+                Player::A
+            } else {
+                Player::B
+            };
             if winner == mover {
                 // The mover can step into a position it already wins: take it, and
                 // the first one found is the shortest because the queue is in
@@ -232,7 +250,10 @@ pub fn solve_layout(config: &Config, walls: &[String]) -> Result<EndgameTable> {
         }
     }
 
-    Ok(EndgameTable { cells, entries: label })
+    Ok(EndgameTable {
+        cells,
+        entries: label,
+    })
 }
 
 /// The winner if this pawn placement has already ended the game.
@@ -250,7 +271,13 @@ impl Board {
     /// A board from a bare wall list, with no pawns involved.
     fn from_layout(config: &Config, walls: &[String]) -> Result<Self> {
         let position = crate::Position {
-            pawns: Players { a: Coord { r: 0, c: 0 }, b: Coord { r: config.rows - 1, c: 0 } },
+            pawns: Players {
+                a: Coord { r: 0, c: 0 },
+                b: Coord {
+                    r: config.rows - 1,
+                    c: 0,
+                },
+            },
             walls: walls.to_vec(),
             stock: Players { a: 0, b: 0 },
             turn: Player::A,
