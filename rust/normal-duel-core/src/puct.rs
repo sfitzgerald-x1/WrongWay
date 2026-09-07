@@ -1850,8 +1850,8 @@ impl PuctTreeSearch {
             let node = nodes[index as usize];
             let start = node.edges_start as usize;
             let end = start + node.edges_len as usize;
-            for edge in start..end {
-                let child = edges[edge].child;
+            for edge in &edges[start..end] {
+                let child = edge.child;
                 if child == NO_CHILD {
                     continue;
                 }
@@ -1941,6 +1941,26 @@ impl PuctTreeSearch {
             // sequential search did.
             let before = self.scheduler_state();
             let Some(candidate) = self.next_candidate() else {
+                // `next_candidate` runs the FINAL halve on its way to returning
+                // None -- `draining_single` is only reachable once the survivors
+                // are down to one -- and that halve ranks on whatever has been
+                // backed up so far. With leaves still in flight their visits are
+                // counted but their values are not, and v3's qtransform min-max
+                // rescales completed-Q over the ROOT's whole edge list, so a
+                // single un-backed-up visit moves the span and shifts EVERY
+                // candidate's boost. Under v2 the ranking read each survivor's
+                // own edge, so the distortion stayed local and this was survivable.
+                //
+                // The tree still ends identical -- the budget is spent, so no
+                // visit follows the last halve -- which is what makes this so
+                // quiet: visit counts, `simulations_used`, `rootValue` and the
+                // improved policy all match bit-for-bit, and only
+                // `survivors.first()` differs. That is the move the search
+                // returns. Roll back and let the next call redo the halve on
+                // complete statistics, exactly as the sequential search does.
+                if !self.pending.is_empty() {
+                    self.restore_scheduler(before);
+                }
                 break;
             };
             // A batch must not span a halving boundary. `halve()` ranks the

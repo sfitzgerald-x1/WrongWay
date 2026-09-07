@@ -221,7 +221,18 @@ fn a_walked_game_never_diverges_and_never_truncates() {
         }
         let seed = 12_345_u32 ^ ply.wrapping_mul(2_654_435_761);
         let want = sequential(&config, &state, seed);
-        for max_n in [8_usize, 32] {
+        // A WIDE sweep of batch sizes, not two. The last defect this test caught
+        // was the FINAL halve being taken while leaves were still in flight:
+        // `next_candidate` runs it on its way to returning `None`, and v3's
+        // qtransform min-max rescales completed-Q over the root's whole edge
+        // list, so one counted-but-un-backed-up visit shifted every candidate's
+        // boost and changed which survivor was left. Nothing else moved -- the
+        // budget is spent by then, so visit counts, `simulations_used`,
+        // `rootValue` and the improved policy stayed bit-identical and only the
+        // returned MOVE differed. Whether a batch is still open at that exact
+        // moment depends on `max_n`, so a two-element list is two samples of a
+        // condition that is not rare so much as narrow.
+        for max_n in [2_usize, 3, 4, 8, 16, 32] {
             let (got, _) = batched(&config, &state, seed, max_n, 0.0);
             assert_identical(&want, &got, &format!("ply {ply}, max_n {max_n}"));
             assert_eq!(
