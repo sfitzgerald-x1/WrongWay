@@ -9,7 +9,17 @@
  *
  *   { "version": PUCT_SEARCH_VERSION,
  *     "results": [ { actionCode, visitCounts, rootValueBits, simulationsUsed,
- *                    maxDepthReached, considered, scoreBits } ] }
+ *                    maxDepthReached, considered, allScoreBits } ] }
+ *
+ * `version` is the reference's own `PUCT_SEARCH_VERSION`. The Rust side has
+ * moved to `puct-az-tree-v3` (the mctx qtransform, in the halving ranking as
+ * well as the recorded target) while this reference stays frozen at `v1`; the
+ * Rust test asserts this string against `JS_REFERENCE_SEARCH_VERSION` so that
+ * freeze is a checked fact rather than a comment. Which fields the two engines
+ * are still required to agree on exactly, and which now diverge by design, is
+ * decided in `rust/normal-duel-core/tests/js_puct_parity.rs`, not here: this
+ * script dumps what the reference did and states nothing about what should
+ * match.
  *
  * `version` is the reference's own `PUCT_SEARCH_VERSION`. The Rust side has
  * moved to `puct-az-tree-v2` (completed-Q policy targets) while this reference
@@ -23,11 +33,17 @@
  * parses `0.48560023307800293` one ULP high, so a decimal round trip would fail
  * a search that is in fact exact — and, worse, could mask one that is not.
  *
- * `scores` is the per-candidate `g + logit` after the considered set is chosen,
- * in ascending code order. Nothing in the contract depends on it; it is dumped
- * so the Rust test can measure how much slack the Gumbel ranking has, which is
- * the one place a 1-ULP `Math.log` disagreement could ever matter. See
+ * `allScoreBits` is `g + logit` for EVERY legal root action, in ascending code
+ * order. Nothing in the contract depends on it; it is dumped so the Rust test
+ * can measure how much slack the Gumbel ranking has, which is the one place a
+ * 1-ULP `Math.log` disagreement could ever matter. See
  * `rust/normal-duel-core/src/js_math.rs`.
+ *
+ * It covers every action rather than only the considered ones because the
+ * margin that actually protects the search is the gap AT THE CUT — between the
+ * worst kept candidate and the best discarded one — and a dump restricted to
+ * the considered set cannot see it. At `maxConsidered = 1` it could not see any
+ * gap at all, and reported an empty ranking as infinite slack.
  *
  * Nothing here reimplements a rule, an encoding or a search.
  */
@@ -55,11 +71,11 @@ function doubleBits(value) {
 }
 
 /**
- * Re-derive each considered candidate's Gumbel score by replaying the draw
- * stream the search consumed. `puctSearch` does not expose the scores, and
+ * Re-derive every legal root action's Gumbel score by replaying the draw stream
+ * the search consumed. `puctSearch` does not expose the scores, and
  * instrumenting it would mean editing the module under test.
  */
-function candidateScores(seed, priorsByCode, considered) {
+function candidateScores(seed, priorsByCode) {
   const random = createLcg32(seed);
   const draws = new Map();
   for (const code of priorsByCode.keys()) {
@@ -69,7 +85,9 @@ function candidateScores(seed, priorsByCode, considered) {
     if (!(u < 1)) u = 1 - Number.EPSILON / 2;
     draws.set(code, -Math.log(-Math.log(u)));
   }
-  return considered.map((code) => draws.get(code) + Math.log(Math.max(priorsByCode.get(code), 1e-9)));
+  return [...priorsByCode.keys()].map(
+    (code) => draws.get(code) + Math.log(Math.max(priorsByCode.get(code), 1e-9))
+  );
 }
 
 /** The root priors, recomputed the way `expand` does: masked, renormalised. */
@@ -104,7 +122,7 @@ for (const state of states) {
       simulationsUsed: result.simulationsUsed,
       maxDepthReached: result.maxDepthReached,
       considered: [...result.considered],
-      scoreBits: candidateScores(testCase.seed, priors, result.considered).map(doubleBits)
+      allScoreBits: candidateScores(testCase.seed, priors).map(doubleBits)
     });
   }
 }

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wasm_bindgen::prelude::*;
 use wrongway_normal_duel::js_math::Lcg32;
-use wrongway_normal_duel::puct::{PuctParams, PuctTreeSearch};
+use wrongway_normal_duel::puct::{PuctParams, PuctTreeSearch, RootMode};
 use wrongway_normal_duel::selfplay::{
     Exploration, GameOutcome, SelfPlayBatch, SelfPlayOptions, RECORD_FEATURES, RECORD_FLOATS,
     RECORD_META_FIELDS, RECORD_POLICY, RECORD_STATE_FIELDS, RECORD_VERSION, RECORD_WINDOW_FIELDS,
@@ -377,14 +377,46 @@ pub fn normal_duel_search_for(request_json: &str) -> std::result::Result<String,
 
 /// Options DTO for [`NormalDuelSelfPlayBatch`]. JSON here is fine: it is read
 /// once at construction, off the hot path.
+///
+/// `deny_unknown_fields` for the same reason [`SearchOptionsRequest`] has it:
+/// the wire contract must not silently accept a misspelled tuning request.
+/// Every field here except `games`, `simulations` and `maxConsidered` has a
+/// default, so without it a typo is indistinguishable from an omission and the
+/// batch runs the default instead of what was asked for. That is not
+/// hypothetical for `rootMode`: `TRAINING-DESIGN-FIX.md` writes the option
+/// `root_mode` in prose, and snake_case, wrong case, or any other near-miss all
+/// used to parse cleanly and select the Gumbel arm — so a b3 shard could have
+/// been the Gumbel arm at 512 simulations, under the b3 label, and nothing in
+/// the records would have said so.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SelfPlayOptionsDto {
     games: usize,
     simulations: u32,
     max_considered: u32,
     #[serde(default = "default_c_puct")]
     c_puct: f64,
+    /// `"gumbel"` (default) or `"classic"`. Absent means Gumbel, so a driver
+    /// that predates the classic arm sends the same wire format and gets the
+    /// same search.
+    #[serde(default)]
+    root_mode: RootModeDto,
+    /// D3's Dirichlet root floor. Absent means `0.0`, which means absent in the
+    /// byte-for-byte sense — see [`SelfPlayOptions::dirichlet_epsilon`] — so a
+    /// driver that predates the floor sends the same wire format and gets the
+    /// same shard. The b2 arm sends `0.25`.
+    ///
+    /// The same `deny_unknown_fields` argument that applies to `rootMode`
+    /// applies here with more force: this key's effect is a *distribution*
+    /// change inside the search, so a b2 shard produced from a misspelled key
+    /// would be a b1 shard wearing b2's label, and no field in the records could
+    /// distinguish them.
+    #[serde(default)]
+    dirichlet_epsilon: f64,
+    /// D3's concentration. Read only when `dirichletEpsilon` is positive, and
+    /// then required to be in `(0, 1)`.
+    #[serde(default = "default_dirichlet_alpha")]
+    dirichlet_alpha: f64,
     /// `"visitTemperature"` (default) or `"uniformEpsilon"`. Spelled out rather
     /// than a bool so a third recipe does not have to break the wire format.
     #[serde(default)]
@@ -395,12 +427,66 @@ struct SelfPlayOptionsDto {
     temperature: f64,
     #[serde(default)]
     temperature_moves: u64,
+    /// `#[serde(default)]`, so a driver that predates the knob is unaffected and
+    /// its shards stay bit-identical. NOT optional in the other direction: the
+    /// DTO is `deny_unknown_fields`, so a driver that MISSPELLS it is refused at
+    /// construction rather than silently writing `z`-only targets under a name
+    /// that says otherwise -- which is exactly how `dirichletEpsilon` became a
+    /// no-op for a whole arm on the main-lineage build.
+    #[serde(default)]
+    value_mix: f64,
     #[serde(default = "default_ply_cap")]
     ply_cap: u64,
     #[serde(default)]
     seed_base: u32,
     #[serde(default)]
     openings: Vec<Vec<u16>>,
+}
+
+/// Kept as a `From` rather than inlined into the constructor so the wire
+/// format's *meaning* can be tested natively: [`NormalDuelSelfPlayBatch::new`]
+/// returns a `JsValue`, which is not constructible off wasm32, so a test that
+/// went through the constructor could not run under `cargo test`. An option the
+/// boundary parses and then drops is the failure `contradictory_exploration`
+/// exists for, and this one would not be visible from the JS side either -- the
+/// batch would simply run the wrong arm and report nothing unusual.
+impl From<SelfPlayOptionsDto> for SelfPlayOptions {
+    fn from(dto: SelfPlayOptionsDto) -> Self {
+        Self {
+            games: dto.games,
+            simulations: dto.simulations,
+            max_considered: dto.max_considered,
+            c_puct: dto.c_puct,
+            root_mode: dto.root_mode.into(),
+            dirichlet_epsilon: dto.dirichlet_epsilon,
+            dirichlet_alpha: dto.dirichlet_alpha,
+            exploration: dto.exploration.into(),
+            epsilon: dto.epsilon,
+            temperature: dto.temperature,
+            temperature_moves: dto.temperature_moves,
+            value_mix: dto.value_mix,
+            ply_cap: dto.ply_cap,
+            seed_base: dto.seed_base,
+            openings: dto.openings,
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum RootModeDto {
+    #[default]
+    Gumbel,
+    Classic,
+}
+
+impl From<RootModeDto> for RootMode {
+    fn from(dto: RootModeDto) -> Self {
+        match dto {
+            RootModeDto::Gumbel => RootMode::Gumbel,
+            RootModeDto::Classic => RootMode::Classic,
+        }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -426,6 +512,10 @@ fn default_temperature() -> f64 {
 
 fn default_c_puct() -> f64 {
     wrongway_normal_duel::puct::DEFAULT_C_PUCT
+}
+
+fn default_dirichlet_alpha() -> f64 {
+    wrongway_normal_duel::puct::DEFAULT_DIRICHLET_ALPHA
 }
 
 fn default_ply_cap() -> u64 {
@@ -477,21 +567,8 @@ impl NormalDuelSelfPlayBatch {
         let config = parse_config(config_json).map_err(js_error)?;
         let dto: SelfPlayOptionsDto = serde_json::from_str(options_json)
             .map_err(|_| js_error("invalid_options".to_owned()))?;
-        let options = SelfPlayOptions {
-            games: dto.games,
-            simulations: dto.simulations,
-            max_considered: dto.max_considered,
-            c_puct: dto.c_puct,
-            exploration: dto.exploration.into(),
-            epsilon: dto.epsilon,
-            temperature: dto.temperature,
-            temperature_moves: dto.temperature_moves,
-            ply_cap: dto.ply_cap,
-            seed_base: dto.seed_base,
-            openings: dto.openings,
-        };
         let inner =
-            SelfPlayBatch::new(&config, options).map_err(|error| js_error(error.to_string()))?;
+            SelfPlayBatch::new(&config, dto.into()).map_err(|error| js_error(error.to_string()))?;
         Ok(Self { inner })
     }
 
@@ -756,6 +833,24 @@ impl NormalDuelSearch {
             simulations: dto.simulations,
             max_considered: dto.max_considered,
             c_puct: dto.c_puct,
+            // Not an option here, deliberately. `NormalDuelSearch` is the
+            // matchplay/parity entry point: it is what
+            // `tests/normal-duel-wasm-search-wrapper-parity.test.mjs` compares
+            // against the frozen JavaScript reference, which has one root
+            // algorithm. The classic arm is a *training* control and reaches the
+            // engine through `NormalDuelSelfPlayBatch`, which is the only driver
+            // that produces records.
+            root_mode: RootMode::Gumbel,
+            // D3's floor is off here for the same reason, and one more: a
+            // matchplay search has no game seed and no self-play ply to key a
+            // stream on, and an exploration floor is a *training* device -- it
+            // deliberately plays moves the search does not believe in. With
+            // `dirichlet_epsilon` at zero no stream is created and `game_seed`
+            // is never read, so the parity fixture this entry point is compared
+            // against cannot move.
+            game_seed: 0,
+            dirichlet_epsilon: 0.0,
+            dirichlet_alpha: wrongway_normal_duel::puct::DEFAULT_DIRICHLET_ALPHA,
         };
         let inner = PuctTreeSearch::from_state(&config, &state, params, Lcg32::new(dto.seed))
             .map_err(|error| js_error(error.reason().to_owned()))?;
@@ -1700,5 +1795,140 @@ mod tests {
             "the partial and finished targets differ by only {drift}, which would make \
              this test's premise false rather than its guard unnecessary"
         );
+    }
+
+    /// The classic arm's only switch is this JSON key, and a boundary that
+    /// parsed it into nothing would run the Gumbel arm under the classic arm's
+    /// name -- a clean-looking run answering the wrong question.
+    #[test]
+    fn self_play_options_carry_the_root_mode_across_the_json_boundary() {
+        let base = json!({"games": 2, "simulations": 8, "maxConsidered": 4});
+        let decode = |value: &Value| -> std::result::Result<SelfPlayOptions, ()> {
+            serde_json::from_value::<SelfPlayOptionsDto>(value.clone())
+                .map(Into::into)
+                .map_err(|_| ())
+        };
+
+        // Absent means Gumbel: a driver that predates the arm is unaffected.
+        assert_eq!(
+            decode(&base).expect("defaults parse").root_mode,
+            RootMode::Gumbel
+        );
+
+        let mut classic = base.clone();
+        classic["rootMode"] = json!("classic");
+        assert_eq!(
+            decode(&classic).expect("classic parses").root_mode,
+            RootMode::Classic
+        );
+
+        let mut gumbel = base.clone();
+        gumbel["rootMode"] = json!("gumbel");
+        assert_eq!(
+            decode(&gumbel).expect("gumbel parses").root_mode,
+            RootMode::Gumbel
+        );
+
+        // A misspelled VALUE is refused, not defaulted. `invalid_options` at
+        // construction is a driver bug an operator can see; silently running the
+        // other arm is not.
+        for spelling in ["Classic", "az-classic", "", "puct"] {
+            let mut bogus = base.clone();
+            bogus["rootMode"] = json!(spelling);
+            assert!(
+                decode(&bogus).is_err(),
+                "rootMode {spelling:?} should be refused"
+            );
+        }
+    }
+
+    /// D3's floor is two numbers on the wire, and a boundary that dropped
+    /// either would produce a b1 shard under b2's label — the same failure mode
+    /// as a dropped `rootMode`, but harder to spot afterwards, since both arms
+    /// record the same kind of target.
+    #[test]
+    fn self_play_options_carry_the_dirichlet_floor_across_the_json_boundary() {
+        let base = json!({"games": 2, "simulations": 8, "maxConsidered": 4});
+        let decode = |value: &Value| -> std::result::Result<SelfPlayOptions, ()> {
+            serde_json::from_value::<SelfPlayOptionsDto>(value.clone())
+                .map(Into::into)
+                .map_err(|_| ())
+        };
+
+        // Absent is off, byte-for-byte, and alpha defaults to the planned value
+        // rather than to zero -- which would be an invalid concentration the
+        // moment anyone turned the floor on without naming it.
+        let defaults = decode(&base).expect("defaults parse");
+        assert_eq!(defaults.dirichlet_epsilon, 0.0);
+        assert_eq!(
+            defaults.dirichlet_alpha,
+            wrongway_normal_duel::puct::DEFAULT_DIRICHLET_ALPHA
+        );
+
+        let mut floored = base.clone();
+        floored["dirichletEpsilon"] = json!(0.25);
+        floored["dirichletAlpha"] = json!(0.15);
+        let parsed = decode(&floored).expect("the floor parses");
+        assert_eq!(parsed.dirichlet_epsilon, 0.25);
+        assert_eq!(parsed.dirichlet_alpha, 0.15);
+
+        // Only epsilon, the shape the b2 arm can legitimately send: alpha falls
+        // back to the plan's default rather than to nothing.
+        let mut only_epsilon = base;
+        only_epsilon["dirichletEpsilon"] = json!(0.25);
+        let parsed = decode(&only_epsilon).expect("epsilon alone parses");
+        assert_eq!(parsed.dirichlet_epsilon, 0.25);
+        assert_eq!(
+            parsed.dirichlet_alpha,
+            wrongway_normal_duel::puct::DEFAULT_DIRICHLET_ALPHA
+        );
+
+        // A non-numeric value is refused rather than defaulted.
+        let mut bogus = only_epsilon;
+        bogus["dirichletEpsilon"] = json!("0.25");
+        assert!(decode(&bogus).is_err());
+    }
+
+    /// A misspelled KEY is the same hazard one level up, and the more likely
+    /// one: every optional field here has a default, so an unrecognised key that
+    /// merely parses is indistinguishable from a field the driver never sent.
+    ///
+    /// `root_mode` is called out because `TRAINING-DESIGN-FIX.md` writes the
+    /// option that way in prose. A driver author copying it from the design doc
+    /// must get `invalid_options`, not a b3 run that is quietly the Gumbel arm
+    /// at 512 simulations — nothing downstream could tell the difference.
+    #[test]
+    fn a_misspelled_self_play_option_key_is_refused_rather_than_defaulted() {
+        let base = json!({"games": 2, "simulations": 8, "maxConsidered": 4});
+        let parses = |value: &Value| serde_json::from_value::<SelfPlayOptionsDto>(value.clone());
+        assert!(parses(&base).is_ok(), "the base options must still parse");
+
+        for key in [
+            "root_mode",
+            "rootmode",
+            "ROOTMODE",
+            "RootMode",
+            "temperature_moves",
+            "dirichlet_epsilon",
+            "dirichletepsilon",
+            "dirichletEps",
+            "totallyBogusKey",
+        ] {
+            let mut bogus = base.clone();
+            bogus[key] = json!("classic");
+            assert!(
+                parses(&bogus).is_err(),
+                "unknown key {key:?} must be refused, not silently ignored"
+            );
+        }
+
+        // The camelCase spellings the wire format actually defines still parse,
+        // so the guard above is rejecting typos rather than the contract.
+        let mut spelled_correctly = base;
+        spelled_correctly["rootMode"] = json!("classic");
+        spelled_correctly["temperatureMoves"] = json!(4);
+        spelled_correctly["dirichletEpsilon"] = json!(0.25);
+        spelled_correctly["dirichletAlpha"] = json!(0.15);
+        assert!(parses(&spelled_correctly).is_ok());
     }
 }

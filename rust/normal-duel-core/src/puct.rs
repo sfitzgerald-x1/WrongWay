@@ -52,44 +52,327 @@ use crate::{
 
 /// Frozen identifier for this search + self-play record format.
 ///
-/// `v2` is the completed-Q policy target: the recorded `policyTarget` is the
-/// Gumbel improved policy over every legal root action
+/// `v2` was the completed-Q policy target: the recorded `policyTarget` became
+/// the Gumbel improved policy over every legal root action
 /// ([`PuctResult::improved_policy`]) instead of the normalised visit counts of
-/// the considered set. Nothing about which move the search *plays* changed, so
-/// the version bump names a record-format change, not a search change.
-pub const PUCT_SEARCH_VERSION: &str = "puct-az-tree-v2";
+/// the considered set. Nothing about which move the search *played* changed, so
+/// that bump named a record-format change only.
+///
+/// `v3` is different in kind. It replaces this project's own `sigma` — raw
+/// completed-Q scaled by `(50 + maxN) * 1.0` — with the reference qtransform,
+/// `mctx`'s [`qtransform_completed_by_mix_value`]: completed-Q is min-max
+/// rescaled to `[0, 1]` per node and scaled by `(50 + maxN) * 0.1`, and the
+/// completion for an unvisited action is `v_mix` rather than the raw root
+/// value. That expression is used in BOTH places the old one was — the
+/// sequential-halving ranking and the improved policy — so **`v3` changes
+/// search decisions, not just the recorded target**. There is no bit-parity
+/// bridge from `v2`, by design; the correctness anchor is
+/// `tests/qtransform_goldens.rs` (identical to `mctx`) plus
+/// `tests/qtransform_properties.rs`, not identity with the old behaviour.
+pub const PUCT_SEARCH_VERSION: &str = "puct-az-tree-v3";
 
 /// The version the JavaScript reference search is frozen at.
 ///
-/// `js/normal-duel-puct-search.mjs` deliberately stays on `v1`. It is the parity
-/// oracle for the *search decisions* — visit counts, chosen action, root value,
-/// simulations spent, considered set — and every one of those is unchanged by
-/// the improved policy, so `tests/js_puct_parity.rs` still compares exactly what
-/// it always compared, at full strength.
+/// `js/normal-duel-puct-search.mjs` deliberately stays on `v1`. Through `v2` it
+/// was the parity oracle for every *search decision* — visit counts, chosen
+/// action, root value, simulations spent, considered set — because the improved
+/// policy was a read-out of a finished tree and moved nothing.
 ///
-/// Porting the improved policy to the JavaScript would mean comparing
-/// `Math.exp` against [`f64::exp`] bit for bit. `exp` is not an IEEE-754
-/// operation, which is why [`crate::js_math::js_log`] exists at all; there is no
-/// `js_exp`, and writing one to cross-check a training target would be a far
-/// larger correctness surface than the target itself. The production self-play
-/// driver is the Rust/wasm [`crate::selfplay::SelfPlayBatch`], not the
-/// JavaScript reference, so the reference is frozen and the divergence is named
-/// here rather than left to be discovered.
+/// `v3` ends that. The qtransform sits inside the sequential-halving ranking, so
+/// a `v1` tree and a `v3` tree visit different children and can finish on
+/// different actions. `tests/js_puct_parity.rs` therefore splits: the quantities
+/// the qtransform provably cannot reach are still compared exactly across both
+/// engines (the Gumbel considered set, the root value, the budget accounting,
+/// and — at `max_considered = 1`, where halving never runs — every field,
+/// though with one candidate the only descent-sensitive one left is the depth
+/// reached), while the halving-dependent quantities are compared separately and
+/// reported as the by-design divergence they are. See that file's module docs
+/// for the split and for what it does and does not buy.
 ///
-/// `tests/js_puct_parity.rs` asserts the JavaScript still reports this string,
-/// so the freeze cannot drift silently in either direction.
+/// Porting `v3` to the JavaScript would not fix this: the reference is the
+/// oracle precisely because it did not change, and the production self-play
+/// driver is the Rust/wasm [`crate::selfplay::SelfPlayBatch`] anyway. The
+/// improved policy could never be compared there in the first place — it needs
+/// `Math.exp` against [`f64::exp`] bit for bit, and `exp` is not an IEEE-754
+/// operation any more than [`crate::js_math::js_log`]'s `Math.log` is.
+///
+/// `tests/js_puct_parity.rs` asserts the JavaScript still reports this string
+/// and that the Rust side is on neither `v1` nor `v2`, so neither a silent JS
+/// bump nor a silent revert of the qtransform can pass.
 pub const JS_REFERENCE_SEARCH_VERSION: &str = "puct-az-tree-v1";
+
+/// The record format `v3` replaced, named so the freeze test can assert the
+/// Rust side has not silently reverted to it.
+pub const SUPERSEDED_SEARCH_VERSION: &str = "puct-az-tree-v2";
 
 /// Floor applied inside the logit so a legal action the policy assigns exactly
 /// zero probability is merely very unlikely, not `-Infinity`.
 const POLICY_FLOOR: f64 = 1e-9;
 
-/// Gumbel-MuZero sigma constants.
-const C_VISIT: u32 = 50;
-const C_SCALE: f64 = 1.0;
+/// Gumbel-MuZero qtransform constants: the defaults of `mctx`'s
+/// `qtransform_completed_by_mix_value`, which
+/// `tests/fixtures/qtransform-mctx-goldens.json` was generated with.
+///
+/// `MAXVISIT_INIT` is the paper's `c_visit`, `VALUE_SCALE` its `c_scale`, and
+/// `RESCALE_EPSILON` the floor on the min-max denominator. The pairing matters
+/// more than either constant: `value_scale = 0.1` is only gentle *because* the
+/// completed Q-values it multiplies have been rescaled into `[0, 1]` first. Used
+/// on raw completed-Q in `[-1, 1]` it would be a 20x sharper target than `v2`'s,
+/// not 20x softer.
+const MAXVISIT_INIT: f64 = 50.0;
+const VALUE_SCALE: f64 = 0.1;
+const RESCALE_EPSILON: f64 = 1e-8;
 
 /// Default exploration constant if the caller does not supply one.
 pub const DEFAULT_C_PUCT: f64 = 1.25;
+
+/// The Dirichlet root floor's mixing weight, as `TRAINING-DESIGN-FIX.md` (D3)
+/// specifies it: `P'(a) = (1 - eps) * P(a) + eps * eta_a`, root only. This is
+/// AlphaZero's own 0.25 and it is **not** the default any option struct uses —
+/// [`PuctParams::dirichlet_epsilon`] defaults to `0.0`, which is off. It is the
+/// value the b2 arm is specified to run.
+pub const DEFAULT_DIRICHLET_EPSILON: f64 = 0.25;
+
+/// The Dirichlet concentration D3 specifies, `10 / mean_legal`, which the plan
+/// writes as "~0.15 on this board".
+///
+/// **Which mean, and why it is not the whole-game one.** This board has no
+/// single branching factor, so `10 / b` needs the phase named or it is not
+/// defined. Measured over a 32-game mock-network run (1362 recorded positions),
+/// the legal count falls *linearly* from 131 at ply 0 to 66.6 at ply 19 — each
+/// wall placed removes about three anchors from the legal set — and then falls
+/// off a cliff: 23.0 at ply 20, 4.7 at ply 22, and 2.5-3.0 from ply 24 to the
+/// end. That cliff is the `10 + 10` wall stock being spent. Twenty plies of wall
+/// placements exhaust it, after which only pawn moves are legal and the position
+/// has two or three of them.
+///
+/// So the distribution is bimodal, with modes near 100 and near 3, and its
+/// **median is 4**. The whole-game mean is 48.7 in that run and 44.5 in another,
+/// but it is an average across the cliff rather than a branching factor: it
+/// mostly measures how many near-terminal plies the sample happened to contain,
+/// and it moves with game length rather than with the game. Deriving `10 / b`
+/// from it would pick an arbitrary point on a wide range.
+///
+/// Over the phase where the search actually has a choice to make — before the
+/// stock runs out, plus the handful of plies after it — the mean is stable:
+/// **68.4 over `ply < 30`**, and `10 / 68.4 = 0.146`. That is the plan's 0.15,
+/// and `~67` is exactly the branching factor it implies. AlphaZero's `10 / b`
+/// heuristic is about typical-game branching, which is this number and not the
+/// resign-length average.
+///
+/// The value is still an option so the range can be swept; see
+/// [`MIN_DIRICHLET_ALPHA`] for the bottom of the range and why it exists.
+pub const DEFAULT_DIRICHLET_ALPHA: f64 = 0.15;
+
+/// The smallest concentration the sampler can honour, below which it silently
+/// means the OPPOSITE of what it says.
+///
+/// [`sample_gamma_below_one`] computes `x = p^(1 / alpha)`, so a component
+/// underflows to exactly `0.0` when `p < 10^(-308 * alpha)` — a probability of
+/// `10^(-308 * alpha)` per component. When *every* component underflows the sum
+/// is zero and [`root_dirichlet`] falls back to the uniform vector, which is the
+/// flattest noise there is: a caller reaching for a sparser floor gets a flatter
+/// one, and gets it on some fraction of roots rather than all of them, so the
+/// arm is quietly a mixture of two different experiments.
+///
+/// Measured, 4000 keys per cell, as the fraction of draws that come back
+/// uniform:
+///
+/// ```text
+/// alpha    count 2     count 40    count 131
+/// 2e-2     0           0           0            (no component underflowed at all)
+/// 1e-2     0           0           0            (6e-4 of components zero)
+/// 5e-3     4/4000      0           0
+/// 3e-3     38/4000     0           0
+/// 1e-3     901/4000    0           0
+/// 1e-4     3448/4000   204/4000    0
+/// 1e-6     3996/4000   3894/4000   3671/4000
+/// 1e-12    4000/4000   4000/4000   4000/4000
+/// ```
+///
+/// `1e-2` is therefore the bound: nothing degenerates there, the per-component
+/// underflow rate is `8.3e-4` (closed form) against a measured `6e-4`, and an
+/// all-zero draw needs every component to underflow — `7e-7` at a two-action
+/// root and unreachable at a realistic one. The plan's `0.15` and the tests'
+/// `0.02` sit far above it.
+///
+/// This is a bound on what the *search* will accept, not on the arithmetic:
+/// [`root_dirichlet`] is public and unvalidated, so the uniform fallback is
+/// reachable through it and is tested through it.
+pub const MIN_DIRICHLET_ALPHA: f64 = 0.01;
+
+/// Domain separator for the Dirichlet's own draw stream, so its key cannot
+/// collide with any other keyed stream this codebase grows later. The bytes are
+/// `"DIR1"`.
+const DIRICHLET_TAG: u32 = 0x4449_5231;
+
+/// Cap on the gamma sampler's rejection loop.
+///
+/// Genuinely unreachable, and measured rather than argued: over 50,000 draws at
+/// each of `alpha` 0.02, 0.15, 0.5, 0.9 and 0.999 the acceptance rate is 0.982,
+/// 0.885, 0.747, 0.722 and 0.730, and the worst case observed is 3, 6, 9, 10 and
+/// 10 attempts. At the floor of that acceptance range, 128 consecutive
+/// rejections is a `0.28^128` event, about `1e-71`.
+/// `the_gamma_samplers_rejection_loop_never_approaches_its_cap` holds it there.
+/// The cap exists so that a wasm self-play worker cannot hang instead of
+/// finishing a shard, not because it is expected to bind.
+const GAMMA_MAX_ATTEMPTS: u32 = 128;
+
+/// Murmur3's 32-bit finalizer: the avalanche step, used here to key one stream
+/// from several small integers.
+///
+/// Needed rather than an addition or an xor because *both* inputs to the key
+/// vary by one between neighbours — game `i` seeds off `seed_base + i` and plies
+/// run `0, 1, 2, ...` — and an LCG32 seeded with adjacent values produces
+/// visibly related streams, especially in the low bits, which is where a
+/// `u32 / 2^32` uniform's leading digits do NOT come from but where the
+/// rejection sampler's accept/reject boundary can still feel it.
+fn fmix32(mut h: u32) -> u32 {
+    h ^= h >> 16;
+    h = h.wrapping_mul(0x85eb_ca6b);
+    h ^= h >> 13;
+    h = h.wrapping_mul(0xc2b2_ae35);
+    h ^= h >> 16;
+    h
+}
+
+/// `mix(game_seed, ply, DIRICHLET_TAG)`: the seed of the Dirichlet's own
+/// [`Lcg32`], and the whole of D3's determinism contract in one function.
+///
+/// The root noise MUST NOT be drawn from the game's main stream. Gamma sampling
+/// for `alpha < 1` is a rejection method, so it consumes a variable number of
+/// words — a number that depends on the priors, the legal count, and (through
+/// the accept test's `exp`) on the target's libm. The main stream's offset is
+/// contractually a pure function of the ply index; see
+/// `crate::selfplay::Game::complete_move`, where the temperature draw is taken
+/// unconditionally inside the phase for exactly that reason. Drawing the noise
+/// from that stream would make the offset a function of the noise instead, and
+/// two builds that disagreed by one accepted sample would fork every subsequent
+/// game.
+///
+/// Keying off `(game_seed, ply)` also means the noise at a given ply is
+/// reproducible without replaying the game, and that a search run in isolation —
+/// a test, a diagnostic — sees the same noise the shard worker saw.
+#[must_use]
+pub fn dirichlet_stream_seed(game_seed: u32, ply: u64) -> u32 {
+    // Fold the ply's 64 bits into 32 before mixing; no board reaches 2^32 plies,
+    // so this is a formality that keeps the key defined for every input.
+    let ply = (ply as u32) ^ ((ply >> 32) as u32);
+    fmix32(fmix32(DIRICHLET_TAG ^ game_seed) ^ ply)
+}
+
+/// One `Gamma(alpha, 1)` draw for `0 < alpha < 1`, by Ahrens and Dieter's GS
+/// algorithm (Devroye, *Non-Uniform Random Variate Generation*, IX.3).
+///
+/// ```text
+/// b = 1 + alpha / e
+/// loop:
+///   p = b * U1
+///   if p <= 1:  x = p^(1/alpha);        accept if U2 <= exp(-x)
+///   else:       x = -log((b - p) / alpha);  accept if U2 <= x^(alpha - 1)
+/// ```
+///
+/// Chosen over Marsaglia-Tsang because that method needs a standard normal, and
+/// every cheap normal generator needs either a trigonometric pair or a second
+/// rejection loop; GS needs only uniforms, a logarithm, an exponential and a
+/// power. The restriction to `alpha < 1` is not a limitation in this codebase —
+/// [`PuctTreeSearch::new`] rejects anything else — but it IS a restriction, and
+/// adding `alpha >= 1` later means adding a second sampler, not relaxing a
+/// bound.
+///
+/// The bottom of the range is a different matter and is a real defect of this
+/// method rather than a scoping decision: `p^(1 / alpha)` underflows for small
+/// `alpha`, and the consequence is documented on [`MIN_DIRICHLET_ALPHA`].
+///
+/// **Portability.** [`js_log`] is bit-portable, so it is used for the logarithm.
+/// `exp` and `powf` are libm and are not; a target whose `exp` differs by an ULP
+/// can therefore accept a different sample and consume a different number of
+/// words. That is a real hazard and it is why [`dirichlet_stream_seed`] exists:
+/// the divergence is confined to one root's noise vector on that platform and
+/// cannot move the main stream by a single word. The same caveat already applies
+/// to the recorded policy target, which goes through `f64::exp`, and to
+/// `crate::selfplay::sample_visit_temperature`, which goes through `powf`.
+fn sample_gamma_below_one(rng: &mut Lcg32, alpha: f64) -> f64 {
+    let b = 1.0 + alpha / std::f64::consts::E;
+    let mut last = 0.0_f64;
+    for _ in 0..GAMMA_MAX_ATTEMPTS {
+        let p = b * rng.unit_interval();
+        let u = rng.unit_interval();
+        if p <= 1.0 {
+            // `x` is in (0, 1], so `exp(-x)` is in [1/e, 1) and the test accepts
+            // with probability at least 1/e.
+            let x = p.powf(1.0 / alpha);
+            last = x;
+            if u <= (-x).exp() {
+                return x;
+            }
+        } else {
+            // `(b - p) / alpha` is in (0, 1/e], so `x >= 1` and `x^(alpha - 1)`
+            // is in (0, 1].
+            let x = -js_log((b - p) / alpha);
+            last = x;
+            if u <= x.powf(alpha - 1.0) {
+                return x;
+            }
+        }
+    }
+    // Unreachable in practice. GS's expected number of attempts is
+    // `(e + alpha) / (e * gamma(1 + alpha))`, which over `alpha` in (0, 1) peaks
+    // at about 1.39 -- an acceptance rate of ~0.72 -- so 128 consecutive
+    // rejections is below 1e-70. Falling through with the last candidate keeps
+    // the draw count deterministic and the value inside the distribution's
+    // support, which neither a panic nor a zero would.
+    last
+}
+
+/// `eta ~ Dir(alpha, ..., alpha)` over `count` components, drawn from the
+/// stream [`dirichlet_stream_seed`] keys and from nothing else.
+///
+/// Public for the same reason [`root_qtransform`] is: the tests address the
+/// distribution directly rather than inferring it from a whole 9x9 search, and
+/// they address the *same code the search runs*, so there is no second
+/// implementation to drift.
+///
+/// The components are drawn in index order and normalised by their sum, which is
+/// the standard construction.
+///
+/// **The zero-sum guard is reachable, and it inverts the meaning of `alpha` when
+/// it fires.** [`sample_gamma_below_one`] computes `p^(1 / alpha)`, which
+/// underflows to exactly `0.0` with probability `10^(-308 * alpha)` per
+/// component; when every component underflows the total is `0.0` and this
+/// function returns the UNIFORM vector — the flattest noise available — to a
+/// caller who asked for the sparsest. See [`MIN_DIRICHLET_ALPHA`] for the
+/// measured table and for the bound that keeps the search out of that region.
+/// This function is deliberately not bounded, so the branch stays reachable and
+/// testable: `root_dirichlet(0, 0, 1e-6, 40)` takes it.
+///
+/// A non-finite total reaches the same fallback, which is how an `alpha` of
+/// `NaN` produces a uniform vector rather than poisoning every prior with `NaN`.
+/// Note the consequence for `eps = 0`: `0.0 * uniform` is `0.0`, so a
+/// `NaN`-alpha draw that reached the mixture would still leave the priors
+/// untouched — the guard, not the early return, is what makes that case
+/// harmless, and only the `root_selection_priors.is_empty()` assertion in
+/// `the_floor_mixes_into_a_copy_and_leaves_the_networks_prior_in_the_edges`
+/// distinguishes the two.
+#[must_use]
+pub fn root_dirichlet(game_seed: u32, ply: u64, alpha: f64, count: usize) -> Vec<f64> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let mut rng = Lcg32::new(dirichlet_stream_seed(game_seed, ply));
+    let mut draws: Vec<f64> = (0..count)
+        .map(|_| sample_gamma_below_one(&mut rng, alpha))
+        .collect();
+    let total: f64 = draws.iter().sum();
+    if !total.is_finite() || total <= 0.0 {
+        let uniform = 1.0 / count as f64;
+        return vec![uniform; count];
+    }
+    for draw in &mut draws {
+        *draw /= total;
+    }
+    draws
+}
 
 /// First-play-urgency reduction. See the reference for the full rationale.
 pub const FPU_REDUCTION: f64 = 0.25;
@@ -118,6 +401,8 @@ pub enum PuctError {
     ContradictoryExploration,
     #[error("invalid_c_puct")]
     InvalidCPuct,
+    #[error("invalid_dirichlet")]
+    InvalidDirichlet,
     #[error("invalid_state")]
     InvalidState,
     #[error("invalid_action_code")]
@@ -146,6 +431,7 @@ impl PuctError {
             Self::InvalidGames => "invalid_games",
             Self::ContradictoryExploration => "contradictory_exploration",
             Self::InvalidCPuct => "invalid_c_puct",
+            Self::InvalidDirichlet => "invalid_dirichlet",
             Self::InvalidState => "invalid_state",
             Self::InvalidActionCode => "invalid_action_code",
             Self::OutOfOrderEvaluation => "out_of_order_evaluation",
@@ -168,94 +454,336 @@ fn clamp_value(value: f64) -> f64 {
     value
 }
 
-/// Strictly increasing in `q`, so it never reorders two candidates by value.
-fn sigma(q: f64, max_visits: u32) -> f64 {
-    f64::from(C_VISIT + max_visits) * C_SCALE * q
+/// The prior as the qtransform reads it: [`POLICY_FLOOR`] applied, so a legal
+/// action the network priced at exactly zero contributes a vanishing weight to
+/// `v_mix` instead of turning its denominator into `0 / 0`, and a finite logit
+/// to the improved policy instead of `-Infinity`.
+///
+/// `mctx` floors in the same two places, with `finfo(dtype).tiny` rather than
+/// `1e-9`. The two agree for every prior at or above `1e-9`, which is every
+/// prior this engine produces that is not exactly zero after the legal-mask
+/// renormalisation. Where they could differ, the goldens are generated *through
+/// this floor* (`scripts/gen-qtransform-goldens.py` hands `mctx` the logits
+/// `log(max(p, 1e-9))`), so the fixtures pin the engine's own convention. That
+/// is sound because both consumers are invariant to a positive rescaling of the
+/// prior: the improved policy is a softmax, where a constant logit shift
+/// cancels, and `v_mix` divides by the sum of the visited priors, where a
+/// constant factor cancels.
+fn effective_prior(prior: f64) -> f64 {
+    prior.max(POLICY_FLOOR)
 }
 
-/// The paper's `completedQ`: a visited root action is worth what the tree
-/// measured, an unvisited one is worth the root's own value.
+/// `v_mix` from Appendix D of *Policy improvement by planning with Gumbel*: the
+/// node's own value interpolated with the prior-weighted mean of the Q-values
+/// the tree actually measured.
 ///
-/// This is the completion the halving already used to rank survivors, lifted
-/// into one function so the improved policy and the schedule cannot drift apart.
+/// ```text
+/// v_mix = (v_raw + N * (sum_visited p(a) q(a) / sum_visited p(a))) / (1 + N)
+/// ```
 ///
-/// Danihelka et al. refine the unvisited case to `v_mix`, a prior-weighted blend
-/// of the root value and the visited children's Q. That is a possible future
-/// swap and this function is the single place it would happen; it is
-/// deliberately not implemented here, because `v_mix` changes the halving
-/// ranking too and therefore the search's decisions, which this change does not
-/// touch.
-fn completed_q(edge: &Edge, root_value: f64) -> f64 {
+/// `N` is the total number of CHILD visits, so `N = 0` returns `v_raw`
+/// unchanged, and a deep search converges on the weighted mean. `v_raw` is the
+/// network's own value for the node — not `value_sum / visits`, which is the
+/// search's refinement of it; `mctx` reads `tree.raw_values` here and the
+/// distinction is pinned by a fixture whose `node_values` deliberately differs.
+///
+/// The denominator sums only the VISITED actions' priors, which is where
+/// [`effective_prior`] earns its keep: a search that only ever visited actions
+/// the network priced at exactly zero would otherwise divide zero by zero.
+///
+/// Each term is divided by that denominator before being summed, rather than
+/// the sum being divided once, because that is the association `mctx` uses and
+/// the goldens are compared at 1e-6 against it.
+fn mixed_value(edges: &[Edge], raw_value: f64) -> f64 {
+    let mut visits = 0_u64;
+    let mut prior_mass = 0.0_f64;
+    for edge in edges {
+        if edge.visits > 0 {
+            visits += u64::from(edge.visits);
+            prior_mass += effective_prior(edge.prior);
+        }
+    }
+    if visits == 0 {
+        return raw_value;
+    }
+    // `mctx` guards the same division; with the floor above, `prior_mass` is
+    // only ever zero when nothing was visited, which returned already.
+    let denominator = if prior_mass > 0.0 { prior_mass } else { 1.0 };
+    let mut weighted_q = 0.0_f64;
+    for edge in edges {
+        if edge.visits > 0 {
+            let q = edge.value_sum / f64::from(edge.visits);
+            weighted_q += effective_prior(edge.prior) * q / denominator;
+        }
+    }
+    let visits = visits as f64;
+    (raw_value + visits * weighted_q) / (visits + 1.0)
+}
+
+/// `completedQ`: a visited root action is worth what the tree measured, an
+/// unvisited one is worth `mixed` — [`mixed_value`]'s `v_mix`.
+///
+/// Through `v2` the unvisited case was the raw root value. That biased the
+/// completion for every action the search never touched — at 128 simulations
+/// over 16 candidates on a 40-move board, most of them — in whichever direction
+/// the value head happened to run relative to the Q-values the tree had
+/// actually measured. `v_mix` interpolates between the two instead, and this is
+/// the one place the substitution happens.
+fn completed_q(edge: &Edge, mixed: f64) -> f64 {
     if edge.visits > 0 {
         edge.value_sum / f64::from(edge.visits)
     } else {
-        root_value
+        mixed
     }
 }
 
-/// The Gumbel improved policy over `edges`, which must be one node's whole edge
-/// list: `pi'(a) ∝ exp(logit(a) + sigma(completedQ(a)))`.
+/// `mctx`'s `qtransform_completed_by_mix_value` over one node's whole edge list:
+/// the completed Q-values, min-max rescaled to `[0, 1]` across the node, times
+/// `(50 + maxN) * 0.1`.
 ///
-/// Four details are load-bearing.
+/// This is the ONE expression both the sequential-halving ranking
+/// ([`PuctTreeSearch::halve`]) and the improved policy ([`improved_policy`])
+/// score with, so the schedule and the recorded target cannot drift apart — the
+/// property `v2` had and `v3` keeps. What changed is what the expression *is*.
 ///
-/// `logit(a)` is `js_log(prior.max(POLICY_FLOOR))`, the same expression
-/// `seed_candidates` uses to rank the Gumbel draws — the improved policy and the
-/// considered set read the prior through the same floor.
+/// Three details are load-bearing.
 ///
-/// `max_visits` is the maximum over *all* the node's edges, not over the
-/// halving's surviving set, because the policy covers actions halving discarded.
+/// The rescale is over the COMPLETED values, `v_mix` included, not over the
+/// measured ones — an unvisited action can therefore set the minimum or the
+/// maximum. And it is over the node's whole edge list, not the halving's
+/// surviving subset, because the improved policy has to cover the actions
+/// halving discarded and both readers must see the same numbers.
 ///
-/// The softmax subtracts the maximum score before exponentiating. That is not
-/// tidiness: `sigma` spans roughly `±(C_VISIT + max_visits)`, so at a
-/// four-figure simulation budget the raw exponentials would overflow to
-/// infinity and the normalisation would return NaN. After the subtraction the
-/// largest term is exactly `1.0`, so the total is in `[1, edges.len()]` and can
-/// neither overflow nor be zero.
+/// `RESCALE_EPSILON` floors the denominator. Its job is not overflow, it is
+/// meaning: when every completed value is equal the search has learned nothing
+/// about the ordering, `(c - min)` is exactly `0` for every action, and dividing
+/// by the floor keeps it exactly `0` — a flat boost, and therefore an improved
+/// policy that is exactly the renormalised prior. A search that learned nothing
+/// sharpens nothing. `tests/qtransform_properties.rs` holds this to it.
 ///
-/// And `sigma`'s scale now does a second job.
+/// That statement is exact for the TARGET and only approximate for the RANKING,
+/// and the difference is worth naming. When a root mixes visited and unvisited
+/// actions on one Q value, `v_mix` reproduces that Q to within an ULP rather
+/// than exactly, so `(max - min)` is a crumb of order `1e-16`; the floor
+/// replaces it with `1e-8` and the rescale therefore multiplies the crumb by
+/// `1e8` before the visit scale multiplies it again. Against a target consumed
+/// at `1e-3` that is nothing — 8.1e-5 worst case over the property sweep's
+/// widest shapes, 2.9e-6 at the production `maxN <= 128`. But the same vector is
+/// added to `g + logit` in [`PuctTreeSearch::halve`], where the tightest gap the
+/// parity grid observes is `4.1e-7`, so on a degenerate root the halving cut can
+/// be decided by that noise where `v2` produced an exact tie. It is
+/// deterministic, it is what `mctx` does, and a root where every completed value
+/// is equal has no better answer available — but it is a tie broken by float
+/// noise rather than by the code order, and it is not a rounding detail that
+/// stays inside the target.
 ///
-/// In sequential halving `sigma` is only ever a RANKING term: it is strictly
-/// increasing in `q`, so its magnitude is irrelevant there and only the induced
-/// order matters. Here it is inside a softmax, where the magnitude IS the
-/// temperature. With `C_VISIT = 50`, `C_SCALE = 1.0` and completed-Q left in
-/// `[-1, 1]`, the score span is `2 * (50 + max_visits)` -- about 160 at 128
-/// simulations over 16 candidates -- so a 0.1 difference in Q is a factor of
-/// e^8 in probability. The published implementations reach a much gentler
-/// distribution by min-max normalising completed-Q to `[0, 1]` and using
-/// `c_scale ~ 0.1`.
-///
-/// Reusing this project's own `sigma` unchanged is deliberate: it is what keeps
-/// the halving ranking and the recorded target derived from ONE expression, so
-/// they cannot drift apart. But it means the target's entropy is set by a
-/// constant that was only ever tuned for an ordering. If the first long run
-/// wants a softer target, THIS is the knob -- normalise the Q range or scale
-/// `C_SCALE` for the policy only -- not the simulation budget.
-fn improved_policy(edges: &[Edge], root_value: f64) -> Vec<(u16, f64)> {
+/// The output is bounded: every entry lies in `[0, (50 + maxN) * 0.1]`. That is
+/// the whole point of D1. The `v2` expression put it in `[-(50 + maxN), (50 +
+/// maxN)]`, a span twenty times wider and centred differently, which is a
+/// factor of `e^160` rather than `e^8` between the best and worst action at 128
+/// simulations.
+fn qtransform_completed_by_mix_value(edges: &[Edge], raw_value: f64) -> Vec<f64> {
+    let mixed = mixed_value(edges, raw_value);
+    let mut values: Vec<f64> = edges.iter().map(|edge| completed_q(edge, mixed)).collect();
+    if values.is_empty() {
+        return values;
+    }
+
+    let mut lowest = f64::INFINITY;
+    let mut highest = f64::NEG_INFINITY;
+    for value in &values {
+        if *value < lowest {
+            lowest = *value;
+        }
+        if *value > highest {
+            highest = *value;
+        }
+    }
+    let span = (highest - lowest).max(RESCALE_EPSILON);
     let max_visits = edges.iter().map(|edge| edge.visits).max().unwrap_or(0);
+    let scale = (MAXVISIT_INIT + f64::from(max_visits)) * VALUE_SCALE;
+    for value in &mut values {
+        *value = scale * ((*value - lowest) / span);
+    }
+    values
+}
+
+/// The Gumbel improved policy over `edges`, which must be one node's whole edge
+/// list: `pi'(a) ∝ p(a) * exp(qtransform(a))`.
+///
+/// This is `mctx`'s `gumbel_muzero_policy` `action_weights`, restricted to the
+/// legal actions — which is exactly the domain of an edge list, so there is no
+/// `invalid_actions` mask to apply; illegal codes never enter and the recorder
+/// writes them as exact `0.0`.
+///
+/// Written as `p * exp(boost)` rather than `exp(log(p) + boost)`
+///
+/// The two are the same function and `mctx` writes the second one, because its
+/// input IS a logit vector. Ours is a probability vector — the network's policy
+/// masked to the legal actions and renormalised — so taking a logarithm only to
+/// exponentiate it again costs a round trip of one or two ULP for nothing. It
+/// costs one specific thing, in fact: the plan's degenerate case says that when
+/// the search has separated nothing, `pi'` must be EXACTLY the renormalised
+/// prior. With a flat boost this form gives `p(a) * 1.0 / sum(p)`, which is that
+/// statement bit for bit; the logarithmic form gives it to about `1e-14`.
+/// `tests/qtransform_properties.rs` asserts the exact version.
+///
+/// [`effective_prior`] applies the same floor `seed_candidates` reads the prior
+/// through, so the improved policy and the considered set still agree about
+/// what a zero-prior legal action is worth.
+///
+/// Subtracting the largest boost before exponentiating keeps every term in
+/// `(0, p(a)]`, so the total is in `(0, 1]` and can neither overflow nor be
+/// zero — the qtransform's range makes overflow far less likely than it was
+/// under `v2`, but at a six-figure visit count the scale alone is five figures,
+/// and `exp` of that is infinity.
+fn improved_policy(edges: &[Edge], root_value: f64) -> Vec<(u16, f64)> {
+    let boosts = qtransform_completed_by_mix_value(edges, root_value);
+    if edges.is_empty() {
+        return Vec::new();
+    }
+
+    let mut highest = f64::NEG_INFINITY;
+    for boost in &boosts {
+        if *boost > highest {
+            highest = *boost;
+        }
+    }
 
     let mut scored: Vec<(u16, f64)> = Vec::with_capacity(edges.len());
-    let mut highest = f64::NEG_INFINITY;
-    for edge in edges {
-        let logit = js_log(edge.prior.max(POLICY_FLOOR));
-        let score = logit + sigma(completed_q(edge, root_value), max_visits);
-        if score > highest {
-            highest = score;
-        }
-        scored.push((edge.code, score));
-    }
-    if scored.is_empty() {
-        return scored;
-    }
-
     let mut total = 0.0_f64;
-    for (_, score) in &mut scored {
-        *score = (*score - highest).exp();
-        total += *score;
+    for (edge, boost) in edges.iter().zip(&boosts) {
+        let weight = effective_prior(edge.prior) * (*boost - highest).exp();
+        total += weight;
+        scored.push((edge.code, weight));
     }
     for (_, weight) in &mut scored {
         *weight /= total;
     }
     scored
+}
+
+/// One root action's search statistics, as the qtransform reads them.
+///
+/// The engine's own [`Edge`] carries a code and a child pointer the transform
+/// has no use for, and a `value_sum` rather than a mean; this is the same data
+/// in the shape `mctx` states it in, so a fixture can be fed to both.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActionStats {
+    /// The network's prior for this action, masked to the legal set and
+    /// renormalised: a probability, not a logit.
+    pub prior: f64,
+    pub visits: u32,
+    /// The action's mean value from the tree. Undefined when `visits == 0`, and
+    /// never read in that case — the completion replaces it.
+    pub qvalue: f64,
+}
+
+/// Every stage of the Gumbel-MuZero qtransform, kept separate.
+///
+/// A cross-implementation fixture that only compared the final weights could
+/// say two implementations disagree but not where; these four fields are
+/// exactly what `tests/fixtures/qtransform-mctx-goldens.json` records from
+/// `mctx`, so a mismatch names its own stage.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RootQtransform {
+    /// `v_mix`: the completion used for every unvisited action.
+    pub mixed_value: f64,
+    /// Completed Q-values, before the rescale.
+    pub completed: Vec<f64>,
+    /// Completed, min-max rescaled and visit-scaled: the boost added to the
+    /// logit in both the halving ranking and the improved policy.
+    pub transformed: Vec<f64>,
+    /// The improved policy `pi'`, in the order `stats` was given.
+    pub action_weights: Vec<f64>,
+}
+
+/// Run the qtransform the search itself uses over raw statistics.
+///
+/// This exists so `tests/qtransform_goldens.rs` and
+/// `tests/qtransform_properties.rs` can address the transform directly instead
+/// of reaching it through a whole 9x9 search, and it deliberately calls the
+/// same private functions the search does: there is no second implementation
+/// here to drift from the first.
+#[must_use]
+pub fn root_qtransform(stats: &[ActionStats], raw_value: f64) -> RootQtransform {
+    let edges: Vec<Edge> = stats
+        .iter()
+        .enumerate()
+        .map(|(index, stat)| Edge {
+            // Synthetic, and only ever passed back out again: the transform
+            // reads the prior, the visits and the value sum.
+            code: index as u16,
+            prior: stat.prior,
+            visits: stat.visits,
+            value_sum: f64::from(stat.visits) * stat.qvalue,
+            child: NO_CHILD,
+        })
+        .collect();
+    let mixed = mixed_value(&edges, raw_value);
+    RootQtransform {
+        mixed_value: mixed,
+        completed: edges.iter().map(|edge| completed_q(edge, mixed)).collect(),
+        transformed: qtransform_completed_by_mix_value(&edges, raw_value),
+        action_weights: improved_policy(&edges, raw_value)
+            .into_iter()
+            .map(|(_, weight)| weight)
+            .collect(),
+    }
+}
+
+/// The AlphaZero policy target: `N(a) / sum_b N(b)` over one node's whole edge
+/// list, ascending by code — [`RootMode::Classic`]'s recorded target.
+///
+/// The properties this has and [`improved_policy`] does not: its concentration
+/// is bounded by 1.0 whatever the value head says, it is invariant to any
+/// monotone rescaling of Q because it never reads Q at all, and every unit of
+/// mass it moves off the prior was paid for by a real tree descent. What it
+/// gives up is coverage — an action the search never selected is targeted to
+/// exactly zero, which is only defensible at a budget large enough for the
+/// visits to be a judgement rather than a schedule.
+///
+/// Under sequential halving that condition fails badly (both finalists take the
+/// same count whoever won), which is why this is *not* offered as an option on
+/// the Gumbel root: it is the target of a different root algorithm, not a
+/// different target for the same one.
+fn visit_count_policy(edges: &[Edge]) -> Vec<(u16, f64)> {
+    let visits: u32 = edges.iter().map(|edge| edge.visits).sum();
+    if visits > 0 {
+        let total = f64::from(visits);
+        return edges
+            .iter()
+            .map(|edge| (edge.code, f64::from(edge.visits) / total))
+            .collect();
+    }
+    // No root action has been visited yet. `PuctTreeSearch::new` rejects
+    // `simulations < 1` and every simulation backs up through exactly one root
+    // edge, so a *completed* classic search cannot land here; `result()` is
+    // callable mid-search, though, and the honest answer before the first backup
+    // is the network's own prior. `expand` leaves those normalised over the
+    // legal actions, so they are already a distribution — and, unlike a one-hot
+    // fallback, one that teaches the policy head nothing rather than something
+    // false.
+    edges.iter().map(|edge| (edge.code, edge.prior)).collect()
+}
+
+/// The most-visited action, ties to the lowest code — [`RootMode::Classic`]'s
+/// played move once the temperature phase is over.
+///
+/// Edges are stored ascending by code and the comparison is strict, so the
+/// tie-break needs no extra work, exactly as in [`PuctTreeSearch::select_edge`].
+fn most_visited(edges: &[Edge]) -> u16 {
+    let mut chosen = 0_u16;
+    let mut best = 0_u32;
+    let mut found = false;
+    for edge in edges {
+        if !found || edge.visits > best {
+            chosen = edge.code;
+            best = edge.visits;
+            found = true;
+        }
+    }
+    chosen
 }
 
 /// `Math.ceil(Math.log2(Math.max(m, 2)))` without a logarithm: the smallest
@@ -381,11 +909,79 @@ impl RootContext {
     }
 }
 
+/// Which algorithm drives the **root** of the search. Everything below the root
+/// is the same tree either way: same [`PuctTreeSearch::select_edge`], same FPU,
+/// same backup, same adjudication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RootMode {
+    /// Gumbel-MuZero: one Gumbel draw per legal root action, a considered set of
+    /// `max_considered` survivors, sequential halving over them, and the
+    /// completed-Q improved policy as the recorded target.
+    ///
+    /// The default, and the production recipe. Nothing in this file may make a
+    /// Gumbel search behave differently than it did before [`RootMode`] existed;
+    /// `tests/root_mode_classic.rs` pins that to digests taken from the earlier
+    /// build.
+    #[default]
+    Gumbel,
+    /// AlphaZero-classic: plain PUCT at the root, no Gumbel draws, no considered
+    /// set, no halving, and `N(a) / sum N` over the root's visits as the
+    /// recorded target.
+    ///
+    /// This is a *control arm*, not a replacement. The Gumbel target is a
+    /// softmax whose sharpness a constant sets and no tree descent bounds; the
+    /// visit distribution is bounded at 1.0 concentration by construction and
+    /// every unit of sharpness is paid for by a simulation that could have
+    /// contradicted the prior. Running both from the same seed is what
+    /// distinguishes "the design is wrong" from "the design is
+    /// mis-parameterised", and that question cannot be answered by tuning the
+    /// Gumbel arm alone.
+    ///
+    /// [`PuctParams::max_considered`] is not read in this mode — there is no
+    /// candidate set to bound — but it is still validated, so a driver that
+    /// keeps sending the production value is not rejected for it.
+    ///
+    /// Costs more per position for the same quality of target: the visit
+    /// distribution over ~40 legal actions is only informative at a budget that
+    /// can actually spread over them, which is why the arm is specified at 512
+    /// simulations rather than the Gumbel arm's 128.
+    Classic,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PuctParams {
     pub simulations: u32,
+    /// Size of the Gumbel considered set. Read only by [`RootMode::Gumbel`].
     pub max_considered: u32,
     pub c_puct: f64,
+    /// Which root algorithm to run. Defaults to [`RootMode::Gumbel`], so every
+    /// caller that predates this field gets exactly the search it had.
+    pub root_mode: RootMode,
+    /// The game this search belongs to, for [`dirichlet_stream_seed`]. Together
+    /// with `RootContext::ply` it is the whole key of the Dirichlet's stream.
+    ///
+    /// It is a *game* seed, not a search seed: the same number the game's main
+    /// [`Lcg32`] was constructed from, unchanged for the whole game. Read only
+    /// when [`Self::dirichlet_epsilon`] is positive, so a caller that does not
+    /// use the floor may leave it at `0`.
+    pub game_seed: u32,
+    /// D3's mixing weight `eps` in `P'(a) = (1 - eps) * P(a) + eps * eta_a`,
+    /// applied to the ROOT's priors only, before the Gumbel draws.
+    ///
+    /// **`0.0` means byte-for-byte absent** and that is the default: no stream is
+    /// created, no draw is taken from anywhere, and every prior the search reads
+    /// is the identical `f64` it read before D3 existed. `tests/dirichlet_root.rs`
+    /// pins that against digests taken from the pre-D3 build.
+    ///
+    /// See [`PuctTreeSearch::setup_root`] for the one thing this deliberately
+    /// does NOT touch: the recorded policy target.
+    pub dirichlet_epsilon: f64,
+    /// D3's concentration. Read only when [`Self::dirichlet_epsilon`] is
+    /// positive, and then required to lie in `[MIN_DIRICHLET_ALPHA, 1)`. Both
+    /// bounds are properties of the sampler rather than of the design: see
+    /// [`sample_gamma_below_one`] for the upper one and
+    /// [`MIN_DIRICHLET_ALPHA`] for the lower.
+    pub dirichlet_alpha: f64,
 }
 
 impl Default for PuctParams {
@@ -394,6 +990,13 @@ impl Default for PuctParams {
             simulations: 32,
             max_considered: 8,
             c_puct: DEFAULT_C_PUCT,
+            root_mode: RootMode::Gumbel,
+            game_seed: 0,
+            // Off. The floor is an arm of the experiment, not the baseline: b1
+            // runs without it and b2 with it, and a default of 0.25 would have
+            // made every caller that never heard of D3 into a b2 run.
+            dirichlet_epsilon: 0.0,
+            dirichlet_alpha: DEFAULT_DIRICHLET_ALPHA,
         }
     }
 }
@@ -464,6 +1067,18 @@ pub struct PuctTreeSearch {
 
     root_window: RepetitionWindow,
     root_value: f64,
+    /// D3's noised root priors, parallel to the ROOT's edge list, or **empty**
+    /// when the floor is off.
+    ///
+    /// Empty is the load-bearing state: every read goes through
+    /// [`Self::selection_priors`], which returns this slice and whose callers
+    /// fall back to `edge.prior` when it is empty, so `eps = 0` takes the
+    /// identical arithmetic path it took before D3 and not a `(1 - 0) * p + 0`
+    /// rewrite of it.
+    ///
+    /// Separate from `edges` rather than written into it because the recorded
+    /// training target reads `edge.prior`; see [`Self::setup_root`].
+    root_selection_priors: Vec<f64>,
     max_depth: u32,
     used: u32,
     budget: i64,
@@ -512,8 +1127,32 @@ pub struct PuctResult {
     ///
     /// Ascending by code, and normalised in that order, so the float rounding a
     /// consumer sees does not depend on iteration order.
+    ///
+    /// Under [`RootMode::Classic`] this field carries that root's own target
+    /// instead — `N(a) / sum N`, see [`visit_count_policy`]. The name is kept
+    /// because the *contract* is unchanged and it is the contract self-play
+    /// depends on: a normalised distribution over exactly the legal root
+    /// actions, ascending by code. What the search recorded as its opinion is
+    /// read from here whichever root produced it.
     pub improved_policy: Vec<(u16, f64)>,
     pub root_value: f64,
+    /// The SEARCH's refinement of the root value: `nodes[0].value_sum / visits`,
+    /// from the mover's perspective, exactly like [`Self::root_value`] and like
+    /// the `z` the recorder writes beside it.
+    ///
+    /// This is the quantity `v_mix`'s documentation contrasts `root_value`
+    /// against ("not `value_sum / visits`, which is the search's refinement of
+    /// it"). The tree has computed it on every move this project has ever
+    /// played and has never exposed it, so the value head's only teacher has
+    /// been the final game outcome -- one bit supervising ~50 wall-phase plies.
+    /// Bootstrapping the value target toward the search's own estimate is the
+    /// half of the AlphaZero update this implementation was missing; see
+    /// `SelfPlayOptions::value_mix`.
+    ///
+    /// `0` visits (a search with nothing to decide, or an unexpanded root)
+    /// yields the raw value unchanged rather than a division by zero, which is
+    /// the same convention `v_mix` uses at `N = 0`.
+    pub searched_root_value: f64,
     pub simulations_used: u32,
     pub max_depth_reached: u32,
     pub considered: Vec<u16>,
@@ -640,6 +1279,21 @@ impl PuctTreeSearch {
         if !params.c_puct.is_finite() || params.c_puct <= 0.0 {
             return Err(PuctError::InvalidCPuct);
         }
+        // `epsilon` is checked always -- a NaN or an out-of-range weight is a
+        // caller bug whether or not it would be read -- and `alpha` only when
+        // the floor is actually on, matching how `SelfPlayBatch` treats the
+        // temperature it only reads inside the sampling phase.
+        if !params.dirichlet_epsilon.is_finite() || !(0.0..=1.0).contains(&params.dirichlet_epsilon)
+        {
+            return Err(PuctError::InvalidDirichlet);
+        }
+        if params.dirichlet_epsilon > 0.0
+            && !(params.dirichlet_alpha.is_finite()
+                && params.dirichlet_alpha >= MIN_DIRICHLET_ALPHA
+                && params.dirichlet_alpha < 1.0)
+        {
+            return Err(PuctError::InvalidDirichlet);
+        }
 
         let node = Node {
             position: root.position,
@@ -674,6 +1328,7 @@ impl PuctTreeSearch {
             rng,
             root_window: root.window,
             root_value: 0.0,
+            root_selection_priors: Vec::new(),
             max_depth: 0,
             used: 0,
             budget: i64::from(params.simulations),
@@ -746,11 +1401,28 @@ impl PuctTreeSearch {
                     return Ok(true);
                 }
                 Phase::Ready => {
-                    let Some(candidate) = self.next_candidate() else {
-                        self.phase = Phase::Done;
-                        return Ok(false);
+                    // The only place the two root algorithms differ: which root
+                    // edge the next simulation starts down, and when to stop.
+                    let edge = match self.params.root_mode {
+                        RootMode::Gumbel => {
+                            let Some(candidate) = self.next_candidate() else {
+                                self.phase = Phase::Done;
+                                return Ok(false);
+                            };
+                            self.candidates[candidate].edge
+                        }
+                        // Plain PUCT: no schedule to consult, so the budget is
+                        // the whole stopping rule, and the root is selected by
+                        // the same `select_edge` every other node uses.
+                        RootMode::Classic => {
+                            if self.budget <= 0 {
+                                self.phase = Phase::Done;
+                                return Ok(false);
+                            }
+                            self.select_edge(0)
+                        }
                     };
-                    if self.begin_visit(config, candidate)? {
+                    if self.begin_visit(config, edge)? {
                         self.encode(config, self.pending_leaf, features);
                         self.phase = Phase::LeafAwaiting;
                         return Ok(true);
@@ -814,8 +1486,7 @@ impl PuctTreeSearch {
         match self.phase {
             Phase::RootAwaiting => {
                 self.expand(config, 0, policy, value)?;
-                self.root_value = value;
-                self.seed_candidates();
+                self.setup_root(value);
                 self.phase = Phase::Ready;
                 Ok(())
             }
@@ -838,7 +1509,44 @@ impl PuctTreeSearch {
     /// `false`; before that the counts are partial and `action_code` is not yet
     /// decided.
     #[must_use]
+    /// `nodes[0].value_sum / nodes[0].visits`, or the raw root value when the
+    /// root carries no visits. See [`PuctResult::searched_root_value`].
+    fn searched_root_value(&self) -> f64 {
+        let root = self.nodes[0];
+        if root.visits == 0 {
+            return self.root_value;
+        }
+        root.value_sum / f64::from(root.visits)
+    }
+
     pub fn result(&self) -> PuctResult {
+        // The root's edge list is every legal root action, in the ascending code
+        // order `legal_action_codes_fast` produced, so slicing it is already the
+        // policy target's domain and ordering. An unexpanded root has no edges
+        // and yields an empty policy.
+        let root = self.nodes[0];
+        let root_edges =
+            &self.edges[root.edges_start as usize..(root.edges_start + root.edges_len) as usize];
+        if self.params.root_mode == RootMode::Classic {
+            // No candidate set: the classic root considers every legal action,
+            // so `visit_counts` and `considered` cover the whole edge list. Most
+            // of those counts are zero at a realistic budget, which is exactly
+            // what makes the target's support a measurement rather than a
+            // schedule.
+            return PuctResult {
+                action_code: most_visited(root_edges),
+                visit_counts: root_edges
+                    .iter()
+                    .map(|edge| (edge.code, edge.visits))
+                    .collect(),
+                improved_policy: visit_count_policy(root_edges),
+                root_value: self.root_value,
+                searched_root_value: self.searched_root_value(),
+                simulations_used: self.used,
+                max_depth_reached: self.max_depth,
+                considered: root_edges.iter().map(|edge| edge.code).collect(),
+            };
+        }
         let winner = self
             .survivors
             .first()
@@ -859,6 +1567,7 @@ impl PuctTreeSearch {
                 .collect(),
             improved_policy: improved_policy(root_edges, self.root_value),
             root_value: self.root_value,
+            searched_root_value: self.searched_root_value(),
             simulations_used: self.used,
             max_depth_reached: self.max_depth,
             considered: self.candidates.iter().map(|c| c.code).collect(),
@@ -914,6 +1623,95 @@ impl PuctTreeSearch {
      * Root setup
      * -------------------------------------------------------------- */
 
+    /// Everything that happens once, at the root, after the network has spoken.
+    ///
+    /// Both root modes funnel through here, which is what makes it the right
+    /// place for D3's Dirichlet floor — `P'(a) = (1 - eps) * P(a) + eps * eta_a`,
+    /// root only, **before** anything reads a root prior. The Gumbel draws in
+    /// [`Self::seed_candidates`] take one through [`js_log`]; the classic root
+    /// takes one per edge in [`Self::select_edge`]; both happen after this point.
+    ///
+    /// Two properties of how it is applied are the whole of D3's correctness,
+    /// and neither is visible from the arithmetic alone.
+    ///
+    /// **The noise never touches `edge.prior`.** [`improved_policy`] reads
+    /// `edge.prior` as its logit source and [`mixed_value`] reads it as `v_mix`'s
+    /// weight, so writing the mixture back into the edge list would make the
+    /// RECORDED TRAINING TARGET a softmax over noised logits rather than over the
+    /// network's prior. Dirichlet is meant to perturb what the search explores,
+    /// not what the network is asked to imitate — a b2 arm that fitted the net to
+    /// its own noise would be measuring something nobody designed. The mixture
+    /// therefore lives in [`Self::root_selection_priors`], which only the
+    /// selection path reads, and `tests/dirichlet_root.rs` holds the target to
+    /// being a function of `(prior, visits, Q, root_value)` alone.
+    ///
+    /// **The draws come from a stream of this root's own.** See
+    /// [`dirichlet_stream_seed`]: `alpha < 1` gamma sampling is a rejection
+    /// method, and the main stream's offset is contractually a pure function of
+    /// the ply index. `self.rng` is not touched here, at any `eps`.
+    ///
+    /// With `eps = 0` this function does exactly what it did before D3: no
+    /// stream, no draw, no vector, and every later prior read resolves to the
+    /// same `edge.prior` load it always was.
+    fn setup_root(&mut self, value: f64) {
+        self.root_value = value;
+        self.apply_root_dirichlet();
+        if self.params.root_mode == RootMode::Gumbel {
+            self.seed_candidates();
+        }
+    }
+
+    /// Fill [`Self::root_selection_priors`] with the D3 mixture, or leave it
+    /// empty when the floor is off.
+    fn apply_root_dirichlet(&mut self) {
+        let epsilon = self.params.dirichlet_epsilon;
+        if epsilon <= 0.0 {
+            return;
+        }
+        let root = self.nodes[0];
+        let count = root.edges_len as usize;
+        if count == 0 {
+            return;
+        }
+        let noise = root_dirichlet(
+            self.params.game_seed,
+            root.ply,
+            self.params.dirichlet_alpha,
+            count,
+        );
+        let start = root.edges_start as usize;
+        self.root_selection_priors.clear();
+        self.root_selection_priors.reserve(count);
+        for (edge, eta) in self.edges[start..start + count].iter().zip(&noise) {
+            self.root_selection_priors
+                .push((1.0 - epsilon) * edge.prior + epsilon * eta);
+        }
+    }
+
+    /// The priors `node`'s selection reads: the D3 mixture at the root when the
+    /// floor is on, and an empty slice everywhere else, meaning "use
+    /// `edge.prior`".
+    ///
+    /// Returning a slice rather than a per-edge value keeps the emptiness check
+    /// out of the inner loop in [`Self::select_edge`], and keeps the un-noised
+    /// path a plain `edge.prior` load.
+    fn selection_priors(&self, node: u32) -> &[f64] {
+        if node == 0 {
+            &self.root_selection_priors
+        } else {
+            &[]
+        }
+    }
+
+    /// One edge's selection prior, by index into [`Self::edges`].
+    fn selection_prior(&self, node: u32, index: u32) -> f64 {
+        let priors = self.selection_priors(node);
+        if priors.is_empty() {
+            return self.edges[index as usize].prior;
+        }
+        priors[(index - self.nodes[node as usize].edges_start) as usize]
+    }
+
     /// One Gumbel per legal root action, drawn in ascending code order — the
     /// draw order is part of the contract, because the same seed has to
     /// reproduce the same game in both engines.
@@ -923,7 +1721,16 @@ impl PuctTreeSearch {
         self.candidates.reserve(root.edges_len as usize);
         for index in root.edges_start..root.edges_start + root.edges_len {
             let edge = self.edges[index as usize];
-            let logit = js_log(edge.prior.max(POLICY_FLOOR));
+            // `effective_prior` is `prior.max(POLICY_FLOOR)` and nothing else,
+            // so this is the identical expression it always was -- named, now
+            // that the improved policy reads the prior through the same floor
+            // without taking its logarithm at all.
+            //
+            // `selection_prior` is `edge.prior` unless D3's floor is on, in
+            // which case it is `(1 - eps) * prior + eps * eta`. This is the
+            // "before the Gumbel draws" of the plan's sentence: the noise enters
+            // the logit the Gumbel is added to, not the target the tree records.
+            let logit = js_log(effective_prior(self.selection_prior(0, index)));
             self.candidates.push(Candidate {
                 code: edge.code,
                 edge: index,
@@ -1003,22 +1810,27 @@ impl PuctTreeSearch {
         }
     }
 
-    /// Keep the top `ceil(k / 2)` by `g + logit + sigma(qhat)`.
+    /// Keep the top `ceil(k / 2)` by `g + logit + qtransform(a)`.
+    ///
+    /// The qtransform is evaluated over the ROOT's whole edge list, not over the
+    /// surviving subset, for two reasons. It is what `mctx` does — its
+    /// `seq_halving.score_considered` is handed the same `completed_qvalues`
+    /// vector `action_weights` is built from, computed once over the root. And
+    /// it is what makes "one shared expression" true rather than nearly true:
+    /// under `v2` this ranking took `max_visits` over the survivors while the
+    /// improved policy took it over every edge, so the two already disagreed on
+    /// the scale factor. Now they cannot.
     fn halve(&mut self) {
-        let max_visits = self
-            .survivors
-            .iter()
-            .map(|index| self.edges[self.candidates[*index].edge as usize].visits)
-            .max()
-            .unwrap_or(0);
+        let root = self.nodes[0];
+        let start = root.edges_start as usize;
+        let end = start + root.edges_len as usize;
+        let boosts = qtransform_completed_by_mix_value(&self.edges[start..end], self.root_value);
 
         self.ranking.clear();
         for index in &self.survivors {
             let candidate = self.candidates[*index];
-            let edge = self.edges[candidate.edge as usize];
-            let qhat = completed_q(&edge, self.root_value);
-            self.ranking
-                .push((*index, candidate.score + sigma(qhat, max_visits)));
+            let boost = boosts[candidate.edge as usize - start];
+            self.ranking.push((*index, candidate.score + boost));
         }
         let codes = &self.candidates;
         self.ranking.sort_by(|left, right| {
@@ -1040,10 +1852,14 @@ impl PuctTreeSearch {
      * Descent
      * -------------------------------------------------------------- */
 
-    /// Start one simulation through `candidate`. Returns `true` when the
-    /// descent paused at an unexpanded leaf, `false` when it completed against
-    /// a terminal node and has already been backed up.
-    fn begin_visit(&mut self, config: &Config, candidate: usize) -> Result<bool> {
+    /// Start one simulation down root `edge` (an index into [`Self::edges`]).
+    /// Returns `true` when the descent paused at an unexpanded leaf, `false`
+    /// when it completed against a terminal node and has already been backed up.
+    ///
+    /// Takes the edge rather than a candidate index because the classic root has
+    /// no candidates; the budget accounting and the repetition bookkeeping below
+    /// are identical for both root modes and are deliberately not duplicated.
+    fn begin_visit(&mut self, config: &Config, edge: u32) -> Result<bool> {
         self.budget -= 1;
         self.used += 1;
 
@@ -1052,7 +1868,6 @@ impl PuctTreeSearch {
         self.window_from = 0;
         self.root_window_active = true;
 
-        let edge = self.candidates[candidate].edge;
         let child = self.step_into(config, 0, edge)?;
         self.descend(config, child)
     }
@@ -1083,7 +1898,13 @@ impl PuctTreeSearch {
             self.note_descent(key, existing.resets_window);
         }
         if self.edges[edge as usize].visits == 0 {
-            self.nodes[node as usize].visited_prior += self.edges[edge as usize].prior;
+            // The FPU's visited-prior accounting is part of selection, so it
+            // reads the same prior selection does -- the D3 mixture at the root,
+            // `edge.prior` everywhere else. It is only ever *read* at the root by
+            // `RootMode::Classic` (a Gumbel root's children are chosen by the
+            // schedule, not by `select_edge`), but charging one prior here and
+            // selecting on another would be a silent inconsistency either way.
+            self.nodes[node as usize].visited_prior += self.selection_prior(node, edge);
         }
         self.path.push((node, edge));
         Ok(child)
@@ -1199,6 +2020,12 @@ impl PuctTreeSearch {
     /// tie-break needs no extra work. The FPU fallback is hoisted out of the
     /// loop: it depends only on the node, and hoisting a value out of a loop
     /// changes no float operation.
+    ///
+    /// `P` is the D3 mixture at the root when the floor is on — that is where
+    /// Dirichlet reaches [`RootMode::Classic`], which has no Gumbel logit to
+    /// perturb — and `edge.prior` everywhere else. The empty-slice test is
+    /// hoisted for the same reason the FPU is, and when it is empty the
+    /// expression below is the identical `edge.prior` load it was before D3.
     fn select_edge(&self, node: u32) -> u32 {
         let current = self.nodes[node as usize];
         let sqrt_total = f64::from(current.visits).sqrt();
@@ -1208,6 +2035,7 @@ impl PuctTreeSearch {
             current.value
         };
         let fpu = clamp_value(node_value - FPU_REDUCTION * current.visited_prior.sqrt());
+        let selection = self.selection_priors(node);
 
         let mut best = current.edges_start;
         let mut best_score = f64::NEG_INFINITY;
@@ -1218,8 +2046,12 @@ impl PuctTreeSearch {
             } else {
                 fpu
             };
-            let score =
-                q + self.params.c_puct * edge.prior * sqrt_total / f64::from(1 + edge.visits);
+            let prior = if selection.is_empty() {
+                edge.prior
+            } else {
+                selection[(index - current.edges_start) as usize]
+            };
+            let score = q + self.params.c_puct * prior * sqrt_total / f64::from(1 + edge.visits);
             if score > best_score {
                 best_score = score;
                 best = index;
@@ -1330,10 +2162,31 @@ mod tests {
         }
     }
 
+    /// The ranking property `sigma` was originally chosen for, restated for the
+    /// transform that replaced it: it is still strictly increasing in `q`, so it
+    /// still never reorders two candidates by value. What changed is the range.
     #[test]
-    fn sigma_is_strictly_increasing_in_q() {
-        assert!(sigma(0.1, 4) < sigma(0.2, 4));
-        assert_eq!(sigma(0.5, 0), 25.0);
+    fn the_qtransform_is_strictly_increasing_in_q_and_bounded() {
+        let boosts = qtransform_completed_by_mix_value(
+            &[
+                edge(1, 0.25, 4, -0.5),
+                edge(2, 0.25, 4, 0.1),
+                edge(3, 0.25, 4, 0.2),
+                edge(4, 0.25, 4, 0.9),
+            ],
+            0.0,
+        );
+        for pair in boosts.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "boosts are not increasing in q: {boosts:?}"
+            );
+        }
+        // Min-max rescaling pins the ends, whatever the Q values were.
+        assert_eq!(boosts[0], 0.0);
+        assert_eq!(boosts[3], (MAXVISIT_INIT + 4.0) * VALUE_SCALE);
+        // The `v2` expression would have put the span at 2 * (50 + 4) = 108.
+        assert!((boosts[3] - boosts[0] - 5.4).abs() < 1e-12);
     }
 
     /// An edge with `visits` visits averaging `q`, so `completed_q` reads back
@@ -1391,44 +2244,178 @@ mod tests {
     /// Both finalists of a sequential-halving round hold *identical* visit
     /// counts — that is the schedule, not a judgement — so the old target gave
     /// them identical mass however far apart their values were. The improved
-    /// policy separates them by exactly `exp(sigma(dq))`.
+    /// policy separates them by the qtransform gap.
+    ///
+    /// **Three actions, not two.** With two the extremes are the only two
+    /// actions, min-max rescaling pins them to `0` and `1` whatever the Q values
+    /// were, and the asserted ratio `exp((50 + maxN) * 0.1)` is a tautology of
+    /// the rescale that survives swapping `0.4 / -0.2` for `0.9 / -0.9`. The
+    /// middle action is what makes the assertion depend on the Q values again:
+    /// its share is `exp(scale * (q - min) / (max - min))`, so moving it moves
+    /// the number.
     #[test]
     fn a_better_completed_q_takes_strictly_more_mass_at_equal_visits() {
         let good = edge(5, 0.25, 30, 0.4);
+        let middling = edge(7, 0.25, 30, 0.1);
         let bad = edge(9, 0.25, 30, -0.2);
         assert_eq!(good.visits, bad.visits);
         assert_eq!(good.prior, bad.prior);
 
-        let policy = improved_policy(&[good, bad], 0.0);
-        let (good_mass, bad_mass) = (mass(&policy, 5), mass(&policy, 9));
+        let scale = (MAXVISIT_INIT + 30.0) * VALUE_SCALE;
+        let policy = improved_policy(&[good, middling, bad], 0.0);
+        let (good_mass, middling_mass, bad_mass) =
+            (mass(&policy, 5), mass(&policy, 7), mass(&policy, 9));
         assert!(
-            good_mass > bad_mass,
-            "Q = 0.4 took {good_mass}, Q = -0.2 took {bad_mass}"
+            good_mass > middling_mass && middling_mass > bad_mass,
+            "Q = 0.4 took {good_mass}, Q = 0.1 took {middling_mass}, Q = -0.2 took {bad_mass}"
         );
-        // Equal priors cancel, so the ratio is the sigma gap alone.
-        let expected = sigma(0.6, 30).exp();
+
+        // Equal priors cancel, so every ratio is a qtransform gap alone. The
+        // extremes are pinned by the rescale; the middle one is not.
+        let ends = scale.exp();
         assert!(
-            ((good_mass / bad_mass) / expected - 1.0).abs() < 1e-9,
-            "mass ratio {} is not exp(sigma(0.6, 30)) = {expected}",
+            ((good_mass / bad_mass) / ends - 1.0).abs() < 1e-9,
+            "mass ratio {} is not exp((50 + 30) * 0.1) = {ends}",
             good_mass / bad_mass
+        );
+        let middle = (scale * (0.1 - -0.2) / (0.4 - -0.2)).exp();
+        assert!(
+            ((middling_mass / bad_mass) / middle - 1.0).abs() < 1e-9,
+            "mass ratio {} is not exp(scale * (0.1 + 0.2) / 0.6) = {middle}",
+            middling_mass / bad_mass
+        );
+        // Moving the middle action's Q must move its mass, or the assertion
+        // above is measuring the rescale rather than the value.
+        let moved = improved_policy(&[good, edge(7, 0.25, 30, 0.3), bad], 0.0);
+        assert!(mass(&moved, 7) > middling_mass * 1.5);
+
+        assert!(
+            ends < (0.6_f64 * 80.0).exp(),
+            "the v3 ratio must be far below the v2 one"
         );
     }
 
-    /// An action the halving never visited is completed with the root value, so
-    /// two unvisited actions are separated by their priors alone — which is how
-    /// the improved policy covers moves the considered set skipped instead of
+    /// An action the halving never visited is completed with `v_mix`, so two
+    /// unvisited actions are separated by their priors alone — which is how the
+    /// improved policy covers moves the considered set skipped instead of
     /// targeting them to zero.
+    ///
+    /// **Two DISTINCT visited Q-values, for a reason.** Nothing weaker
+    /// discriminates `v_mix` from `v2`'s raw root value. With no visited action
+    /// at all `v_mix` collapses to the raw value by definition; with exactly one
+    /// visited action there are only two distinct completions and the rescale
+    /// pins them to `0` and the full scale whichever completion was used. Both
+    /// pass with D2 reverted. Two visited actions plus the unvisited pair give
+    /// three distinct completed values, and then WHICH action sits at the bottom
+    /// of the range is decided by the completion.
     #[test]
-    fn unvisited_actions_are_completed_with_the_root_value() {
-        let policy = improved_policy(&[edge(2, 0.6, 0, 0.0), edge(8, 0.15, 0, 0.0)], -0.3);
+    fn unvisited_actions_are_completed_with_the_mixed_value() {
+        // v_mix = (-0.9 + 8 * 0.32) / 9, where 0.32 is the prior-weighted mean
+        // of the two visited Q-values: (0.3 * 0.8 + 0.2 * -0.4) / 0.5.
+        let raw_value = -0.9;
+        let edges = [
+            edge(2, 0.4, 0, 0.0),
+            edge(8, 0.1, 0, 0.0),
+            edge(11, 0.3, 4, 0.8),
+            edge(14, 0.2, 4, -0.4),
+        ];
+        let weighted = (0.3 * 0.8 + 0.2 * -0.4) / 0.5;
+        let expected_mix = (raw_value + 8.0 * weighted) / 9.0;
+        let mixed = mixed_value(&edges, raw_value);
+        assert!((mixed - expected_mix).abs() < 1e-12, "v_mix is {mixed}");
+        assert!(
+            mixed > -0.4,
+            "v_mix {mixed} must land inside the visited range, or this test \
+             cannot tell it from the raw root value"
+        );
+
+        let boosts = qtransform_completed_by_mix_value(&edges, raw_value);
+        // The two unvisited actions share the completion, so they share a boost
+        // and are separated by their priors alone.
+        assert_eq!(boosts[0], boosts[1]);
+        let policy = improved_policy(&edges, raw_value);
         assert!(
             (mass(&policy, 2) / mass(&policy, 8) - 4.0).abs() < 1e-9,
             "equal completions must leave the prior ratio intact"
         );
-        // And a visited action beating the root value outranks a better-priored
+
+        // The discriminator. Under `v3` the WEAKEST VISITED action is the
+        // minimum and the unvisited pair sits strictly inside the range. Under
+        // `v2`'s raw root value of -0.9 the unvisited pair would BE the minimum
+        // at exactly 0, and the weak visited action would be lifted off the
+        // floor to 1.59.
+        let ceiling = (MAXVISIT_INIT + 4.0) * VALUE_SCALE;
+        assert_eq!(
+            boosts[3], 0.0,
+            "the weakest visited action must be the floor"
+        );
+        assert_eq!(boosts[2], ceiling);
+        let expected_boost = ceiling * (expected_mix - -0.4) / (0.8 - -0.4);
+        assert!(
+            (boosts[0] - expected_boost).abs() < 1e-12,
+            "the unvisited pair took {}, not v_mix's {expected_boost}",
+            boosts[0]
+        );
+        assert!(boosts[0] > 1.0 && boosts[0] < ceiling);
+
+        // And a visited action beating the completion outranks a better-priored
         // unvisited one, which no visit-count target could say either.
         let policy = improved_policy(&[edge(2, 0.9, 0, 0.0), edge(8, 0.1, 4, 0.5)], -0.3);
         assert!(mass(&policy, 8) > mass(&policy, 2));
+    }
+
+    /// The `v2` completion and the `v3` one, on the configuration that made the
+    /// difference matter: a value head running cold against a tree that has
+    /// found something.
+    ///
+    /// `v_mix = (-1.0 + 4 * 0.9) / 5 = 0.52`, so the unvisited action is
+    /// completed near the visited one rather than a full point below it. Under
+    /// `v2`'s raw root value the unvisited action would have been completed at
+    /// `-1.0` — the bottom of the range — and crushed.
+    #[test]
+    fn mixed_value_lifts_the_unvisited_set_off_a_cold_root_value() {
+        let edges = [edge(1, 0.5, 4, 0.9), edge(2, 0.5, 0, 0.0)];
+        assert!((mixed_value(&edges, -1.0) - 0.52).abs() < 1e-12);
+
+        let boosts = qtransform_completed_by_mix_value(&edges, -1.0);
+        let span = boosts[0] - boosts[1];
+        assert!((span - (MAXVISIT_INIT + 4.0) * VALUE_SCALE).abs() < 1e-12);
+
+        // The unvisited action keeps a real share of the mass: `exp(-5.4)`
+        // relative to the visited one, not `exp(-108)`.
+        let policy = improved_policy(&edges, -1.0);
+        assert!(
+            mass(&policy, 2) > 4e-3,
+            "the unvisited action took {}",
+            mass(&policy, 2)
+        );
+    }
+
+    /// `v_mix` interpolates: `N = 0` is the raw value, and a large `N` converges
+    /// on the prior-weighted mean of the visited Q-values.
+    #[test]
+    fn mixed_value_interpolates_between_the_raw_value_and_the_visited_mean() {
+        let unvisited = [edge(1, 0.7, 0, 0.0), edge(2, 0.3, 0, 0.0)];
+        assert_eq!(mixed_value(&unvisited, 0.25), 0.25);
+
+        // Weighted mean of the visited pair: (0.2 * 0.5 + 0.6 * -0.5) / 0.8.
+        let weighted = (0.2 * 0.5 + 0.6 * -0.5) / 0.8;
+        let mut previous = f64::INFINITY;
+        for visits in [1_u32, 4, 64, 4096] {
+            let edges = [
+                edge(1, 0.2, visits, 0.5),
+                edge(2, 0.6, visits, -0.5),
+                edge(3, 0.2, 0, 0.0),
+            ];
+            let mixed = mixed_value(&edges, 1.0);
+            assert!(
+                mixed > weighted && mixed < 1.0,
+                "v_mix {mixed} left the interval [{weighted}, 1.0]"
+            );
+            assert!(mixed < previous, "v_mix must approach the weighted mean");
+            previous = mixed;
+        }
+        assert!((previous - weighted).abs() < 1e-3);
     }
 
     #[test]
@@ -1462,12 +2449,114 @@ mod tests {
         assert!(improved_policy(&[], 0.0).is_empty());
     }
 
+    /// An action the halving never visited is completed with the root value, so
+    /// two unvisited actions are separated by their priors alone — which is how
+    /// the improved policy covers moves the considered set skipped instead of
+    /// targeting them to zero.
+    #[test]
+    fn unvisited_actions_are_completed_with_the_root_value() {
+        let policy = improved_policy(&[edge(2, 0.6, 0, 0.0), edge(8, 0.15, 0, 0.0)], -0.3);
+        assert!(
+            (mass(&policy, 2) / mass(&policy, 8) - 4.0).abs() < 1e-9,
+            "equal completions must leave the prior ratio intact"
+        );
+        // And a visited action beating the root value outranks a better-priored
+        // unvisited one, which no visit-count target could say either.
+        let policy = improved_policy(&[edge(2, 0.9, 0, 0.0), edge(8, 0.1, 4, 0.5)], -0.3);
+        assert!(mass(&policy, 8) > mass(&policy, 2));
+    }
+
     #[test]
     fn clamp_value_passes_nan_through_like_javascript() {
         assert_eq!(clamp_value(2.0), 1.0);
         assert_eq!(clamp_value(-2.0), -1.0);
         assert_eq!(clamp_value(0.25), 0.25);
         assert!(clamp_value(f64::NAN).is_nan());
+    }
+
+    /// The classic target is the visit distribution, exactly, and the tie-break
+    /// on the played move is the lowest code — the same rule `select_edge` uses.
+    ///
+    /// A real search almost never produces a tie at the maximum (PUCT keeps
+    /// pushing the leader), so this is where the rule can be exercised at all: a
+    /// sweep of 1..260 simulations from the opening produced no tied maximum,
+    /// which is precisely why the integration test cannot cover it and why a
+    /// `>=` here would otherwise be invisible.
+    #[test]
+    fn most_visited_breaks_ties_to_the_lowest_code() {
+        let tied = [
+            edge(3, 0.2, 7, 0.0),
+            edge(11, 0.5, 7, 0.0),
+            edge(40, 0.3, 2, 0.0),
+        ];
+        // Anti-vacuity: this only tests a tie-break if there is a tie, and only
+        // tests the *lowest* code if the tie is not already won by position.
+        assert_eq!(tied[0].visits, tied[1].visits, "the fixture has no tie");
+        assert!(
+            tied[1].prior > tied[0].prior,
+            "the tie must not be breakable by prior"
+        );
+        assert_eq!(most_visited(&tied), 3);
+
+        // A strictly greater count wins wherever it sits in the list.
+        assert_eq!(
+            most_visited(&[edge(3, 0.2, 7, 0.0), edge(11, 0.2, 8, 0.0)]),
+            11
+        );
+        assert_eq!(
+            most_visited(&[edge(3, 0.2, 9, 0.0), edge(11, 0.2, 8, 0.0)]),
+            3
+        );
+        // An all-unvisited root is a tie at zero: still the lowest code, never
+        // an arbitrary one.
+        assert_eq!(
+            most_visited(&[edge(5, 0.9, 0, 0.0), edge(9, 0.1, 0, 0.0)]),
+            5
+        );
+    }
+
+    #[test]
+    fn the_classic_target_is_exactly_the_visit_share() {
+        let policy = visit_count_policy(&[
+            edge(3, 0.7, 6, 0.0),
+            edge(11, 0.2, 2, 0.0),
+            edge(40, 0.1, 0, 0.0),
+        ]);
+        // 8 visits: 6/8, 2/8, and an unvisited action at exactly zero. Exact
+        // equality, not a tolerance -- these are dyadic rationals.
+        assert_eq!(policy, vec![(3, 0.75), (11, 0.25), (40, 0.0)]);
+        // The prior is not consulted: 0.7 against 0.2 did not move the split.
+        let reprioritised = visit_count_policy(&[
+            edge(3, 0.1, 6, 0.0),
+            edge(11, 0.8, 2, 0.0),
+            edge(40, 0.1, 0, 0.0),
+        ]);
+        assert_eq!(policy, reprioritised);
+    }
+
+    /// The zero-visit fallback, pinned rather than merely argued for.
+    ///
+    /// This codebase lost 114 iterations to a silent one-hot policy target
+    /// (`effective_visit_counts` under the v1 format), so the shape of this
+    /// fallback is not a detail: a one-hot here would be that same defect
+    /// wearing the new target's name. It returns the network's own prior, which
+    /// teaches the policy head nothing rather than something false.
+    #[test]
+    fn a_classic_target_with_no_visits_is_the_prior_and_never_a_one_hot() {
+        let edges = [
+            edge(2, 0.5, 0, 0.0),
+            edge(8, 0.3, 0, 0.0),
+            edge(40, 0.2, 0, 0.0),
+        ];
+        let policy = visit_count_policy(&edges);
+        assert_eq!(policy, vec![(2, 0.5), (8, 0.3), (40, 0.2)]);
+        let support = policy.iter().filter(|(_, p)| *p > 0.0).count();
+        assert_eq!(
+            support, 3,
+            "an unvisited classic root must not collapse onto one action"
+        );
+        // And an empty root is empty, not a one-hot on code 0.
+        assert!(visit_count_policy(&[]).is_empty());
     }
 
     #[test]
@@ -1479,5 +2568,819 @@ mod tests {
         window.reset(9);
         assert_eq!(window.get(7), 0);
         assert_eq!(window.get(9), 1);
+    }
+
+    /* -------------------------------------------------------------- *
+     * The halving ranking's use of the shared expression
+     * -------------------------------------------------------------- */
+
+    fn canonical_config() -> Config {
+        Config {
+            ruleset: crate::RULESET.into(),
+            rows: 9,
+            columns: 9,
+            start: crate::Players {
+                a: Coord { r: 8, c: 4 },
+                b: Coord { r: 0, c: 4 },
+            },
+            goal_rows: crate::Players { a: 0, b: 8 },
+            initial_stock: crate::Players { a: 10, b: 10 },
+            jump_rule: crate::JUMP_RULE.into(),
+            repetition_threshold: crate::REPETITION_THRESHOLD,
+            ply_cap: 200,
+            first_player: Player::A,
+        }
+    }
+
+    /// A search whose root has been expanded from a uniform prior, so the
+    /// candidates and their Gumbel scores exist and the root edges can be
+    /// written to directly.
+    fn expanded_root(
+        config: &Config,
+        max_considered: u32,
+        seed: u32,
+        root_value: f64,
+    ) -> PuctTreeSearch {
+        expanded_root_with(
+            config,
+            PuctParams {
+                simulations: 64,
+                max_considered,
+                c_puct: DEFAULT_C_PUCT,
+                // Explicit, not defaulted: the whole point of these two tests is
+                // the sequential-halving ranking, which `RootMode::Classic` does
+                // not run at all. D3's floor is off, from `Default`.
+                root_mode: RootMode::Gumbel,
+                ..PuctParams::default()
+            },
+            seed,
+            &vec![1.0_f32; config.policy_size()],
+            root_value,
+        )
+    }
+
+    /// The same, with the params and the network's raw policy under the caller's
+    /// control — the shape D3's tests need, since the whole question there is
+    /// what the search does with a prior it was given.
+    fn expanded_root_with(
+        config: &Config,
+        params: PuctParams,
+        seed: u32,
+        policy: &[f32],
+        root_value: f64,
+    ) -> PuctTreeSearch {
+        let state = crate::create_initial_state(config).expect("the 9x9 start is valid");
+        let mut search = PuctTreeSearch::from_state(config, &state, params, Lcg32::new(seed))
+            .expect("the start position begins a search");
+
+        let mut features = vec![0.0_f32; NN_INPUT_PLANES * config.cells()];
+        assert!(search
+            .next_leaf(config, &mut features)
+            .expect("the root is handed out first"));
+        search
+            .submit(config, policy, root_value)
+            .expect("a positive policy expands the root");
+        search
+    }
+
+    /// **The halving ranking reads the shared expression, and its result depends
+    /// on it.**
+    ///
+    /// This is the half of D1 that changes search decisions, and it is the half
+    /// the goldens cannot see: they address
+    /// [`qtransform_completed_by_mix_value`] directly, so they would still pass
+    /// if [`PuctTreeSearch::halve`] stopped calling it. The cross-engine grid
+    /// cannot see it either — its `v1` oracle disagrees with `v3` by design, so
+    /// its divergence counters move but nothing there says which way is right.
+    ///
+    /// So: plant known statistics on the root edges, run one `halve`, and
+    /// require the survivors to be exactly the top half by
+    /// `candidate.score + root_qtransform(root edges).transformed[edge]` —
+    /// recomputed here through the PUBLIC entry point, so the assertion is
+    /// against the same expression the improved policy is built from rather than
+    /// against a number copied out of a previous run.
+    ///
+    /// The Q-values are assigned in the inverse of the Gumbel order on purpose,
+    /// and the test asserts that the boosted ranking and the bare
+    /// `g + logit` ranking disagree before it checks which one `halve` followed.
+    /// Without that, a `halve` that ignored the boost entirely would pass.
+    #[test]
+    fn halving_ranks_by_the_gumbel_score_plus_the_shared_qtransform() {
+        let config = canonical_config();
+        let mut search = expanded_root(&config, 4, 20_260_809, 0.25);
+        let root = search.nodes[0];
+        let start = root.edges_start as usize;
+        let end = start + root.edges_len as usize;
+        assert_eq!(search.candidates.len(), 4);
+        assert_eq!(search.survivors.len(), 4);
+
+        // Rank the four candidates by their Gumbel score and hand the BEST
+        // Q-value to the WORST-scoring one, so the boost has something to
+        // overturn. 64 visits put the boost span at 11.4, comfortably wider than
+        // the spread of four Gumbel draws.
+        let mut by_score: Vec<usize> = (0..search.candidates.len()).collect();
+        by_score.sort_by(|left, right| {
+            search.candidates[*right]
+                .score
+                .partial_cmp(&search.candidates[*left].score)
+                .expect("Gumbel scores are finite")
+        });
+        for (rank, index) in by_score.iter().enumerate() {
+            let q = -1.0 + 2.0 * (rank as f64) / 3.0;
+            let edge = search.candidates[*index].edge as usize;
+            search.edges[edge].visits = 64;
+            search.edges[edge].value_sum = 64.0 * q;
+        }
+
+        // The expected ranking, from the public entry point over the whole root
+        // edge list -- every legal action, not just the four candidates.
+        let stats: Vec<ActionStats> = search.edges[start..end]
+            .iter()
+            .map(|edge| ActionStats {
+                prior: edge.prior,
+                visits: edge.visits,
+                qvalue: if edge.visits > 0 {
+                    edge.value_sum / f64::from(edge.visits)
+                } else {
+                    f64::NAN
+                },
+            })
+            .collect();
+        let boosts = root_qtransform(&stats, search.root_value).transformed;
+
+        let keep = |scored: &mut Vec<(u16, f64)>| -> Vec<u16> {
+            scored.sort_by(|left, right| {
+                right
+                    .1
+                    .partial_cmp(&left.1)
+                    .expect("scores are finite")
+                    .then(left.0.cmp(&right.0))
+            });
+            let mut kept: Vec<u16> = scored.iter().take(2).map(|(code, _)| *code).collect();
+            kept.sort_unstable();
+            kept
+        };
+        let mut boosted: Vec<(u16, f64)> = search
+            .candidates
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.code,
+                    candidate.score + boosts[candidate.edge as usize - start],
+                )
+            })
+            .collect();
+        let mut bare: Vec<(u16, f64)> = search
+            .candidates
+            .iter()
+            .map(|candidate| (candidate.code, candidate.score))
+            .collect();
+        let expected = keep(&mut boosted);
+        let without_the_boost = keep(&mut bare);
+        assert_ne!(
+            expected, without_the_boost,
+            "the case does not discriminate: `g + logit` alone would keep the same two \
+             survivors, so a halve() that never consulted the qtransform would pass"
+        );
+
+        search.halve();
+        let survivors: Vec<u16> = search
+            .survivors
+            .iter()
+            .map(|index| search.candidates[*index].code)
+            .collect();
+        assert_eq!(
+            survivors, expected,
+            "halve() kept {survivors:?}; ranking by score + qtransform keeps {expected:?} and \
+             ranking by the bare Gumbel score keeps {without_the_boost:?}"
+        );
+    }
+
+    /* -------------------------------------------------------------- *
+     * D3: the Dirichlet floor's two-sided contract
+     * -------------------------------------------------------------- */
+
+    /// A non-uniform, strictly positive root policy, so "the noise moved the
+    /// prior" cannot be confused with "the prior was flat anyway".
+    ///
+    /// The values are arbitrary but deterministic and they differ across codes
+    /// by more than the noise does at some indices and less at others, which is
+    /// what makes the mixture's arithmetic worth checking pointwise.
+    fn sloped_policy(config: &Config) -> Vec<f32> {
+        (0..config.policy_size())
+            .map(|code| 0.25 + ((code * 37) % 101) as f32)
+            .collect()
+    }
+
+    fn floored_params(epsilon: f64, game_seed: u32) -> PuctParams {
+        PuctParams {
+            simulations: 64,
+            // Above the legal count, so `select_considered` keeps every
+            // candidate in edge order and `candidates[i]` is root edge `i`.
+            max_considered: 256,
+            c_puct: DEFAULT_C_PUCT,
+            root_mode: RootMode::Gumbel,
+            game_seed,
+            dirichlet_epsilon: epsilon,
+            dirichlet_alpha: DEFAULT_DIRICHLET_ALPHA,
+        }
+    }
+
+    /// The mixture is exactly `(1 - eps) * P + eps * eta`, it is a distribution,
+    /// and — the point of the whole design — the edge list the target is read
+    /// from is untouched.
+    #[test]
+    fn the_floor_mixes_into_a_copy_and_leaves_the_networks_prior_in_the_edges() {
+        let config = canonical_config();
+        let policy = sloped_policy(&config);
+        let plain = expanded_root_with(&config, floored_params(0.0, 77), 5, &policy, 0.25);
+        let floored = expanded_root_with(
+            &config,
+            floored_params(DEFAULT_DIRICHLET_EPSILON, 77),
+            5,
+            &policy,
+            0.25,
+        );
+
+        let root = floored.nodes[0];
+        let count = root.edges_len as usize;
+        assert!(count > 100, "the opening root has {count} edges");
+        assert!(
+            plain.root_selection_priors.is_empty(),
+            "eps = 0 must allocate no mixture at all"
+        );
+        assert_eq!(floored.root_selection_priors.len(), count);
+
+        // The network's priors are byte-identical between the two searches: the
+        // floor wrote nowhere near them.
+        let priors: Vec<f64> = plain.edges[..count].iter().map(|edge| edge.prior).collect();
+        let after: Vec<f64> = floored.edges[..count]
+            .iter()
+            .map(|edge| edge.prior)
+            .collect();
+        assert_eq!(priors, after, "the floor rewrote the root's edge priors");
+
+        // And the mixture is the formula, term by term, over the noise the
+        // public entry point produces from this root's key.
+        let eta = root_dirichlet(77, root.ply, DEFAULT_DIRICHLET_ALPHA, count);
+        let epsilon = DEFAULT_DIRICHLET_EPSILON;
+        for index in 0..count {
+            assert_eq!(
+                floored.root_selection_priors[index],
+                (1.0 - epsilon) * priors[index] + epsilon * eta[index],
+                "edge {index}"
+            );
+        }
+        let total: f64 = floored.root_selection_priors.iter().sum();
+        assert!(
+            (total - 1.0).abs() < 1e-12,
+            "the noised priors sum to {total}"
+        );
+        // Anti-vacuity: the noise has to have MOVED something, or every
+        // assertion above holds for a mixture with weight zero.
+        let moved = (0..count).filter(|i| floored.root_selection_priors[*i] != priors[*i]);
+        assert!(moved.count() > count / 2);
+    }
+
+    /// The noise enters the Gumbel logit — `g + log P'` and not `g + log P`.
+    ///
+    /// The draws themselves are reproduced here from a fresh stream, so the
+    /// assertion separates the two halves of the score: the Gumbel is the same
+    /// as it would have been (the floor took no word from this stream) and the
+    /// logit is the noised one.
+    #[test]
+    fn the_gumbel_score_is_drawn_against_the_noised_logit() {
+        let config = canonical_config();
+        let policy = sloped_policy(&config);
+        let search = expanded_root_with(
+            &config,
+            floored_params(DEFAULT_DIRICHLET_EPSILON, 909),
+            2024,
+            &policy,
+            0.0,
+        );
+        let count = search.nodes[0].edges_len as usize;
+        assert_eq!(
+            search.candidates.len(),
+            count,
+            "max_considered was supposed to keep every candidate"
+        );
+
+        let mut stream = Lcg32::new(2024);
+        let mut differed = 0_usize;
+        for index in 0..count {
+            let candidate = search.candidates[index];
+            assert_eq!(candidate.edge as usize, index, "candidates lost edge order");
+            let gumbel = stream.gumbel();
+            let noised = js_log(effective_prior(search.root_selection_priors[index]));
+            let bare = js_log(effective_prior(search.edges[index].prior));
+            assert_eq!(
+                candidate.score,
+                gumbel + noised,
+                "candidate {index} scored against the bare logit {bare} rather than the \
+                 noised {noised}"
+            );
+            if noised != bare {
+                differed += 1;
+            }
+        }
+        assert!(
+            differed > count / 2,
+            "only {differed} of {count} logits moved; the assertion above cannot tell the two \
+             apart"
+        );
+    }
+
+    /// **The recorded target is a function of the network's prior, the visits,
+    /// the Q-values and the root value — and of nothing else.**
+    ///
+    /// This is the constraint the whole design exists for. Two searches are run
+    /// from the same seed and the same policy, one floored and one not, and then
+    /// given IDENTICAL root statistics by hand. Their recorded targets must be
+    /// bit-identical, even though their candidate sets are not, because the
+    /// target reads `edge.prior` and the noise lives elsewhere.
+    ///
+    /// The last assertion is what stops this passing for the wrong reason: it
+    /// computes the target the other way — over the noised priors — and requires
+    /// it to be a genuinely different distribution. If the noise were too small
+    /// to matter, or absent, that would fail.
+    #[test]
+    fn the_recorded_target_ignores_the_floor_at_identical_tree_statistics() {
+        let config = canonical_config();
+        let policy = sloped_policy(&config);
+        let mut plain =
+            expanded_root_with(&config, floored_params(0.0, 31), 8_675_309, &policy, -0.4);
+        let mut floored = expanded_root_with(
+            &config,
+            floored_params(DEFAULT_DIRICHLET_EPSILON, 31),
+            8_675_309,
+            &policy,
+            -0.4,
+        );
+        assert_ne!(
+            plain.candidates.iter().map(|c| c.score).collect::<Vec<_>>(),
+            floored
+                .candidates
+                .iter()
+                .map(|c| c.score)
+                .collect::<Vec<_>>(),
+            "the two searches are supposed to differ in what they would explore"
+        );
+
+        // Plant the same tree on both: a visited prefix with spread-out
+        // Q-values, an unvisited tail completed by `v_mix`.
+        let count = plain.nodes[0].edges_len as usize;
+        for index in 0..count {
+            let (visits, q) = if index % 5 == 0 {
+                (3 + (index as u32 % 7), -0.6 + 0.03 * (index as f64 % 11.0))
+            } else {
+                (0, 0.0)
+            };
+            for search in [&mut plain, &mut floored] {
+                search.edges[index].visits = visits;
+                search.edges[index].value_sum = f64::from(visits) * q;
+            }
+        }
+
+        let expected = plain.result().improved_policy;
+        assert_eq!(
+            floored.result().improved_policy,
+            expected,
+            "the floor reached the recorded policy target"
+        );
+
+        // The discriminator: the same target computed over the NOISED priors is
+        // a different distribution, so the equality above is a statement about
+        // which prior was used and not about the noise being negligible.
+        let noised_edges: Vec<Edge> = (0..count)
+            .map(|index| Edge {
+                prior: floored.root_selection_priors[index],
+                ..floored.edges[index]
+            })
+            .collect();
+        let over_noised = improved_policy(&noised_edges, floored.root_value);
+        assert_ne!(over_noised, expected);
+        let divergence: f64 = over_noised
+            .iter()
+            .zip(&expected)
+            .map(|((_, noised), (_, clean))| (noised - clean).abs())
+            .sum();
+        assert!(
+            divergence > 0.1,
+            "the two targets differ by only {divergence} in total variation; this case cannot \
+             tell them apart"
+        );
+    }
+
+    /// **The classic root's PUCT term reads `P'`, not `P`.**
+    ///
+    /// This is where Dirichlet enters [`RootMode::Classic`] — there is no Gumbel
+    /// logit for it to perturb — and it needs an assertion of its own, because
+    /// the obvious end-to-end test does not discriminate. "A floored classic
+    /// shard differs from an unfloored one" is satisfied by the FPU's
+    /// visited-prior accounting ALONE: a `select_edge` that ignored the mixture
+    /// entirely would still produce different games, because the priors it
+    /// charges to `visited_prior` moved. A mutation that did exactly that
+    /// survived every other test in this file and in `tests/dirichlet_root.rs`.
+    ///
+    /// So this plants known statistics, computes the argmax both ways, requires
+    /// them to disagree, and only then asks which one `select_edge` followed.
+    #[test]
+    fn the_classic_roots_puct_term_ranks_by_the_noised_prior() {
+        let config = canonical_config();
+        let policy = sloped_policy(&config);
+        let mut search = expanded_root_with(
+            &config,
+            PuctParams {
+                root_mode: RootMode::Classic,
+                ..floored_params(DEFAULT_DIRICHLET_EPSILON, 2718)
+            },
+            281,
+            &policy,
+            0.2,
+        );
+        let count = search.nodes[0].edges_len as usize;
+
+        // A root part-way through its budget: 100 visits spread over a handful
+        // of edges, the rest untouched, so the exploration term is live
+        // (`sqrt(100) = 10`) and the FPU is the same for every unvisited edge.
+        search.nodes[0].visits = 100;
+        search.nodes[0].value_sum = 12.0;
+        search.nodes[0].visited_prior = 0.3;
+        for index in 0..count {
+            let (visits, q) = match index % 23 {
+                0 => (9_u32, 0.42),
+                7 => (5, -0.11),
+                _ => (0, 0.0),
+            };
+            search.edges[index].visits = visits;
+            search.edges[index].value_sum = f64::from(visits) * q;
+        }
+
+        let node = search.nodes[0];
+        let fpu = clamp_value(
+            node.value_sum / f64::from(node.visits) - FPU_REDUCTION * node.visited_prior.sqrt(),
+        );
+        let sqrt_total = f64::from(node.visits).sqrt();
+        let argmax = |priors: &[f64]| -> usize {
+            let mut best = 0_usize;
+            let mut best_score = f64::NEG_INFINITY;
+            for (index, prior) in priors.iter().enumerate().take(count) {
+                let edge = search.edges[index];
+                let q = if edge.visits > 0 {
+                    edge.value_sum / f64::from(edge.visits)
+                } else {
+                    fpu
+                };
+                let score = q + DEFAULT_C_PUCT * prior * sqrt_total / f64::from(1 + edge.visits);
+                if score > best_score {
+                    best_score = score;
+                    best = index;
+                }
+            }
+            best
+        };
+        let bare: Vec<f64> = search.edges[..count]
+            .iter()
+            .map(|edge| edge.prior)
+            .collect();
+        let noised = argmax(&search.root_selection_priors);
+        let unnoised = argmax(&bare);
+        assert_ne!(
+            noised, unnoised,
+            "the planted root ranks the same edge first either way, so it cannot tell a \
+             noised PUCT term from a bare one"
+        );
+
+        assert_eq!(
+            search.select_edge(0) as usize,
+            noised,
+            "the classic root selected edge {} -- the bare-prior argmax is {unnoised} and the \
+             noised one is {noised}",
+            search.select_edge(0)
+        );
+    }
+
+    /// **Root only.** The mixture reaches the root's edge list and no other
+    /// node's, which is the "root only" of D3's one-line specification.
+    ///
+    /// Every other test would survive its removal: the digests and the
+    /// floored-vs-unfloored comparisons all move whether the noise is applied at
+    /// one node or at every node, so "root only" is currently a property nothing
+    /// NAMES. This names it, at the two places a prior is read below the root —
+    /// `select_edge`'s ranking and the FPU's charge — and it is the same class of
+    /// gap as the `select_edge` near-miss above, one rung less severe.
+    #[test]
+    fn the_floor_reaches_the_root_and_no_other_node() {
+        let config = canonical_config();
+        let policy = sloped_policy(&config);
+        let mut search = expanded_root_with(
+            &config,
+            PuctParams {
+                simulations: 48,
+                root_mode: RootMode::Classic,
+                ..floored_params(DEFAULT_DIRICHLET_EPSILON, 1234)
+            },
+            99,
+            &policy,
+            0.0,
+        );
+        let mut features = vec![0.0_f32; NN_INPUT_PLANES * config.cells()];
+        let mut leaf_policy = vec![0.0_f32; config.policy_size()];
+        while search
+            .next_leaf(&config, &mut features)
+            .expect("the search runs to completion")
+        {
+            let value = crate::mock_evaluator::evaluate(&features, &mut leaf_policy);
+            search
+                .submit(&config, &leaf_policy, value)
+                .expect("the mock evaluation is well formed");
+        }
+
+        // The root has a mixture and it is not the bare prior.
+        assert!(!search.root_selection_priors.is_empty());
+        assert!(search.selection_priors(0) == search.root_selection_priors.as_slice());
+
+        // Every expanded node below the root selects on `edge.prior` itself.
+        let mut checked = 0_usize;
+        for node in 1..search.nodes.len() as u32 {
+            let entry = search.nodes[node as usize];
+            if !entry.expanded || entry.edges_len == 0 {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                search.selection_priors(node).is_empty(),
+                "node {node} was handed a noise vector"
+            );
+            let start = entry.edges_start;
+            for index in start..start + entry.edges_len {
+                assert_eq!(
+                    search.selection_prior(node, index),
+                    search.edges[index as usize].prior,
+                    "node {node} edge {index} selects on something other than the network's prior"
+                );
+            }
+        }
+        assert!(
+            checked > 5,
+            "only {checked} non-root nodes were expanded; this case cannot discriminate"
+        );
+
+        // And the discriminator for the root itself: had the mixture been
+        // applied everywhere, a child's priors would differ from the network's
+        // by about as much as the root's do.
+        let count = search.nodes[0].edges_len as usize;
+        let drift: f64 = (0..count)
+            .map(|index| (search.root_selection_priors[index] - search.edges[index].prior).abs())
+            .sum();
+        assert!(
+            drift > 0.1,
+            "the root's own mixture moved the priors by only {drift}; this case cannot tell \
+             root-only from nowhere-at-all"
+        );
+    }
+
+    /// The rejection loop's cap is unreachable, measured rather than argued.
+    ///
+    /// [`GAMMA_MAX_ATTEMPTS`] is a hang guard whose fallback returns a value
+    /// outside the accept region, so "it never fires" is a claim the sampler's
+    /// correctness rests on. The attempt count is recovered exactly: GS consumes
+    /// two words per attempt, and [`Lcg32`] is a bijection, so replaying the
+    /// stream from the pre-call state counts them.
+    #[test]
+    fn the_gamma_samplers_rejection_loop_never_approaches_its_cap() {
+        const DRAWS: u64 = 20_000;
+        for alpha in [
+            MIN_DIRICHLET_ALPHA,
+            0.02,
+            DEFAULT_DIRICHLET_ALPHA,
+            0.5,
+            0.999,
+        ] {
+            let mut rng = Lcg32::new(12_345);
+            let mut attempts_total = 0_u64;
+            let mut worst = 0_u64;
+            for _ in 0..DRAWS {
+                let before = rng;
+                let draw = sample_gamma_below_one(&mut rng, alpha);
+                assert!(draw.is_finite() && draw >= 0.0);
+                let mut shadow = before;
+                let mut words = 0_u64;
+                while shadow != rng {
+                    shadow.next_u32();
+                    words += 1;
+                    assert!(words < 4 * u64::from(GAMMA_MAX_ATTEMPTS), "runaway replay");
+                }
+                assert_eq!(words % 2, 0, "GS takes exactly two words per attempt");
+                attempts_total += words / 2;
+                worst = worst.max(words / 2);
+            }
+            let acceptance = DRAWS as f64 / attempts_total as f64;
+            assert!(
+                acceptance > 0.7,
+                "alpha {alpha} accepted {acceptance} of its attempts"
+            );
+            assert!(
+                worst * 4 < u64::from(GAMMA_MAX_ATTEMPTS),
+                "alpha {alpha} needed {worst} attempts against a cap of {GAMMA_MAX_ATTEMPTS}; \
+                 the cap is supposed to be unreachable, not merely large"
+            );
+        }
+    }
+
+    /// The FPU's visited-prior accounting reads the mixture too, so the classic
+    /// root selects and charges on ONE prior rather than two.
+    ///
+    /// Nothing above would notice if it did not: every other test compares a
+    /// floored search against an unfloored one, and charging `edge.prior` while
+    /// selecting on `P'` is wrong in a way that is invisible to that comparison.
+    /// This reads the accumulator directly.
+    #[test]
+    fn the_classic_roots_fpu_charges_the_same_prior_it_selects_on() {
+        let config = canonical_config();
+        let policy = sloped_policy(&config);
+        let mut search = expanded_root_with(
+            &config,
+            PuctParams {
+                simulations: 48,
+                root_mode: RootMode::Classic,
+                ..floored_params(DEFAULT_DIRICHLET_EPSILON, 5150)
+            },
+            17,
+            &policy,
+            0.1,
+        );
+        let mut features = vec![0.0_f32; NN_INPUT_PLANES * config.cells()];
+        let mut leaf_policy = vec![0.0_f32; config.policy_size()];
+        while search
+            .next_leaf(&config, &mut features)
+            .expect("the classic root runs to completion")
+        {
+            let value = crate::mock_evaluator::evaluate(&features, &mut leaf_policy);
+            search
+                .submit(&config, &leaf_policy, value)
+                .expect("the mock evaluation is well formed");
+        }
+
+        let count = search.nodes[0].edges_len as usize;
+        let visited: Vec<usize> = (0..count)
+            .filter(|index| search.edges[*index].visits > 0)
+            .collect();
+        assert!(
+            visited.len() > 3 && visited.len() < count,
+            "{} of {count} root edges were visited; this case cannot discriminate",
+            visited.len()
+        );
+
+        let charged: f64 = visited
+            .iter()
+            .map(|index| search.root_selection_priors[*index])
+            .sum();
+        let bare: f64 = visited.iter().map(|index| search.edges[*index].prior).sum();
+        assert!(
+            (search.nodes[0].visited_prior - charged).abs() < 1e-12,
+            "the root charged {} against the noised {charged}",
+            search.nodes[0].visited_prior
+        );
+        assert!(
+            (charged - bare).abs() > 1e-6,
+            "the noised and bare visited priors agree to {}, so this case cannot tell them apart",
+            (charged - bare).abs()
+        );
+    }
+
+    /// `Gamma(alpha, 1)` really is `Gamma(alpha, 1)`: mean `alpha`, variance
+    /// `alpha`. The Dirichlet is only correct if this is, and the closed form is
+    /// a stronger check than any ordering property of the normalised vector.
+    #[test]
+    fn the_gamma_sampler_matches_the_distributions_moments() {
+        for alpha in [0.02_f64, 0.15, 0.5, 0.9] {
+            let mut rng = Lcg32::new(0x5eed_1234);
+            const DRAWS: usize = 40_000;
+            let mut sum = 0.0_f64;
+            let mut square_sum = 0.0_f64;
+            for _ in 0..DRAWS {
+                let x = sample_gamma_below_one(&mut rng, alpha);
+                assert!(x.is_finite() && x >= 0.0, "Gamma({alpha}) returned {x}");
+                sum += x;
+                square_sum += x * x;
+            }
+            let mean = sum / DRAWS as f64;
+            let variance = square_sum / DRAWS as f64 - mean * mean;
+            // Standard error of the mean is sqrt(alpha / DRAWS) <= 0.005 here;
+            // the variance converges more slowly, hence the looser band.
+            assert!(
+                (mean - alpha).abs() < 0.02 * alpha.max(0.15) + 0.005,
+                "Gamma({alpha}) has mean {mean}"
+            );
+            assert!(
+                (variance - alpha).abs() < 0.15 * alpha.max(0.15),
+                "Gamma({alpha}) has variance {variance}"
+            );
+        }
+    }
+
+    /// The halving's ranking VALUES are `g + logit + qtransform`, and the
+    /// qtransform is taken over the ROOT's whole edge list.
+    ///
+    /// The test above pins which candidates survive, which is the observable
+    /// consequence; this one pins the arithmetic that produced them. `halve`
+    /// leaves the scores it kept in `self.ranking`, so they can be read back and
+    /// compared against [`root_qtransform`] — the public entry point the
+    /// improved policy and the goldens go through. Agreement to 1e-12 says the
+    /// two readers are looking at one expression, which is the property `v2`
+    /// claimed and only nearly had: it scoped `max_visits` to the survivors
+    /// while the improved policy scoped it to every edge.
+    ///
+    /// Scoping is what the second assertion is for. `mctx` computes
+    /// `completed_qvalues` once over the root and hands the same vector to
+    /// `seq_halving.score_considered` and to `action_weights`. A survivor-scoped
+    /// rescale would divide by a different span — the unconsidered actions are
+    /// completed with `v_mix` and here it sits below every candidate, so it owns
+    /// the minimum — and the test asserts the two vectors really do differ
+    /// before requiring `halve` to have used the root-scoped one.
+    #[test]
+    fn halvings_ranking_values_are_the_root_scoped_shared_expression() {
+        let config = canonical_config();
+        let mut search = expanded_root(&config, 8, 4_242, 1.0);
+        let root = search.nodes[0];
+        let start = root.edges_start as usize;
+        let end = start + root.edges_len as usize;
+        assert_eq!(search.candidates.len(), 8);
+
+        // Getting the two scopes to disagree takes a specific root, and the
+        // constraint is worth writing down. `v_mix` is a weighted average of the
+        // raw root value and the visited actions' prior-weighted mean, so it
+        // only escapes the visited Q range when the raw value is far outside it
+        // AND the total visit count is small: `v_mix > qmax` needs
+        // `raw > qmax + N * (qmax - qbar)`. And EVERY candidate has to be
+        // visited, because an unvisited candidate would put `v_mix` into the
+        // survivor-scoped vector too and the ranges would match again.
+        //
+        // So: eight candidates, one visit each, Q-values clustered in
+        // [0.2000, 0.2175] and a raw root value of 1.0. `v_mix` lands at 0.2967,
+        // above every measured Q, which makes the unconsidered actions the top
+        // of the root-scoped range -- a span of 0.09667 against the survivors'
+        // own 0.0175.
+        for index in 0..search.candidates.len() {
+            let q = 0.2 + 0.0025 * (index as f64);
+            let edge = search.candidates[index].edge as usize;
+            search.edges[edge].visits = 1;
+            search.edges[edge].value_sum = q;
+        }
+
+        let stats_of = |edges: &[Edge]| -> Vec<ActionStats> {
+            edges
+                .iter()
+                .map(|edge| ActionStats {
+                    prior: edge.prior,
+                    visits: edge.visits,
+                    qvalue: if edge.visits > 0 {
+                        edge.value_sum / f64::from(edge.visits)
+                    } else {
+                        f64::NAN
+                    },
+                })
+                .collect()
+        };
+        let whole_root =
+            root_qtransform(&stats_of(&search.edges[start..end]), search.root_value).transformed;
+        let candidate_edges: Vec<Edge> = search
+            .candidates
+            .iter()
+            .map(|candidate| search.edges[candidate.edge as usize])
+            .collect();
+        let survivor_scoped =
+            root_qtransform(&stats_of(&candidate_edges), search.root_value).transformed;
+
+        // The unconsidered actions must actually be moving the range, or the
+        // scope assertion below is comparing a vector with itself.
+        let scoped_differently = search
+            .candidates
+            .iter()
+            .enumerate()
+            .any(|(index, candidate)| {
+                (whole_root[candidate.edge as usize - start] - survivor_scoped[index]).abs() > 1e-6
+            });
+        assert!(
+            scoped_differently,
+            "the root-scoped and survivor-scoped transforms agree here, so this case cannot \
+             tell them apart"
+        );
+
+        search.halve();
+        assert_eq!(search.ranking.len(), 4, "8 survivors halve to 4");
+        for (index, score) in &search.ranking {
+            let candidate = search.candidates[*index];
+            let expected = candidate.score + whole_root[candidate.edge as usize - start];
+            assert!(
+                (score - expected).abs() < 1e-12,
+                "halve() ranked code {} at {score}, not `g + logit + qtransform` = {expected} \
+                 (the survivor-scoped transform would have given {})",
+                candidate.code,
+                candidate.score + survivor_scoped[*index]
+            );
+        }
     }
 }

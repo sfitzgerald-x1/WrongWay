@@ -53,6 +53,7 @@ fn run(simulations: u32, max_considered: u32) -> (PuctTreeSearch, Config) {
         simulations,
         max_considered,
         c_puct: 1.25,
+        ..PuctParams::default()
     };
     let root = RootContext::from_state(&config, &state).expect("root context");
     let mut tree =

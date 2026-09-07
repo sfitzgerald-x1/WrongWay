@@ -108,6 +108,8 @@ test('the NormalDuelSearch wrapper plays puctSearch\'s move', { skip: SKIP }, as
   assert.equal(states.length, 12);
 
   let compared = 0;
+  let exact = 0;
+  let diverged = 0;
   for (const [index, state] of states.entries()) {
     for (const budget of BUDGETS) {
       // One seed, two searches. `puctSearch` draws its Gumbels from a fresh
@@ -133,24 +135,55 @@ test('the NormalDuelSearch wrapper plays puctSearch\'s move', { skip: SKIP }, as
       });
 
       const where = `state ${index} at ${budget.simulations}/${budget.maxConsidered}`;
-      // The move is what the match actually plays, so it is asserted first.
-      assert.equal(rust.actionCode, js.actionCode, `actionCode: ${where}`);
+
+      // ALWAYS, because the qtransform provably cannot reach any of these and a
+      // passthrough defect would break them whatever the search decides. The action
+      // must be legal, the budget accounting must agree, and the root value must be
+      // bit-identical -- the mock's values are exact in f32, so this is equality and
+      // not a tolerance. A transposed buffer or a mask read at the wrong length shows
+      // up here regardless of which move the tree ends on.
       assert.ok(
         legalActionCodes(CONFIG, state).includes(rust.actionCode),
         `wrapper returned an illegal action: ${where}`
       );
       assert.equal(rust.simulationsUsed, js.simulationsUsed, `simulationsUsed: ${where}`);
-      // Bit-identical, not approximate: the mock's values are exact in f32.
       assert.equal(rust.rootValue, js.rootValue, `rootValue: ${where}`);
-      assert.deepEqual(
-        [...rust.visitCounts.entries()].sort((l, r) => l[0] - r[0]),
-        [...js.visitCounts.entries()].sort((l, r) => l[0] - r[0]),
-        `visitCounts: ${where}`
-      );
+
+      // The MOVE and the visit counts are halving-dependent, and since
+      // `puct-az-tree-v3` the Rust root ranks candidates with mctx's
+      // `qtransform_completed_by_mix_value` while this reference stays frozen at v1.
+      // The two therefore visit different children and can finish on different
+      // actions BY DESIGN -- the same split `rust/normal-duel-core/tests/
+      // js_puct_parity.rs` makes between its EXACT_CASES and SPLIT_CASES.
+      //
+      // At `maxConsidered === 1` the halving loop never executes, so nothing the
+      // qtransform touches can differ and the comparison stays at full strength.
+      // That case is what still proves the passthrough end to end.
+      if (budget.maxConsidered === 1) {
+        assert.equal(rust.actionCode, js.actionCode, `actionCode: ${where}`);
+        assert.deepEqual(
+          [...rust.visitCounts.entries()].sort((l, r) => l[0] - r[0]),
+          [...js.visitCounts.entries()].sort((l, r) => l[0] - r[0]),
+          `visitCounts: ${where}`
+        );
+        exact += 1;
+      } else if (rust.actionCode !== js.actionCode) {
+        diverged += 1;
+      }
       compared += 1;
     }
   }
   assert.equal(compared, 48, 'every state x budget pair must have been compared');
+  // One budget of the four runs at maxConsidered 1, so a quarter of the grid is
+  // compared at full strength. If a future budget list drops that case the
+  // passthrough would stop being proven anywhere, silently -- hence the assertion
+  // rather than a comment.
+  assert.equal(exact, 12, 'the maxConsidered=1 budget must cover a quarter of the grid');
+  // Reported, not asserted: this is the by-design v1-vs-v3 divergence, and pinning a
+  // count would make the test fail on any legitimate search change. Zero would be
+  // suspicious -- it would mean the qtransform is not reaching the ranking at all.
+  assert.ok(diverged > 0, 'no halving-dependent divergence at all: is the qtransform live?');
+  console.log(`# v1-vs-v3 halving divergence: ${diverged} of 36 multi-candidate cases`);
 });
 
 /**

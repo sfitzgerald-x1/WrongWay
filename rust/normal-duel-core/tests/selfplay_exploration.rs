@@ -4,7 +4,9 @@
 //! changing *which move is played* must not change *what is recorded*. The
 //! recorded policy target stays the search's full distribution over the state
 //! actually visited, whichever recipe chose the move — the improved policy
-//! since `puct-az-tree-v2`, the visit distribution before it. `meanTargetEntropy`
+//! since `puct-az-tree-v2`, the visit distribution before it, and since
+//! `puct-az-tree-v3` an improved policy built on the mctx qtransform rather
+//! than raw completed-Q, which is softer but the same shape. `meanTargetEntropy`
 //! in the shard workers is the production form of this check; these tests are
 //! the same assertion where it can fail the build.
 
@@ -172,7 +174,8 @@ fn visit_temperature_keeps_policy_targets_as_full_distributions() {
     assert!(argmax_multi * 10 > argmax.count * 9);
 }
 
-/// The v2 record format's own acceptance criterion, where it can fail the build.
+/// The completed-Q record format's own acceptance criterion, where it can fail
+/// the build.
 ///
 /// The visit-count target had two measurable defects on live shards: it put mass
 /// on 8.2 codes out of 40.4 legal ones, and its top two entries were
@@ -261,7 +264,7 @@ fn improved_policy_targets_cover_the_legal_moves_and_separate_the_top_two() {
         bits.len()
     };
     println!(
-        "v2 targets over {} records: mean legal {mean_legal:.1}, mean nonzero {mean_nonzero:.1}, \
+        "v3 targets over {} records: mean legal {mean_legal:.1}, mean nonzero {mean_nonzero:.1}, \
          top1==top2 {:.1}%, mean entropy {mean_entropy:.3} nats over {distinct_entropies} \
          distinct values",
         out.count,
