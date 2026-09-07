@@ -435,6 +435,12 @@ struct SelfPlayOptionsDto {
     /// no-op for a whole arm on the main-lineage build.
     #[serde(default)]
     value_mix: f64,
+    /// Replace `z` with the solver's exact value on decidable plies. Same
+    /// `deny_unknown_fields` protection as `value_mix` above: a misspelling is
+    /// refused at construction instead of quietly writing an unrescored corpus
+    /// under an arm name that claims otherwise.
+    #[serde(default)]
+    rescore_solved: bool,
     #[serde(default = "default_ply_cap")]
     ply_cap: u64,
     #[serde(default)]
@@ -465,6 +471,7 @@ impl From<SelfPlayOptionsDto> for SelfPlayOptions {
             temperature: dto.temperature,
             temperature_moves: dto.temperature_moves,
             value_mix: dto.value_mix,
+            rescore_solved: dto.rescore_solved,
             ply_cap: dto.ply_cap,
             seed_base: dto.seed_base,
             openings: dto.openings,
@@ -649,6 +656,17 @@ impl NormalDuelSelfPlayBatch {
     }
 
     /// Drain finished games into the record sink; returns the record count.
+    /// How many of this batch's records carry the solver's exact value instead of
+    /// `z`. Zero on a shard that asked for `rescoreSolved` means the lever never
+    /// fired -- most likely a staged engine without it, which ignores the key in
+    /// silence -- and that reading is the only thing separating an armed arm from
+    /// one that merely says it is. Read after `takeRecords()`.
+    #[wasm_bindgen(js_name = rescoredPlies)]
+    #[must_use]
+    pub fn rescored_plies(&self) -> u32 {
+        u32::try_from(self.inner.rescored_plies()).unwrap_or(u32::MAX)
+    }
+
     #[wasm_bindgen(js_name = takeRecords)]
     pub fn take_records(&mut self) -> usize {
         self.inner.take_records()
