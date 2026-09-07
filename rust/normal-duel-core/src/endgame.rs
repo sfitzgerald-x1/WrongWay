@@ -103,7 +103,10 @@ impl EndgameTable {
                 Some((_, plies)) => -1_000_000 + i64::from(plies),
                 None => 0,
             };
-            if best.is_none_or(|(_, current)| score > current) {
+            // `map_or`, not `is_none_or`: the latter is stable only since 1.82 and
+            // this workspace declares `rust-version = "1.77"`, so it fails both the
+            // MSRV job and `clippy::incompatible_msrv`.
+            if best.map_or(true, |(_, current)| score > current) {
                 best = Some((*code, score));
             }
         }
