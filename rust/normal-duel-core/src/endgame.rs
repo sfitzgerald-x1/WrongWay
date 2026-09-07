@@ -147,8 +147,21 @@ fn coord_of(config: &Config, index: usize) -> Coord {
 /// wall-layout hash and reuse it for every position sharing those walls.
 pub fn solve_layout(config: &Config, walls: &[String]) -> Result<EndgameTable> {
     config.validate()?;
+    solve_board(config, &Board::from_layout(config, walls)?)
+}
+
+/// [`solve_layout`] for an in-crate caller that already holds the board.
+///
+/// Crate-visible, not `pub`: `Board` is itself crate-private, so exporting this would
+/// leak a private type through a public signature. Outside callers keep `solve_layout`.
+///
+/// Self-play does: its position carries packed wall bits, and rendering those to
+/// `Vec<String>` only for `from_layout` to parse them back would be pure overhead on a
+/// path that runs once per game. Both entry points solve the same table from the same
+/// board; this one simply skips the round trip.
+pub(crate) fn solve_board(config: &Config, board: &Board) -> Result<EndgameTable> {
+    config.validate()?;
     let cells = config.cells();
-    let board = Board::from_layout(config, walls)?;
     let zero = Players { a: 0_u64, b: 0_u64 };
 
     // 1. Successors, from the engine's own move generation. At zero stock every

@@ -435,6 +435,12 @@ struct SelfPlayOptionsDto {
     /// no-op for a whole arm on the main-lineage build.
     #[serde(default)]
     value_mix: f64,
+    /// Replace `z` with the solver's exact value on decidable plies. Same
+    /// `deny_unknown_fields` protection as `value_mix` above: a misspelling is
+    /// refused at construction instead of quietly writing an unrescored corpus
+    /// under an arm name that claims otherwise.
+    #[serde(default)]
+    rescore_solved: bool,
     #[serde(default = "default_ply_cap")]
     ply_cap: u64,
     #[serde(default)]
@@ -465,6 +471,7 @@ impl From<SelfPlayOptionsDto> for SelfPlayOptions {
             temperature: dto.temperature,
             temperature_moves: dto.temperature_moves,
             value_mix: dto.value_mix,
+            rescore_solved: dto.rescore_solved,
             ply_cap: dto.ply_cap,
             seed_base: dto.seed_base,
             openings: dto.openings,

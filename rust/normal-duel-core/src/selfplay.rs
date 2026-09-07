@@ -281,6 +281,21 @@ pub struct SelfPlayOptions {
     /// check is the only thing standing between a misaligned shard and a
     /// training run that looks healthy.
     pub value_mix: f64,
+
+    /// Replace `z` with the EXACT value on plies the endgame solver can decide.
+    ///
+    /// Once both players' wall stocks are 0 the board is frozen and the rest of the
+    /// game is a solved race, which `endgame::solve_layout` decides outright. On this
+    /// pool that is roughly a quarter of all plies. `z` there is not a noisy estimate
+    /// of the truth -- it is the record of who blundered LATER, in a position whose
+    /// value was already determined, so it teaches the value head the opposite of what
+    /// the position is worth.
+    ///
+    /// This is not search distillation: the teacher is the game's own truth, not a
+    /// deeper tree. Lc0 has done the same with tablebases since Test30.
+    ///
+    /// Default `false`, which writes the byte-identical `z` every earlier corpus has.
+    pub rescore_solved: bool,
     /// Game `i` runs off `seed_base + i`, so a batch reproduces exactly.
     pub seed_base: u32,
     /// Optional forced openings as action-code sequences; game `i` uses
@@ -304,6 +319,7 @@ impl Default for SelfPlayOptions {
             temperature: 1.0,
             temperature_moves: 0,
             value_mix: 0.0,
+            rescore_solved: false,
             ply_cap: 200,
             seed_base: 0,
             openings: Vec::new(),
@@ -395,6 +411,10 @@ struct PendingPly {
     /// The search's own value for this position, mover-perspective, kept so
     /// `finish` can blend it with `z`. See [`SelfPlayOptions::value_mix`].
     searched_value: f64,
+    /// The solver's exact value for this position, mover-perspective, when the
+    /// wall stocks were both empty and the race was decidable. `None` everywhere
+    /// else. See [`SelfPlayOptions::rescore_solved`].
+    solved_value: Option<f64>,
 }
 
 #[derive(Debug)]
@@ -425,6 +445,22 @@ struct Game {
     /// Sliced by the `windowLen` column of the matching record.
     window_entries: Vec<u32>,
     codes: [u16; MAX_POLICY_CODES],
+    /// How many plies of this game had `z` replaced by an exact value.
+    ///
+    /// Not decoration. This campaign's most expensive failures are knobs that looked
+    /// armed and did nothing -- an engine staged without a fix, a flag passed as an
+    /// environment variable nothing read -- and each was invisible because no number
+    /// anywhere said how often the new path ran. A count that is zero when the arm
+    /// claims to be rescoring is the whole proof, and it is also what stops a test
+    /// from passing vacuously on a fixture where the solver never fires.
+    rescored_plies: u64,
+    /// The solved table for this game's frozen wall layout, built ONCE.
+    ///
+    /// A solve depends only on the walls, and once both stocks are empty no wall can
+    /// ever be placed again -- so the layout is final and one table serves every
+    /// remaining ply. Solving per ply would repeat identical work for the whole tail
+    /// of the game.
+    endgame: Option<crate::endgame::EndgameTable>,
 }
 
 impl Game {
@@ -447,6 +483,8 @@ impl Game {
             rng: Lcg32::new(seed),
             search: None,
             plies: Vec::new(),
+            rescored_plies: 0,
+            endgame: None,
             outcome: GameOutcome::Ongoing,
             finished: false,
             records: Vec::new(),
@@ -678,6 +716,7 @@ impl Game {
         // position that followed it.
         let mut window = self.window.entries().to_vec();
         window.sort_unstable_by_key(|(key, _)| *key);
+        let solved_value = self.solved_value(config, options);
         self.plies.push(PendingPly {
             features,
             policy_target,
@@ -688,8 +727,55 @@ impl Game {
             window,
             action_code: played,
             searched_value: result.searched_root_value,
+            solved_value,
         });
         self.play(config, played)
+    }
+
+    /// The exact mover-perspective value of the CURRENT position, when the solver
+    /// can decide it. `None` while either side still holds a wall.
+    ///
+    /// THE PLY CAP IS PART OF THE ANSWER, not a detail. `Endgame::Wins` carries the
+    /// distance to the win, and a forced win further away than the remaining plies is
+    /// not a win in the game actually being played -- it is adjudicated a draw at
+    /// `config.ply_cap`. Rescoring such a ply to +/-1 would hand the value head a
+    /// label the game itself contradicts, which is the failure this option exists to
+    /// remove rather than relocate.
+    fn solved_value(&mut self, config: &Config, options: &SelfPlayOptions) -> Option<f64> {
+        if !options.rescore_solved {
+            return None;
+        }
+        if self.position.stock.a != 0 || self.position.stock.b != 0 {
+            return None;
+        }
+        if self.endgame.is_none() {
+            // Solved once per game: the layout is frozen from here on.
+            self.endgame = crate::endgame::solve_board(config, &self.position.board()).ok();
+        }
+        let verdict =
+            self.endgame
+                .as_ref()?
+                .lookup(config, self.position.pawns, self.position.turn)?;
+        Some(match verdict {
+            crate::endgame::Endgame::Draw => 0.0,
+            crate::endgame::Endgame::Wins { player, plies } => {
+                // BOTH caps, whichever bites first. `config.ply_cap` adjudicates the
+                // position, but `options.ply_cap` STOPS the game -- a run capped at 60
+                // on a config capped at 200 never reaches ply 61, so a win 80 plies
+                // away is not a win it will ever see. Taking only the config's cap
+                // reads correctly and is wrong on every production run, since the
+                // orchestrator sets the option below the config.
+                let stop = config.ply_cap.min(options.ply_cap);
+                let remaining = stop.saturating_sub(self.ply);
+                if u64::from(plies) > remaining {
+                    0.0
+                } else if player == self.position.turn {
+                    1.0
+                } else {
+                    -1.0
+                }
+            }
+        })
     }
 
     /// Stamp `z` onto every recorded ply and flatten them into the record
@@ -721,7 +807,16 @@ impl Game {
             // [-1, 1], so the convex blend is too and no clamp can fire; the
             // trainer's range check remains the guard against a writer that
             // breaks that invariant.
-            let target = (1.0 - value_mix) * z + value_mix * ply.searched_value;
+            // An EXACT value wins over both z and the search's estimate. It is not an
+            // opinion about the position, it is the position's value, so blending it
+            // with a noisier signal could only move it away from the truth.
+            let target = match ply.solved_value {
+                Some(exact) => {
+                    self.rescored_plies += 1;
+                    exact
+                }
+                None => (1.0 - value_mix) * z + value_mix * ply.searched_value,
+            };
             self.records.push(target as f32);
             // The v1 record ends at `z`. Everything after this line is v2, and
             // it is appended rather than interleaved so the prefix a v1 consumer
@@ -1028,6 +1123,15 @@ impl SelfPlayBatch {
             self.window.append(&mut game.window_entries);
         }
         self.records.len() / RECORD_FLOATS
+    }
+
+    /// How many records across the batch carry an exact solved value instead of `z`.
+    ///
+    /// Zero on an arm that claims `rescoreSolved` means the lever never fired, which
+    /// is the reading that matters: see the field's own note on knobs that look armed.
+    #[must_use]
+    pub fn rescored_plies(&self) -> u64 {
+        self.games.iter().map(|game| game.rescored_plies).sum()
     }
 
     /// Valid until the next [`Self::take_records`].
